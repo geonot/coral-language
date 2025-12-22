@@ -1,0 +1,8 @@
+use std.runtime.actor
+
+*main()
+    a is spawn(0)
+    s is self()
+    send(a, s)
+    stop(a)
+    0

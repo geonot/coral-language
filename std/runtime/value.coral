@@ -1,0 +1,53 @@
+use std.runtime.memory
+
+VALUE_TAG_NUMBER is 0
+VALUE_TAG_BOOL is 1
+VALUE_TAG_STRING is 2
+VALUE_TAG_LIST is 3
+VALUE_TAG_MAP is 4
+VALUE_TAG_STORE is 5
+VALUE_TAG_ACTOR is 6
+VALUE_TAG_UNIT is 7
+VALUE_TAG_CLOSURE is 8
+VALUE_TAG_BYTES is 9
+
+extern fn coral_make_number(value: f64) : usize
+extern fn coral_make_bool(value: u8) : usize
+extern fn coral_make_string(p: usize, len: usize) : usize
+extern fn coral_make_bytes(p: usize, len: usize) : usize
+extern fn coral_make_unit() : usize
+extern fn coral_value_retain(value: usize)
+extern fn coral_value_release(value: usize)
+extern fn coral_value_as_number(value: usize) : f64
+extern fn coral_value_as_bool(value: usize) : u8
+extern fn coral_value_length(value: usize) : usize
+
+*number(n: f64)
+    coral_make_number(n)
+
+*bool(b)
+    coral_make_bool(b)
+
+*unit()
+    coral_make_unit()
+
+*bytes(p: usize, len: usize)
+    coral_make_bytes(p, len)
+
+*string(p: usize, len: usize)
+    coral_make_string(p, len)
+
+*retain(v: usize)
+    coral_value_retain(v)
+
+*release(v: usize)
+    coral_value_release(v)
+
+*as_number(v: usize)
+    coral_value_as_number(v)
+
+*as_bool(v: usize)
+    coral_value_as_bool(v)
+
+*len(v: usize)
+    coral_value_length(v)

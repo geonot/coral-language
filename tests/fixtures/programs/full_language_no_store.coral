@@ -1,0 +1,57 @@
+limit is 100
+threshold is 50.5
+visited is true
+
+!!Diagnostics
+    !!Connection
+        !!Timeout
+            code is 5001
+            message is 'Connection timed out'
+        !!Refused
+            code is 5002
+            message is 'Connection refused'
+
+type vector3
+    x ? 0
+    y ? 0
+    z ? 0
+
+*offset(value, base ? value)
+    base + 1
+
+*fallback(value, alt ? value)
+    alt
+
+*score(amount, bonus ? 0)
+    extras is map('extra' is bonus)
+    amount + extras.extra
+
+*main()
+    limit_local is 100
+    visited_local is true
+    name is "Coral"
+    greeting is 'Hello, {name}'
+    log(greeting)
+    excited is greeting + '!'
+    numbers is [1, 2, 3]
+    numbers.push(4)
+    removed is numbers.pop()
+    first_value is numbers.get(0)
+    remaining is numbers.length
+    config is map('mode' is 'prod', 'retries' is 3)
+    config.set('timeout', 5000)
+    retries is config.get('retries')
+    mode_value is config.mode
+    status_path is !!Diagnostics:Connection:Timeout
+    verdict is match retries
+        0 ? 'none'
+        3 ? 'steady'
+        ! 'other'
+    precise is (limit_local is 100) and visited_local
+    flag is precise or false
+    tier is flag ? 1 ! 0
+    backup is fallback(tier)
+    total is first_value + removed + remaining + retries + backup
+    adjusted is score(total, offset(total))
+    debug_text is excited + ' - ' + verdict + ' (' + status_path + ')'
+    adjusted

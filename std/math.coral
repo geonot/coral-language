@@ -1,0 +1,12 @@
+pi is 3.141592653589793
+half_pi is pi / 2
+tau is pi * 2
+
+*deg_to_rad(degrees)
+	degrees * (pi / 180)
+
+*rad_to_deg(radians)
+	radians * (180 / pi)
+
+*average(a, b)
+	(a + b) / 2

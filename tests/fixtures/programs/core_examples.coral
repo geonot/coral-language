@@ -1,0 +1,21 @@
+use std.prelude
+use std.math
+use std.bit
+use std.bytes
+
+*add(a, b)
+    a + b
+
+*celsius_to_fahrenheit(value)
+    (value * 9 / 5) + 32
+
+*main()
+    result is add(2, 3)
+    log_line('sum: ' + result)
+    angle is deg_to_rad(90)
+    log_line('angle: ' + angle)
+    celsius_to_fahrenheit(20)
+    masked is mask(result, 1)
+    log_line('masked: ' + masked)
+    bytes is b"core"
+    log_line('bytes length: ' + length(bytes))

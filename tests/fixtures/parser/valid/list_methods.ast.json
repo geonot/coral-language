@@ -1,0 +1,76 @@
+{
+  "items": [
+    {
+      "function": {
+        "body": {
+          "statements": [
+            {
+              "binding": {
+                "name": "doubled",
+                "value": {
+                  "binary": {
+                    "left": {
+                      "identifier": "value"
+                    },
+                    "op": "Mul",
+                    "right": {
+                      "integer": 2
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "value": {
+            "identifier": "doubled"
+          }
+        },
+        "kind": "Free",
+        "name": "helper",
+        "params": [
+          {
+            "default": null,
+            "name": "value"
+          }
+        ]
+      }
+    },
+    {
+      "function": {
+        "body": {
+          "statements": [
+            {
+              "binding": {
+                "name": "values",
+                "value": {
+                  "list": [
+                    {
+                      "integer": 1
+                    },
+                    {
+                      "integer": 2
+                    },
+                    {
+                      "integer": 3
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          "value": {
+            "member": {
+              "property": "length",
+              "target": {
+                "identifier": "values"
+              }
+            }
+          }
+        },
+        "kind": "Free",
+        "name": "main",
+        "params": []
+      }
+    }
+  ]
+}

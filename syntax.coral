@@ -1,0 +1,141 @@
+
+limit is 100
+threshold is 50.5
+visited is true
+
+string_literal is "Hello, Coral!"
+string_dynamic is 'Hello, {name}'
+
+STRING_CONSTANT is "all caps"
+
+fruit_list is ['apple', 'banana', 'cherry']
+
+config is map(
+    'retries' is 3,
+    'timeout' is 5000,
+    'debug' is true
+)
+
+status is 
+    connection.is_active()
+        ? 'connected'
+        ! 'offline'
+
+match response_code
+    200 ? process_success()
+    404 ? handle_missing()
+    500 ? retry_connection()
+        ! log_error('Unknown state')
+
+prices is [10.50, 20.00, 5.25]
+taxed_prices is prices.map($ * 1.15)
+total_revenue is taxed_prices.reduce(+)
+
+*calculate_margin(cost, revenue)
+    profit is revenue - cost
+    profit / revenue
+
+margin is calculate_margin(100, 150)
+
+type vector3
+
+    x ? 0
+    y ? 0
+    z ? 0
+
+    *magnitude()
+        sum is (x * x) + (y * y) + (z * z)
+        math.sqrt(sum)
+
+    *normalize()
+        mag is magnitude()
+        x is x / mag
+        y is y / mag
+        z is z / mag
+
+vec is vector3(x is 10, y is 20, z is 5)
+len is vec.magnitude()
+
+type user
+
+    username
+    password 
+
+    *user(name, pass)
+        username is name
+        password is sha.encrypt(pass, SALT)
+
+    *greet()
+        'Welcome, {name}!'
+
+store product
+
+    sku
+    name
+    price ? 0.0
+    stock ? 0
+
+    *in_stock()
+        stock.greater_than(0)
+
+store order_line
+
+    &product
+    quantity ? 1
+
+    *total()
+        product.price * quantity
+
+store order
+    id
+    items ? []
+    status ? 'pending'
+
+    *add_item(prod, qty)
+        line is order_line(product is prod, quantity is qty)
+        items.push(line)
+
+p1 is product('SKU-123', 'Widget', 19.99, 100)
+current_order is order('ORD-001')
+current_order.add_item(p1, 2)
+
+actor logger
+    log_file
+
+    @write(level, text)
+        formatted is '[{level}] {text}'
+        io.append(log_file, formatted)
+
+store actor payment_processor
+    &logger
+    gateway_url
+
+    @charge(amount, currency)
+        logger.write('INFO', 'Attempting charge: {amount} {currency}')
+        result is http.post(gateway_url, map('amt' is amount))
+        
+        result.code.equals(200)
+            ? true
+            ! false
+
+sys_log is logger('/var/log/app.log')
+stripe is payment_processor(sys_log, 'https://api.stripe.com')
+stripe.charge(99.00, 'USD')
+
+!!Database
+    !!Connection
+        !!Timeout
+            code is 5001
+            message is 'DB Connection Timed Out'
+        !!Refused
+            code is 5002
+            message is 'Connection Refused'
+    !!Query
+        !!Syntax
+            code is 4001
+            message is 'Invalid SQL'
+
+*connect_db(host)
+    host.is_empty() ? ! !!Database:Connection:Refused
+    ping(host) > 1000 ? ! !!Database:Connection:Timeout
+    true

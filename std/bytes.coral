@@ -1,0 +1,8 @@
+*concat(first, second)
+    first + second
+
+*length(value)
+    value.length
+
+*is_empty(value)
+    value.length == 0

@@ -1,0 +1,29 @@
+---
+source: tests/lexer_snapshots.rs
+expression: snapshot_tokens(BLANK_LINES)
+---
+Newline@0..1
+Identifier("root")@1..5
+KeywordIs@6..8
+Integer(0)@9..10
+Newline@10..11
+Newline@11..12
+Indent@12..12
+Identifier("child_one")@16..25
+KeywordIs@26..28
+Integer(1)@29..30
+Newline@30..31
+Newline@31..32
+Identifier("child_two")@36..45
+KeywordIs@46..48
+Integer(2)@49..50
+Newline@50..51
+Indent@51..51
+Identifier("grandchild")@59..69
+KeywordIs@70..72
+Integer(3)@73..74
+Newline@74..75
+Newline@75..76
+Dedent@76..76
+Dedent@76..76
+Eof@76..76

@@ -1,0 +1,63 @@
+
+use std.prelude
+
+extern fn coral_malloc(size: usize) : usize
+extern fn coral_free(p: usize)
+extern fn coral_memcpy(dst: usize, src: usize, len: usize) : usize
+extern fn coral_memset(dst: usize, value: u8, len: usize) : usize
+extern fn coral_ptr_add(p: usize, offset: usize) : usize
+extern fn coral_load_u8(p: usize) : u8
+extern fn coral_load_u16(p: usize) : u16
+extern fn coral_load_u32(p: usize) : u32
+extern fn coral_load_u64(p: usize) : u64
+extern fn coral_load_f64(p: usize) : f64
+extern fn coral_store_u8(p: usize, value: u8)
+extern fn coral_store_u16(p: usize, value: u16)
+extern fn coral_store_u32(p: usize, value: u32)
+extern fn coral_store_u64(p: usize, value: u64)
+extern fn coral_store_f64(p: usize, value: f64)
+
+*alloc(size: usize)
+    coral_malloc(size)
+
+*free(p: usize)
+    coral_free(p)
+
+*copy(dst: usize, src: usize, len: usize)
+    coral_memcpy(dst, src, len)
+
+*set(dst: usize, value: u8, len: usize)
+    coral_memset(dst, value, len)
+
+*add(p: usize, offset: usize)
+    coral_ptr_add(p, offset)
+
+*load8(p: usize)
+    coral_load_u8(p)
+
+*load16(p: usize)
+    coral_load_u16(p)
+
+*load32(p: usize)
+    coral_load_u32(p)
+
+*load64(p: usize)
+    coral_load_u64(p)
+
+*loadf64(p: usize)
+    coral_load_f64(p)
+
+*store8(p: usize, value: u8)
+    coral_store_u8(p, value)
+
+*store16(p: usize, value: u16)
+    coral_store_u16(p, value)
+
+*store32(p: usize, value: u32)
+    coral_store_u32(p, value)
+
+*store64(p: usize, value: u64)
+    coral_store_u64(p, value)
+
+*storef64(p: usize, value: f64)
+    coral_store_f64(p, value)

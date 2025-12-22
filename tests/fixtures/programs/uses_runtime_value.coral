@@ -1,0 +1,12 @@
+use std.runtime.value
+
+*main()
+    v is number(3.5)
+    b is bool(true)
+    retain(v)
+    retain(b)
+    n is as_number(v)
+    rb is as_bool(b)
+    release(v)
+    release(b)
+    n

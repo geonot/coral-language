@@ -1,0 +1,14 @@
+store ledger
+    balance ? 0
+
+    *deposit(amount)
+        balance is balance + amount
+
+*main()
+    log is []
+    log.push('start')
+    ledger is ledger()
+    ledger.deposit(5)
+    match ledger.balance
+        0 ? 'empty'
+        ! 'ok'

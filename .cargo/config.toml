@@ -1,0 +1,8 @@
+[alias]
+asan-test = "test -p runtime --tests --target x86_64-unknown-linux-gnu -Zsanitizer=address"
+asan-run = "run -p runtime --bin rc_stress --target x86_64-unknown-linux-gnu -Zsanitizer=address"
+miri-test = "miri test -p runtime"
+
+[env]
+# Enable stricter Miri checks when running `cargo miri-test`.
+MIRIFLAGS = "-Zmiri-strict-provenance -Zmiri-tag-raw-pointers"

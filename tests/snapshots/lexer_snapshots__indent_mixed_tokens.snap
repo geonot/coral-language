@@ -1,0 +1,6 @@
+---
+source: tests/lexer_snapshots.rs
+assertion_line: 21
+expression: "format!(\"{} @ {}..{}\", diag.message, diag.span.start, diag.span.end)"
+---
+mixed indentation (tabs and spaces) is not allowed @ 25..26

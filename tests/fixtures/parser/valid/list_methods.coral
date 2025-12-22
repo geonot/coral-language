@@ -1,0 +1,8 @@
+*helper(value)
+    doubled is value * 2
+    doubled
+
+*main()
+    values is [1, 2, 3]
+    values.push(4)
+    values.length

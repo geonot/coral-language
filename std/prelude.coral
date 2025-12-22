@@ -1,0 +1,21 @@
+*log_line(value)
+	log(value)
+	value
+
+*log_with_prefix(prefix, value)
+	message is prefix + value
+	log(message)
+	message
+
+*identity(input)
+	input
+
+*tap(value)
+	log_line(value)
+	value
+
+*when(condition, value)
+	condition ? value ! ()
+
+true_value is true
+false_value is false

@@ -1,0 +1,29 @@
+use std.prelude
+
+*mask(value, flag)
+    bit_and(value, flag)
+
+*set_flag(value, flag)
+    bit_or(value, flag)
+
+*clear_flag(value, flag)
+    bit_and(value, bit_not(flag))
+
+*toggle_flag(value, flag)
+    bit_xor(value, flag)
+
+*shift_left(value, amount)
+    bit_shl(value, amount)
+
+*shift_right(value, amount)
+    bit_shr(value, amount)
+
+*rotate_left(value, amount)
+    left is bit_shl(value, amount)
+    right is bit_shr(value, 64 - amount)
+    bit_or(left, right)
+
+*rotate_right(value, amount)
+    left is bit_shr(value, amount)
+    right is bit_shl(value, 64 - amount)
+    bit_or(left, right)

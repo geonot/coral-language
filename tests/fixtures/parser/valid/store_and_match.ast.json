@@ -1,0 +1,134 @@
+{
+  "items": [
+    {
+      "store": {
+        "fields": [
+          {
+            "default": {
+              "integer": 0
+            },
+            "is_reference": false,
+            "name": "balance"
+          }
+        ],
+        "is_actor": false,
+        "methods": [
+          {
+            "body": {
+              "statements": [
+                {
+                  "binding": {
+                    "name": "balance",
+                    "value": {
+                      "binary": {
+                        "left": {
+                          "identifier": "balance"
+                        },
+                        "op": "Add",
+                        "right": {
+                          "identifier": "amount"
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "value": null
+            },
+            "kind": "Method",
+            "name": "deposit",
+            "params": [
+              {
+                "default": null,
+                "name": "amount"
+              }
+            ]
+          }
+        ],
+        "name": "ledger"
+      }
+    },
+    {
+      "function": {
+        "body": {
+          "statements": [
+            {
+              "binding": {
+                "name": "log",
+                "value": {
+                  "list": []
+                }
+              }
+            },
+            {
+              "expression": {
+                "call": {
+                  "args": [
+                    {
+                      "string": "start"
+                    }
+                  ],
+                  "callee": {
+                    "member": {
+                      "property": "push",
+                      "target": {
+                        "identifier": "log"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "binding": {
+                "name": "ledger",
+                "value": {
+                  "call": {
+                    "args": [],
+                    "callee": {
+                      "identifier": "ledger"
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "value": {
+            "match": {
+              "arms": [
+                {
+                  "body": {
+                    "statements": [],
+                    "value": {
+                      "string": "empty"
+                    }
+                  },
+                  "pattern": {
+                    "integer": 0
+                  }
+                }
+              ],
+              "default": {
+                "statements": [],
+                "value": {
+                  "string": "ok"
+                }
+              },
+              "value": {
+                "member": {
+                  "property": "balance",
+                  "target": {
+                    "identifier": "ledger"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "kind": "Free",
+        "name": "main",
+        "params": []
+      }
+    }
+  ]
+}

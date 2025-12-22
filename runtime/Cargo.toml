@@ -1,0 +1,14 @@
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "rc_stress"
+path = "src/bin/rc_stress.rs"
+
+[dependencies]
+libc = "0.2"

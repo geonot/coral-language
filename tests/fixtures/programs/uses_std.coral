@@ -1,0 +1,7 @@
+use std.prelude
+use std.math
+
+*main()
+    greeting is log_line('from module')
+    circumference is 2 * pi
+    greeting

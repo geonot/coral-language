@@ -1,0 +1,26 @@
+use std.prelude
+
+extern fn coral_actor_spawn(handler: usize) : usize
+extern fn coral_actor_send(actor: usize, message: usize) : usize
+extern fn coral_actor_stop(actor: usize) : usize
+extern fn coral_actor_self() : usize
+extern fn coral_make_closure(fn_ptr: usize, env: usize, ctx: usize) : usize
+extern fn coral_closure_invoke(func: usize, args: usize, len: usize) : usize
+
+*spawn(handler: usize)
+    coral_actor_spawn(handler)
+
+*send(actor: usize, message: usize)
+    coral_actor_send(actor, message)
+
+*stop(actor: usize)
+    coral_actor_stop(actor)
+
+*self()
+    coral_actor_self()
+
+*make_closure(fn_ptr: usize, env: usize, ctx: usize)
+    coral_make_closure(fn_ptr, env, ctx)
+
+*call(func: usize, args_ptr: usize, len: usize)
+    coral_closure_invoke(func, args_ptr, len)

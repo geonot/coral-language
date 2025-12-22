@@ -1,0 +1,7 @@
+actor Counter
+    @increment()
+        log("increment called")
+
+
+*main()
+    make_Counter()

@@ -1,0 +1,6 @@
+use std.prelude
+use std.io
+
+*main()
+    temp is 'example.txt'
+    io.exists(temp)

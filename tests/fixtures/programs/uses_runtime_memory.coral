@@ -1,0 +1,6 @@
+use std.runtime.memory
+
+*main()
+    p is alloc(8)
+    store64(p, 42)
+    load64(p)
