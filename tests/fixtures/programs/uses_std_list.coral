@@ -1,0 +1,12 @@
+use std.prelude
+use std.list
+
+*main()
+    lst is [1, 2, 3, 4, 5]
+    mapped is map_list(lst, *fn(x) x * 2)
+    filtered is filter_list(lst, *fn(x) x > 2)
+    total is sum(lst)
+    first_elem is first(lst)
+    last_elem is last(lst)
+    length is len(lst)
+    total

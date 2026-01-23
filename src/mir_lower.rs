@@ -130,7 +130,7 @@ fn lower_expression(expr: &Expression, ng: &mut NameGen) -> (Vec<Instr>, Operand
                 BinaryOp::And => BinOp::And,
                 BinaryOp::Or => BinOp::Or,
                 BinaryOp::Equals => BinOp::Eq,
-                BinaryOp::NotEquals | BinaryOp::Greater | BinaryOp::GreaterEq | BinaryOp::Less | BinaryOp::LessEq => BinOp::Eq,
+                BinaryOp::Greater | BinaryOp::GreaterEq | BinaryOp::Less | BinaryOp::LessEq => BinOp::Eq,
                 _ => BinOp::Eq,
             };
             ls.push(Instr::BinOp { dst: dst.clone(), op: binop, lhs: lop, rhs: rop });

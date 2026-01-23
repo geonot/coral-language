@@ -108,3 +108,40 @@ fn rejects_mixed_tabs_and_spaces_in_indent() {
         Some("Choose either tabs or spaces for indentation within the same block."),
     );
 }
+
+#[test]
+fn parses_persist_store_syntax() {
+    let source = "persist store Account\n    id is 0\n    balance is 0.0\n";
+    let tokens = lexer::lex(source).expect("lexing failed");
+    let parser = Parser::new(tokens, source.len());
+    let program = parser.parse().expect("parsing failed");
+    assert_eq!(program.items.len(), 1);
+    match &program.items[0] {
+        Item::Store(store) => {
+            assert_eq!(store.name, "Account");
+            assert!(store.is_persistent, "should be marked as persistent");
+            assert!(!store.is_actor, "should not be an actor");
+            assert_eq!(store.fields.len(), 2);
+            assert_eq!(store.fields[0].name, "id");
+            assert_eq!(store.fields[1].name, "balance");
+        }
+        other => panic!("expected store definition, got {:?}", other),
+    }
+}
+
+#[test]
+fn parses_regular_store_as_non_persistent() {
+    let source = "store Ephemeral\n    data is 0\n";
+    let tokens = lexer::lex(source).expect("lexing failed");
+    let parser = Parser::new(tokens, source.len());
+    let program = parser.parse().expect("parsing failed");
+    assert_eq!(program.items.len(), 1);
+    match &program.items[0] {
+        Item::Store(store) => {
+            assert_eq!(store.name, "Ephemeral");
+            assert!(!store.is_persistent, "regular store should not be persistent");
+            assert!(!store.is_actor);
+        }
+        other => panic!("expected store definition, got {:?}", other),
+    }
+}

@@ -24,6 +24,7 @@ pub enum TokenKind {
     TemplateString(Vec<TemplateFragment>),
     KeywordType,
     KeywordStore,
+    KeywordPersist,
     KeywordActor,
     KeywordMatch,
     KeywordFn,
@@ -36,6 +37,12 @@ pub enum TokenKind {
     KeywordUnsafe,
     KeywordAsm,
     KeywordPtr,
+    KeywordEnum,
+    KeywordErr,
+    KeywordReturn,
+    KeywordTrait,
+    KeywordWith,
+    KeywordNone,
     Placeholder(u32),
     Star,
     Ampersand,
@@ -213,6 +220,17 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                 pos += ch_len;
                 line_start = true;
             }
+            '#' => {
+                // Skip comment until end of line
+                pos += ch_len;
+                while pos < len {
+                    let c = source[pos..].chars().next().unwrap();
+                    if c == '\n' {
+                        break;
+                    }
+                    pos += c.len_utf8();
+                }
+            }
             ' ' | '\t' => {
                 pos += ch_len;
             }
@@ -307,6 +325,7 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                 let kind = match slice {
                     "type" => TokenKind::KeywordType,
                     "store" => TokenKind::KeywordStore,
+                    "persist" => TokenKind::KeywordPersist,
                     "actor" => TokenKind::KeywordActor,
                     "match" => TokenKind::KeywordMatch,
                     "fn" => TokenKind::KeywordFn,
@@ -319,6 +338,12 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                     "unsafe" => TokenKind::KeywordUnsafe,
                     "asm" => TokenKind::KeywordAsm,
                     "ptr" => TokenKind::KeywordPtr,
+                    "enum" => TokenKind::KeywordEnum,
+                    "err" => TokenKind::KeywordErr,
+                    "return" => TokenKind::KeywordReturn,
+                    "trait" => TokenKind::KeywordTrait,
+                    "with" => TokenKind::KeywordWith,
+                    "none" => TokenKind::KeywordNone,
                     _ => TokenKind::Identifier(slice.to_string()),
                 };
                 tokens.push(Token::new(kind, Span::new(start, pos)));

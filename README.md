@@ -1,11 +1,24 @@
-# Coral Compiler (Rust)
+# Coral Programming Language
 
-This repository houses an experimental Coral compiler implemented in Rust. It follows the language aesthetic described in `syntax.coral`, providing a full frontend pipeline (lexer → parser → AST → semantic model) and a minimal LLVM backend using [Inkwell](https://github.com/InkwellLang/Inkwell).
+An experimental programming language combining Python-like ergonomics with C/Rust-level performance, featuring built-in actors, persistent stores, and automatic memory management.
 
-Consolidated design docs now live in:
-- `docs/alpha_overview.md` — vision, status, and language snapshot.
-- `docs/alpha_runtime_and_language_plan.md` — runtime/actor/memory/type plans.
-- `docs/alpha_roadmap.md` — delivery priorities for the alpha.
+**Status**: Pre-Alpha (102 tests passing, core features working)
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/ALPHA_ROADMAP.md](docs/ALPHA_ROADMAP.md) | Current state and path to alpha release |
+| [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) | Known issues and technical debt |
+| [docs/STANDARD_LIBRARY_SPEC.md](docs/STANDARD_LIBRARY_SPEC.md) | Standard library specification |
+| [docs/ACTOR_SYSTEM_COMPLETION.md](docs/ACTOR_SYSTEM_COMPLETION.md) | Actor system completion plan |
+| [docs/PERSISTENT_STORE_SPEC.md](docs/PERSISTENT_STORE_SPEC.md) | Persistent storage specification |
+| [docs/SELF_HOSTED_COMPILER_SPEC.md](docs/SELF_HOSTED_COMPILER_SPEC.md) | Self-hosting compiler spec |
+| [docs/SELF_HOSTED_RUNTIME_SPEC.md](docs/SELF_HOSTED_RUNTIME_SPEC.md) | Self-hosting runtime spec |
+
+## Implementation
+
+The compiler is implemented in Rust with LLVM backend via [Inkwell](https://github.com/InkwellLang/Inkwell).
 
 ## Features
 

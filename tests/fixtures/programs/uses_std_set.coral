@@ -1,0 +1,13 @@
+use std.prelude
+use std.set
+
+*main()
+    s is empty_set()
+    s1 is add(s, 1)
+    s2 is add(s1, 2)
+    s3 is add(s2, 3)
+    has1 is has(s3, 1)
+    has5 is has(s3, 5)
+    sz is size(s3)
+    elems is elements(s3)
+    sz

@@ -2,6 +2,40 @@ mod map_hash;
 mod rc_deferred;
 mod module_registry;
 mod actor;
+mod memory_ops;
+mod store;
+mod weak_ref;
+mod cycle_detector;
+mod symbol;
+
+// Re-export memory operations for FFI
+pub use memory_ops::*;
+pub use store::{
+    StoreEngine, SharedStoreEngine, StoredValue, StoreConfig,
+    open_store_engine, save_all_engines, close_engine,
+    // FFI functions
+    coral_store_open, coral_store_close, coral_store_save_all,
+    coral_store_create, coral_store_get_by_index, coral_store_get_by_uuid,
+    coral_store_update, coral_store_soft_delete, coral_store_stats,
+    coral_store_count, coral_store_persist, coral_store_checkpoint,
+    coral_store_all_indices,
+};
+pub use weak_ref::{
+    WeakRef, notify_value_deallocated, weak_ref_count,
+    coral_make_weak_ref, coral_weak_ref_upgrade, coral_weak_ref_is_alive,
+    coral_weak_ref_release, coral_weak_ref_clone,
+};
+pub use cycle_detector::{
+    collect_cycles, possible_root, cycle_stats, reset_cycle_detector,
+    coral_collect_cycles, coral_cycles_detected, coral_cycle_values_collected,
+    coral_cycle_roots_count,
+};
+pub use symbol::{
+    SymbolId, SymbolTable, global_symbols, intern, resolve,
+    coral_symbol_intern, coral_symbol_lookup, coral_symbol_resolve,
+    coral_symbol_equals, coral_symbol_count,
+};
+
 use libc::{free, malloc};
 use std::cell::RefCell;
 use std::env;
@@ -19,14 +53,37 @@ use std::thread_local;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use module_registry::{Capability, RuntimeModule, RuntimeModuleRegistry, registry as runtime_module_registry};
-pub use actor::{ActorId, ActorHandle, ActorSystem, Message as ActorMessage, current_actor, global_system};
+pub use actor::{
+    ActorId, ActorHandle, ActorSystem, ActorConfig, ActorContext,
+    Message as ActorMessage, SendResult, MailboxStats,
+    current_actor, global_system, get_mailbox_stats,
+    DEFAULT_MAILBOX_CAPACITY,
+};
 
 const FLAG_INLINE_STRING: u8 = 0b0000_0001;
 const FLAG_LIST_ITER: u8 = 0b0000_0010;
 const FLAG_MAP_ITER: u8 = 0b0000_0100;
 const FLAG_FROZEN: u8 = 0b0000_1000;
+/// Value represents an error state - payload points to ErrorMetadata
+const FLAG_ERR: u8 = 0b0001_0000;
+/// Value is logically absent/None/missing
+const FLAG_ABSENT: u8 = 0b0010_0000;
 const PAGE_SIZE: usize = 4096;
 const VALUE_POOL_LIMIT: usize = 8192;
+
+/// Error metadata stored when FLAG_ERR is set on a value.
+/// The error value's payload.ptr points to this struct.
+#[repr(C)]
+pub struct ErrorMetadata {
+    /// Numeric error code (user-defined or 0 for anonymous errors)
+    pub code: u32,
+    /// Reserved for future use (alignment)
+    pub _reserved: u32,
+    /// Error name as a string value (e.g., "NotFound", "Connection:Timeout")
+    pub name: ValueHandle,
+    /// Origin span ID for error tracing (0 if unknown)
+    pub origin_span: u64,
+}
 
 /// Placeholder for an actor-ready header; currently unused but reserved for atomic RC adoption.
 #[repr(C)]
@@ -154,6 +211,20 @@ struct ClosureObject {
     env: *mut c_void,
 }
 
+/// Tagged value for ADT (algebraic data type / sum type) variants.
+/// Stores a tag (variant identifier) and a list of field values.
+#[repr(C)]
+pub struct TaggedValue {
+    /// The tag/discriminant identifying which variant this is.
+    /// This is a string pointer to the variant name (e.g., "Some", "None").
+    pub tag_name: *const u8,
+    pub tag_name_len: usize,
+    /// Number of fields in this variant.
+    pub field_count: usize,
+    /// Pointer to array of field values (ValueHandle pointers).
+    pub fields: *mut ValueHandle,
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueTag {
@@ -167,6 +238,9 @@ pub enum ValueTag {
     Unit = 7,
     Closure = 8,
     Bytes = 9,
+    /// Tagged value for ADT (sum type) variants
+    /// Payload points to TaggedValue struct
+    Tagged = 10,
 }
 
 #[repr(C)]
@@ -188,13 +262,14 @@ pub struct Value {
     pub tag: u8,
     pub flags: u8,
     pub reserved: u16,
-    pub refcount: u64,
+    /// Reference count - uses atomic operations for thread-safe actor sharing.
+    pub refcount: AtomicU64,
     pub retain_events: u32,
     pub release_events: u32,
     pub payload: Payload,
 }
 
-// Safety: Values are managed by refcounting and only shared across threads as frozen handles.
+// Safety: Values are managed by atomic refcounting and only shared across threads as frozen handles.
 unsafe impl Send for Value {}
 unsafe impl Sync for Value {}
 
@@ -204,7 +279,7 @@ impl Clone for Value {
             tag: self.tag,
             flags: self.flags,
             reserved: self.reserved,
-            refcount: self.refcount,
+            refcount: AtomicU64::new(self.refcount.load(Ordering::Relaxed)),
             retain_events: self.retain_events,
             release_events: self.release_events,
             payload: self.payload,
@@ -218,7 +293,7 @@ impl Value {
             tag: ValueTag::Unit as u8,
             flags: 0,
             reserved: 0,
-            refcount: 1,
+            refcount: AtomicU64::new(1),
             retain_events: 0,
             release_events: 0,
             payload: Payload { inline: [0; 16] },
@@ -230,7 +305,7 @@ impl Value {
             tag: ValueTag::Number as u8,
             flags: 0,
             reserved: 0,
-            refcount: 1,
+            refcount: AtomicU64::new(1),
             retain_events: 0,
             release_events: 0,
             payload: Payload { number: value },
@@ -245,7 +320,7 @@ impl Value {
             tag: ValueTag::Bool as u8,
             flags: 0,
             reserved: 0,
-            refcount: 1,
+            refcount: AtomicU64::new(1),
             retain_events: 0,
             release_events: 0,
             payload: Payload { inline },
@@ -257,7 +332,7 @@ impl Value {
             tag: tag as u8,
             flags: 0,
             reserved: 0,
-            refcount: 1,
+            refcount: AtomicU64::new(1),
             retain_events: 0,
             release_events: 0,
             payload: Payload { ptr },
@@ -269,7 +344,7 @@ impl Value {
             tag: tag as u8,
             flags,
             reserved: 0,
-            refcount: 1,
+            refcount: AtomicU64::new(1),
             retain_events: 0,
             release_events: 0,
             payload: Payload { ptr },
@@ -284,7 +359,7 @@ impl Value {
             tag: ValueTag::String as u8,
             flags: FLAG_INLINE_STRING | ((bytes.len() as u8) << 1),
             reserved: 0,
-            refcount: 1,
+            refcount: AtomicU64::new(1),
             retain_events: 0,
             release_events: 0,
             payload: Payload { inline },
@@ -297,6 +372,59 @@ impl Value {
 
     fn heap_ptr(&self) -> *mut c_void {
         unsafe { self.payload.ptr }
+    }
+
+    /// Returns true if this value represents an error state.
+    #[inline]
+    fn is_err(&self) -> bool {
+        (self.flags & FLAG_ERR) != 0
+    }
+
+    /// Returns true if this value is logically absent/None.
+    #[inline]
+    fn is_absent(&self) -> bool {
+        (self.flags & FLAG_ABSENT) != 0
+    }
+
+    /// Returns true if this value is neither an error nor absent.
+    #[inline]
+    fn is_ok(&self) -> bool {
+        (self.flags & (FLAG_ERR | FLAG_ABSENT)) == 0
+    }
+
+    /// Create an error value with the given metadata.
+    fn error(metadata: *mut ErrorMetadata) -> Self {
+        Self {
+            tag: ValueTag::Unit as u8,  // Error values have unit as base type
+            flags: FLAG_ERR,
+            reserved: 0,
+            refcount: AtomicU64::new(1),
+            retain_events: 0,
+            release_events: 0,
+            payload: Payload { ptr: metadata as *mut c_void },
+        }
+    }
+
+    /// Create an absent/None value.
+    fn absent() -> Self {
+        Self {
+            tag: ValueTag::Unit as u8,
+            flags: FLAG_ABSENT,
+            reserved: 0,
+            refcount: AtomicU64::new(1),
+            retain_events: 0,
+            release_events: 0,
+            payload: Payload { inline: [0; 16] },
+        }
+    }
+
+    /// Get error metadata if this is an error value.
+    fn error_metadata(&self) -> Option<&ErrorMetadata> {
+        if self.is_err() {
+            unsafe { Some(&*(self.payload.ptr as *const ErrorMetadata)) }
+        } else {
+            None
+        }
     }
 }
 
@@ -329,7 +457,7 @@ fn recycle_value_box(handle: ValueHandle) -> bool {
         }
         if slots.0.len() < VALUE_POOL_LIMIT {
             unsafe {
-                (*handle).refcount = 0;
+                (*handle).refcount.store(0, Ordering::Relaxed);
                 (*handle).retain_events = 0;
                 (*handle).release_events = 0;
             }
@@ -405,8 +533,9 @@ struct BytesObject {
     data: Vec<u8>,
 }
 
-struct ListObject {
-    items: Vec<ValueHandle>,
+// Made pub(crate) for cycle_detector access
+pub(crate) struct ListObject {
+    pub(crate) items: Vec<ValueHandle>,
 }
 
 struct ListIter {
@@ -422,19 +551,20 @@ pub struct MapEntry {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-enum MapBucketState {
+// Made pub(crate) for cycle_detector access
+pub(crate) enum MapBucketState {
     Empty,
     Tombstone,
     Occupied,
 }
 
+// Made pub(crate) for cycle_detector access
 #[derive(Clone)]
-struct MapBucket {
-    state: MapBucketState,
-    hash: u64,
-    key: ValueHandle,
-    value: ValueHandle,
+pub(crate) struct MapBucket {
+    pub(crate) state: MapBucketState,
+    pub(crate) hash: u64,
+    pub(crate) key: ValueHandle,
+    pub(crate) value: ValueHandle,
 }
 
 impl Default for MapBucket {
@@ -448,9 +578,10 @@ impl Default for MapBucket {
     }
 }
 
-struct MapObject {
-    buckets: Vec<MapBucket>,
-    len: usize,
+// Made pub(crate) for cycle_detector access
+pub(crate) struct MapObject {
+    pub(crate) buckets: Vec<MapBucket>,
+    pub(crate) len: usize,
     tombstones: usize,
 }
 
@@ -520,6 +651,23 @@ fn alloc_map(entries: &[MapEntry]) -> *mut c_void {
 }
 
 unsafe fn drop_heap_value(value: &mut Value) {
+    // First, handle error metadata cleanup (regardless of tag)
+    if value.is_err() {
+        let ptr = value.heap_ptr();
+        if !ptr.is_null() {
+            unsafe {
+                let metadata = Box::from_raw(ptr as *mut ErrorMetadata);
+                // Release the error name string
+                if !metadata.name.is_null() {
+                    coral_value_release(metadata.name);
+                }
+            }
+        }
+        // Clear the error flag and reset
+        *value = Value::unit();
+        return;
+    }
+    
     match ValueTag::try_from(value.tag) {
         Ok(ValueTag::String) => {
             if !value.is_inline_string() {
@@ -600,6 +748,30 @@ unsafe fn drop_heap_value(value: &mut Value) {
                 drop(Box::from_raw(ptr as *mut ActorObject));
             }
         }
+        Ok(ValueTag::Tagged) => {
+            let ptr = value.heap_ptr();
+            if ptr.is_null() {
+                return;
+            }
+            unsafe {
+                let tagged = Box::from_raw(ptr as *mut TaggedValue);
+                // Release all field values
+                for i in 0..tagged.field_count {
+                    let field = *tagged.fields.add(i);
+                    if !field.is_null() {
+                        coral_value_release(field);
+                    }
+                }
+                // Free the fields array if not empty
+                if tagged.field_count > 0 && !tagged.fields.is_null() {
+                    drop(Vec::from_raw_parts(
+                        tagged.fields,
+                        tagged.field_count,
+                        tagged.field_count,
+                    ));
+                }
+            }
+        }
         _ => {}
     }
     *value = Value::unit();
@@ -620,6 +792,7 @@ impl TryFrom<u8> for ValueTag {
             7 => Ok(ValueTag::Unit),
             8 => Ok(ValueTag::Closure),
             9 => Ok(ValueTag::Bytes),
+            10 => Ok(ValueTag::Tagged),
             _ => Err(()),
         }
     }
@@ -663,6 +836,12 @@ fn string_to_bytes(value: &Value) -> Vec<u8> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Convert a string Value to a Rust String.
+fn value_to_rust_string(value: &Value) -> String {
+    let bytes = string_to_bytes(value);
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 fn number_to_i64(value: &Value) -> i64 {
@@ -814,6 +993,40 @@ fn value_deep_clone(handle: ValueHandle) -> ValueHandle {
             // Stores are not implemented; share by retain to avoid lossy copies.
             unsafe { coral_value_retain(handle) };
             handle
+        }
+        Ok(ValueTag::Tagged) => {
+            // Deep clone a tagged value by cloning its fields
+            let ptr = value.heap_ptr();
+            if ptr.is_null() {
+                return coral_make_unit();
+            }
+            let tagged = unsafe { &*(ptr as *const TaggedValue) };
+            
+            // Clone fields
+            let mut cloned_fields: Vec<ValueHandle> = Vec::with_capacity(tagged.field_count);
+            for i in 0..tagged.field_count {
+                if !tagged.fields.is_null() {
+                    let field = unsafe { *tagged.fields.add(i) };
+                    cloned_fields.push(value_deep_clone(field));
+                }
+            }
+            
+            // Create new tagged value
+            let result = coral_make_tagged(
+                tagged.tag_name,
+                tagged.tag_name_len,
+                if cloned_fields.is_empty() { std::ptr::null() } else { cloned_fields.as_ptr() },
+                cloned_fields.len(),
+            );
+            
+            // Release cloned fields (coral_make_tagged retains them)
+            unsafe {
+                for h in cloned_fields {
+                    coral_value_release(h);
+                }
+            }
+            
+            result
         }
         Err(_) => coral_make_unit(),
     }
@@ -1347,6 +1560,156 @@ pub extern "C" fn coral_make_bytes(ptr: *const u8, len: usize) -> ValueHandle {
     alloc_value(Value::from_heap(ValueTag::Bytes, handle))
 }
 
+// ============================================================================
+// Error Value Functions
+// ============================================================================
+
+/// Create an error value with the given code and name.
+/// 
+/// # Arguments
+/// * `code` - Numeric error code (0 for anonymous errors)
+/// * `name_ptr` - Pointer to UTF-8 error name string (e.g., "NotFound")
+/// * `name_len` - Length of the name string in bytes
+/// 
+/// # Returns
+/// A new error value with the ERR flag set
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_make_error(code: u32, name_ptr: *const u8, name_len: usize) -> ValueHandle {
+    // Create the error name as a string value
+    let name_handle = coral_make_string(name_ptr, name_len);
+    
+    // Allocate error metadata
+    let metadata = Box::new(ErrorMetadata {
+        code,
+        _reserved: 0,
+        name: name_handle,
+        origin_span: 0,
+    });
+    
+    record_heap_bytes(std::mem::size_of::<ErrorMetadata>());
+    alloc_value(Value::error(Box::into_raw(metadata)))
+}
+
+/// Create an error value with the given code, name, and origin span.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_make_error_with_span(
+    code: u32,
+    name_ptr: *const u8,
+    name_len: usize,
+    origin_span: u64,
+) -> ValueHandle {
+    let name_handle = coral_make_string(name_ptr, name_len);
+    
+    let metadata = Box::new(ErrorMetadata {
+        code,
+        _reserved: 0,
+        name: name_handle,
+        origin_span,
+    });
+    
+    record_heap_bytes(std::mem::size_of::<ErrorMetadata>());
+    alloc_value(Value::error(Box::into_raw(metadata)))
+}
+
+/// Create an absent/None value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_make_absent() -> ValueHandle {
+    alloc_value(Value::absent())
+}
+
+/// Check if a value is an error.
+/// Returns 1 if the value has the ERR flag set, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_is_err(value: ValueHandle) -> u8 {
+    if value.is_null() {
+        return 0;
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.is_err() { 1 } else { 0 }
+}
+
+/// Check if a value is absent/None.
+/// Returns 1 if the value has the ABSENT flag set, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_is_absent(value: ValueHandle) -> u8 {
+    if value.is_null() {
+        return 0;
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.is_absent() { 1 } else { 0 }
+}
+
+/// Check if a value is ok (neither error nor absent).
+/// Returns 1 if the value is ok, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_is_ok(value: ValueHandle) -> u8 {
+    if value.is_null() {
+        return 0;
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.is_ok() { 1 } else { 0 }
+}
+
+/// Get the error name from an error value.
+/// Returns the error name string, or unit if not an error.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_error_name(value: ValueHandle) -> ValueHandle {
+    if value.is_null() {
+        return coral_make_unit();
+    }
+    let value_ref = unsafe { &*value };
+    if let Some(metadata) = value_ref.error_metadata() {
+        unsafe { coral_value_retain(metadata.name); }
+        metadata.name
+    } else {
+        coral_make_unit()
+    }
+}
+
+/// Get the error code from an error value.
+/// Returns the error code, or 0 if not an error.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_error_code(value: ValueHandle) -> u32 {
+    if value.is_null() {
+        return 0;
+    }
+    let value_ref = unsafe { &*value };
+    if let Some(metadata) = value_ref.error_metadata() {
+        metadata.code
+    } else {
+        0
+    }
+}
+
+/// Return the value if ok, or the default if error/absent.
+/// This retains the returned value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_value_or(value: ValueHandle, default: ValueHandle) -> ValueHandle {
+    if value.is_null() {
+        unsafe { coral_value_retain(default); }
+        return default;
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.is_ok() {
+        unsafe { coral_value_retain(value); }
+        value
+    } else {
+        unsafe { coral_value_retain(default); }
+        default
+    }
+}
+
+/// Unwrap the value or return the default.
+/// Same as coral_value_or but named for familiarity.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_unwrap_or(value: ValueHandle, default: ValueHandle) -> ValueHandle {
+    coral_value_or(value, default)
+}
+
+// ============================================================================
+// End Error Value Functions
+// ============================================================================
+
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_bytes_length(value: ValueHandle) -> ValueHandle {
     if value.is_null() {
@@ -1446,6 +1809,171 @@ pub extern "C" fn coral_make_unit() -> ValueHandle {
     alloc_value(Value::unit())
 }
 
+/// Create a tagged value (ADT variant).
+/// 
+/// # Arguments
+/// * `tag_name` - Pointer to the tag name string (e.g., "Some", "None")
+/// * `tag_name_len` - Length of the tag name string
+/// * `fields` - Pointer to array of field values
+/// * `field_count` - Number of fields
+/// 
+/// # Returns
+/// A ValueHandle to the tagged value
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_make_tagged(
+    tag_name: *const u8,
+    tag_name_len: usize,
+    fields: *const ValueHandle,
+    field_count: usize,
+) -> ValueHandle {
+    // Copy the fields array
+    let fields_vec = if field_count > 0 && !fields.is_null() {
+        let slice = unsafe { slice::from_raw_parts(fields, field_count) };
+        // Retain all field values
+        for field in slice {
+            if !field.is_null() {
+                unsafe { coral_value_retain(*field) };
+            }
+        }
+        slice.to_vec()
+    } else {
+        Vec::new()
+    };
+    
+    let fields_ptr = if fields_vec.is_empty() {
+        ptr::null_mut()
+    } else {
+        let mut boxed = fields_vec.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
+        ptr
+    };
+    
+    let tagged = Box::new(TaggedValue {
+        tag_name,
+        tag_name_len,
+        field_count,
+        fields: fields_ptr,
+    });
+    
+    let value = Value {
+        tag: ValueTag::Tagged as u8,
+        flags: 0,
+        reserved: 0,
+        refcount: AtomicU64::new(1),
+        retain_events: 0,
+        release_events: 0,
+        payload: Payload { ptr: Box::into_raw(tagged) as *mut c_void },
+    };
+    
+    alloc_value(value)
+}
+
+/// Get the tag name of a tagged value.
+/// 
+/// # Returns
+/// A string ValueHandle containing the tag name, or Unit if not a tagged value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_tagged_get_tag(value: ValueHandle) -> ValueHandle {
+    if value.is_null() {
+        return coral_make_unit();
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.tag != ValueTag::Tagged as u8 {
+        return coral_make_unit();
+    }
+    let ptr = value_ref.heap_ptr();
+    if ptr.is_null() {
+        return coral_make_unit();
+    }
+    let tagged = unsafe { &*(ptr as *const TaggedValue) };
+    coral_make_string(tagged.tag_name, tagged.tag_name_len)
+}
+
+/// Check if a tagged value has a specific tag.
+/// 
+/// # Returns
+/// A bool ValueHandle (true if tag matches, false otherwise).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_tagged_is_tag(
+    value: ValueHandle,
+    tag_name: *const u8,
+    tag_name_len: usize,
+) -> ValueHandle {
+    if value.is_null() {
+        return coral_make_bool(0);
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.tag != ValueTag::Tagged as u8 {
+        return coral_make_bool(0);
+    }
+    let ptr = value_ref.heap_ptr();
+    if ptr.is_null() {
+        return coral_make_bool(0);
+    }
+    let tagged = unsafe { &*(ptr as *const TaggedValue) };
+    
+    if tagged.tag_name_len != tag_name_len {
+        return coral_make_bool(0);
+    }
+    
+    let stored = unsafe { slice::from_raw_parts(tagged.tag_name, tagged.tag_name_len) };
+    let check = unsafe { slice::from_raw_parts(tag_name, tag_name_len) };
+    
+    coral_make_bool(if stored == check { 1 } else { 0 })
+}
+
+/// Get a field from a tagged value by index.
+/// 
+/// # Returns
+/// The field ValueHandle, or Unit if out of bounds or not a tagged value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_tagged_get_field(value: ValueHandle, index: usize) -> ValueHandle {
+    if value.is_null() {
+        return coral_make_unit();
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.tag != ValueTag::Tagged as u8 {
+        return coral_make_unit();
+    }
+    let ptr = value_ref.heap_ptr();
+    if ptr.is_null() {
+        return coral_make_unit();
+    }
+    let tagged = unsafe { &*(ptr as *const TaggedValue) };
+    
+    if index >= tagged.field_count || tagged.fields.is_null() {
+        return coral_make_unit();
+    }
+    
+    let field = unsafe { *tagged.fields.add(index) };
+    if !field.is_null() {
+        unsafe { coral_value_retain(field) };
+    }
+    field
+}
+
+/// Get the number of fields in a tagged value.
+/// 
+/// # Returns
+/// A number ValueHandle with the field count, or 0 if not a tagged value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_tagged_field_count(value: ValueHandle) -> ValueHandle {
+    if value.is_null() {
+        return coral_make_number(0.0);
+    }
+    let value_ref = unsafe { &*value };
+    if value_ref.tag != ValueTag::Tagged as u8 {
+        return coral_make_number(0.0);
+    }
+    let ptr = value_ref.heap_ptr();
+    if ptr.is_null() {
+        return coral_make_number(0.0);
+    }
+    let tagged = unsafe { &*(ptr as *const TaggedValue) };
+    coral_make_number(tagged.field_count as f64)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_log(value: ValueHandle) -> ValueHandle {
     if value.is_null() {
@@ -1477,6 +2005,52 @@ pub extern "C" fn coral_log(value: ValueHandle) -> ValueHandle {
             println!("[bytes {hex}]");
         }
         Ok(ValueTag::Unit) => println!("()"),
+        Ok(ValueTag::Tagged) => {
+            let ptr = value_ref.heap_ptr();
+            if !ptr.is_null() {
+                let tagged = unsafe { &*(ptr as *const TaggedValue) };
+                let tag_name = unsafe {
+                    let slice = slice::from_raw_parts(tagged.tag_name, tagged.tag_name_len);
+                    String::from_utf8_lossy(slice).to_string()
+                };
+                if tagged.field_count == 0 {
+                    println!("{tag_name}");
+                } else {
+                    print!("{tag_name}(");
+                    for i in 0..tagged.field_count {
+                        if i > 0 {
+                            print!(", ");
+                        }
+                        let field = unsafe { *tagged.fields.add(i) };
+                        if field.is_null() {
+                            print!("()");
+                        } else {
+                            // Print field value inline (simplified)
+                            let field_ref = unsafe { &*field };
+                            match ValueTag::try_from(field_ref.tag) {
+                                Ok(ValueTag::Number) => {
+                                    let n = unsafe { field_ref.payload.number };
+                                    print!("{n}");
+                                }
+                                Ok(ValueTag::Bool) => {
+                                    let b = unsafe { field_ref.payload.inline[0] } & 1;
+                                    print!("{}", if b != 0 { "true" } else { "false" });
+                                }
+                                Ok(ValueTag::String) => {
+                                    let bytes = string_to_bytes(field_ref);
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    print!("\"{text}\"");
+                                }
+                                _ => print!("<value>"),
+                            }
+                        }
+                    }
+                    println!(")");
+                }
+            } else {
+                println!("<tagged:null>");
+            }
+        }
         _ => println!("<value tag {}>", value_ref.tag),
     }
     coral_make_unit()
@@ -1616,6 +2190,17 @@ pub extern "C" fn coral_actor_spawn(handler: ValueHandle) -> ValueHandle {
                     }
                     break;
                 }
+                Some(actor::Message::ChildFailure { child_id, reason }) => {
+                    // Supervision: handle child failure - by default, propagate to parent
+                    if let Some(parent) = ctx.parent() {
+                        if let Ok(reg) = ctx.system().registry.lock() {
+                            if let Some(entry) = reg.get(&parent) {
+                                let parent_handle = ActorHandle { id: parent, sender: entry.sender.clone() };
+                                let _ = ctx.system().send(&parent_handle, actor::Message::ChildFailure { child_id, reason });
+                            }
+                        }
+                    }
+                }
             }
         }
         unsafe { coral_value_release(self_value); }
@@ -1673,6 +2258,347 @@ pub extern "C" fn coral_actor_self() -> ValueHandle {
     } else {
         coral_make_unit()
     }
+}
+
+// ========== Named Actor Registry FFI ==========
+
+/// Spawn a named actor. Returns the actor value or unit if name is already taken.
+/// name_value: String value containing the actor name
+/// handler: Closure to handle messages
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_spawn_named(name_value: ValueHandle, handler: ValueHandle) -> ValueHandle {
+    if name_value.is_null() || handler.is_null() {
+        return coral_make_unit();
+    }
+    
+    // Extract name string
+    let name = {
+        let name_val = unsafe { &*name_value };
+        if name_val.tag != ValueTag::String as u8 {
+            return coral_make_unit();
+        }
+        value_to_rust_string(name_val)
+    };
+    
+    let value = unsafe { &*handler };
+    if value.tag != ValueTag::Closure as u8 {
+        return coral_make_unit();
+    }
+    unsafe {
+        coral_value_retain(handler);
+    }
+    
+    let handler_bits = handler as usize;
+    let system = actor::global_system().clone();
+    let parent = actor::current_actor();
+    
+    let maybe_handle = system.spawn_named(&name, parent, move |ctx| {
+        let handler = handler_bits as ValueHandle;
+        let self_value = actor_to_value(ctx.handle(), ctx.system());
+        loop {
+            match ctx.recv() {
+                Some(actor::Message::User(msg)) => {
+                    let args = [self_value, msg];
+                    let result = coral_closure_invoke(handler, args.as_ptr(), args.len());
+                    unsafe { coral_value_release(result); }
+                    unsafe { coral_value_release(msg); }
+                }
+                Some(actor::Message::Exit) | None => break,
+                Some(actor::Message::Failure(reason)) => {
+                    if let Some(parent) = ctx.parent() {
+                        if let Ok(reg) = ctx.system().registry.lock() {
+                            if let Some(entry) = reg.get(&parent) {
+                                let parent_handle = ActorHandle { id: parent, sender: entry.sender.clone() };
+                                let _ = ctx.system().send(&parent_handle, actor::Message::Failure(reason));
+                            }
+                        }
+                    }
+                    break;
+                }
+                Some(actor::Message::ChildFailure { child_id, reason }) => {
+                    // Supervision: handle child failure - by default, propagate to parent
+                    if let Some(parent) = ctx.parent() {
+                        if let Ok(reg) = ctx.system().registry.lock() {
+                            if let Some(entry) = reg.get(&parent) {
+                                let parent_handle = ActorHandle { id: parent, sender: entry.sender.clone() };
+                                let _ = ctx.system().send(&parent_handle, actor::Message::ChildFailure { child_id, reason });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { coral_value_release(self_value); }
+        unsafe { coral_value_release(handler); }
+    });
+    
+    match maybe_handle {
+        Some(handle) => actor_to_value(handle, system),
+        None => {
+            // Name was already taken
+            unsafe { coral_value_release(handler); }
+            coral_make_unit()
+        }
+    }
+}
+
+/// Look up an actor by name. Returns the actor value or unit if not found.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_lookup(name_value: ValueHandle) -> ValueHandle {
+    if name_value.is_null() {
+        return coral_make_unit();
+    }
+    
+    let name = {
+        let name_val = unsafe { &*name_value };
+        if name_val.tag != ValueTag::String as u8 {
+            return coral_make_unit();
+        }
+        value_to_rust_string(name_val)
+    };
+    
+    let system = actor::global_system();
+    match system.lookup_named(&name) {
+        Some(handle) => actor_to_value(handle, system.clone()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Register the current actor with a name. Returns true on success, false if name taken.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_register(name_value: ValueHandle) -> ValueHandle {
+    if name_value.is_null() {
+        return coral_make_bool(0);
+    }
+    
+    let Some(id) = actor::current_actor() else {
+        return coral_make_bool(0);
+    };
+    
+    let name = {
+        let name_val = unsafe { &*name_value };
+        if name_val.tag != ValueTag::String as u8 {
+            return coral_make_bool(0);
+        }
+        value_to_rust_string(name_val)
+    };
+    
+    let system = actor::global_system();
+    
+    // Get the current actor's handle
+    let maybe_handle = system
+        .registry
+        .lock()
+        .ok()
+        .and_then(|reg| reg.get(&id).map(|entry| ActorHandle { id, sender: entry.sender.clone() }));
+    
+    if let Some(handle) = maybe_handle {
+        let success = system.register_named(&name, handle);
+        coral_make_bool(if success { 1 } else { 0 })
+    } else {
+        coral_make_bool(0)
+    }
+}
+
+/// Unregister a named actor. Returns true if the name existed.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_unregister(name_value: ValueHandle) -> ValueHandle {
+    if name_value.is_null() {
+        return coral_make_bool(0);
+    }
+    
+    let name = {
+        let name_val = unsafe { &*name_value };
+        if name_val.tag != ValueTag::String as u8 {
+            return coral_make_bool(0);
+        }
+        value_to_rust_string(name_val)
+    };
+    
+    let system = actor::global_system();
+    let success = system.unregister_named(&name);
+    coral_make_bool(if success { 1 } else { 0 })
+}
+
+/// Send a message to a named actor. Returns true on success, false if actor not found.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_send_named(name_value: ValueHandle, message: ValueHandle) -> ValueHandle {
+    if name_value.is_null() {
+        return coral_make_bool(0);
+    }
+    
+    let name = {
+        let name_val = unsafe { &*name_value };
+        if name_val.tag != ValueTag::String as u8 {
+            return coral_make_bool(0);
+        }
+        value_to_rust_string(name_val)
+    };
+    
+    let system = actor::global_system();
+    
+    if let Some(handle) = system.lookup_named(&name) {
+        freeze_value(message);
+        unsafe { coral_value_retain(message); }
+        let ok = system.send(&handle, actor::Message::User(message)).is_ok();
+        if !ok {
+            unsafe { coral_value_release(message); }
+        }
+        coral_make_bool(if ok { 1 } else { 0 })
+    } else {
+        coral_make_bool(0)
+    }
+}
+
+/// List all registered named actors. Returns a list of name strings.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_list_named() -> ValueHandle {
+    let system = actor::global_system();
+    let named = system.list_named();
+    
+    let mut names: Vec<ValueHandle> = Vec::with_capacity(named.len());
+    for (name, _) in named {
+        names.push(coral_make_string(name.as_ptr(), name.len()));
+    }
+    
+    let handle = coral_make_list(names.as_ptr(), names.len());
+    // Release our temporary references
+    unsafe {
+        for name in names {
+            coral_value_release(name);
+        }
+    }
+    handle
+}
+
+// ========== Timer FFI Functions ==========
+
+/// Helper to extract a number from a ValueHandle.
+fn value_to_f64(value: ValueHandle) -> Option<f64> {
+    if value.is_null() {
+        return None;
+    }
+    let v = unsafe { &*value };
+    if v.tag == ValueTag::Number as u8 {
+        Some(unsafe { v.payload.number })
+    } else {
+        None
+    }
+}
+
+/// Send a message to an actor after a delay (in milliseconds).
+/// Returns a timer token (integer ID) that can be used to cancel the timer.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_timer_send_after(
+    delay_ms_value: ValueHandle,
+    actor_value: ValueHandle,
+    message: ValueHandle,
+) -> ValueHandle {
+    use std::time::Duration;
+    
+    let delay_ms = match value_to_f64(delay_ms_value) {
+        Some(d) if d >= 0.0 => d as u64,
+        _ => return coral_make_number(0.0),
+    };
+    
+    // Extract actor handle from value
+    let actor_val = if actor_value.is_null() {
+        return coral_make_number(0.0);
+    } else {
+        unsafe { &*actor_value }
+    };
+    
+    if actor_val.tag != ValueTag::Actor as u8 {
+        return coral_make_number(0.0);
+    }
+    
+    let actor_ptr = actor_val.heap_ptr();
+    if actor_ptr.is_null() {
+        return coral_make_number(0.0);
+    }
+    
+    let handle = unsafe { &*(actor_ptr as *const ActorHandle) };
+    
+    // Freeze and retain the message for sending later
+    freeze_value(message);
+    unsafe { coral_value_retain(message); }
+    
+    let system = actor::global_system();
+    let token = system.send_after(
+        Duration::from_millis(delay_ms),
+        handle,
+        message,
+    );
+    
+    coral_make_number(token.id().0 as f64)
+}
+
+/// Schedule a message to be sent repeatedly to an actor at the given interval (in milliseconds).
+/// Returns a timer token (integer ID) that can be used to cancel the timer.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_timer_schedule_repeat(
+    interval_ms_value: ValueHandle,
+    actor_value: ValueHandle,
+    message: ValueHandle,
+) -> ValueHandle {
+    use std::time::Duration;
+    
+    let interval_ms = match value_to_f64(interval_ms_value) {
+        Some(d) if d > 0.0 => d as u64,
+        _ => return coral_make_number(0.0),
+    };
+    
+    // Extract actor handle from value
+    let actor_val = if actor_value.is_null() {
+        return coral_make_number(0.0);
+    } else {
+        unsafe { &*actor_value }
+    };
+    
+    if actor_val.tag != ValueTag::Actor as u8 {
+        return coral_make_number(0.0);
+    }
+    
+    let actor_ptr = actor_val.heap_ptr();
+    if actor_ptr.is_null() {
+        return coral_make_number(0.0);
+    }
+    
+    let handle = unsafe { &*(actor_ptr as *const ActorHandle) };
+    
+    // Freeze and retain the message for sending later
+    freeze_value(message);
+    unsafe { coral_value_retain(message); }
+    
+    let system = actor::global_system();
+    let token = system.schedule_repeat(
+        Duration::from_millis(interval_ms),
+        handle,
+        message,
+    );
+    
+    coral_make_number(token.id().0 as f64)
+}
+
+/// Cancel a timer by its ID. Returns true if the timer was cancelled.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_timer_cancel(timer_id_value: ValueHandle) -> ValueHandle {
+    let timer_id = match value_to_f64(timer_id_value) {
+        Some(id) if id > 0.0 => id as u64,
+        _ => return coral_make_bool(0),
+    };
+    
+    let system = actor::global_system();
+    let cancelled = system.timer_wheel.cancel(actor::TimerId(timer_id));
+    coral_make_bool(if cancelled { 1 } else { 0 })
+}
+
+/// Get the number of pending timers.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_timer_pending_count() -> ValueHandle {
+    let system = actor::global_system();
+    let count = system.pending_timers();
+    coral_make_number(count as f64)
 }
 
 #[unsafe(no_mangle)]
@@ -1801,6 +2727,305 @@ pub extern "C" fn coral_bytes_concat(a: ValueHandle, b: ValueHandle) -> ValueHan
     coral_make_unit()
 }
 
+/// Get a substring of a string.
+/// coral_string_slice(str, start, end) returns str[start..end]
+/// start and end are byte indices (0-based). If end is greater than length, uses length.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_slice(s: ValueHandle, start: ValueHandle, end: ValueHandle) -> ValueHandle {
+    if s.is_null() || start.is_null() || end.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let bytes = string_to_bytes(vs);
+    let start_idx = unsafe { (*start).payload.number } as usize;
+    let end_idx = (unsafe { (*end).payload.number } as usize).min(bytes.len());
+    if start_idx >= bytes.len() || start_idx >= end_idx {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+    let slice = &bytes[start_idx..end_idx];
+    coral_make_string(slice.as_ptr(), slice.len())
+}
+
+/// Get the character (byte) at a given index.
+/// Returns the byte as a single-character string, or Unit if out of bounds.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_char_at(s: ValueHandle, index: ValueHandle) -> ValueHandle {
+    if s.is_null() || index.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let bytes = string_to_bytes(vs);
+    let idx = unsafe { (*index).payload.number } as usize;
+    if idx >= bytes.len() {
+        return coral_make_unit();
+    }
+    let byte = bytes[idx];
+    coral_make_string(&byte as *const u8, 1)
+}
+
+/// Find the index of a substring in a string.
+/// Returns the 0-based index as a number, or -1 if not found.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_index_of(haystack: ValueHandle, needle: ValueHandle) -> ValueHandle {
+    if haystack.is_null() || needle.is_null() {
+        return coral_make_number(-1.0);
+    }
+    let vh = unsafe { &*haystack };
+    let vn = unsafe { &*needle };
+    if vh.tag != ValueTag::String as u8 || vn.tag != ValueTag::String as u8 {
+        return coral_make_number(-1.0);
+    }
+    let haystack_bytes = string_to_bytes(vh);
+    let needle_bytes = string_to_bytes(vn);
+    if needle_bytes.is_empty() {
+        return coral_make_number(0.0);
+    }
+    for i in 0..=haystack_bytes.len().saturating_sub(needle_bytes.len()) {
+        if haystack_bytes[i..].starts_with(&needle_bytes) {
+            return coral_make_number(i as f64);
+        }
+    }
+    coral_make_number(-1.0)
+}
+
+/// Split a string by a delimiter.
+/// Returns a list of strings.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_split(s: ValueHandle, delimiter: ValueHandle) -> ValueHandle {
+    if s.is_null() || delimiter.is_null() {
+        return coral_make_list(std::ptr::null(), 0);
+    }
+    let vs = unsafe { &*s };
+    let vd = unsafe { &*delimiter };
+    if vs.tag != ValueTag::String as u8 || vd.tag != ValueTag::String as u8 {
+        return coral_make_list(std::ptr::null(), 0);
+    }
+    let s_bytes = string_to_bytes(vs);
+    let d_bytes = string_to_bytes(vd);
+    
+    let mut parts: Vec<ValueHandle> = Vec::new();
+    
+    if d_bytes.is_empty() {
+        // Empty delimiter: split into individual characters
+        for byte in &s_bytes {
+            let part = coral_make_string(byte as *const u8, 1);
+            parts.push(part);
+        }
+    } else {
+        let mut start = 0;
+        let s_str = String::from_utf8_lossy(&s_bytes);
+        let d_str = String::from_utf8_lossy(&d_bytes);
+        
+        for (i, _) in s_str.match_indices(&*d_str) {
+            if i > start {
+                let part_bytes = &s_bytes[start..i];
+                let part = coral_make_string(part_bytes.as_ptr(), part_bytes.len());
+                parts.push(part);
+            } else if i == start {
+                // Empty part between delimiters
+                let part = coral_make_string(std::ptr::null(), 0);
+                parts.push(part);
+            }
+            start = i + d_bytes.len();
+        }
+        // Add the remaining part
+        if start <= s_bytes.len() {
+            let part_bytes = &s_bytes[start..];
+            let part = coral_make_string(part_bytes.as_ptr(), part_bytes.len());
+            parts.push(part);
+        }
+    }
+    
+    coral_make_list(parts.as_ptr(), parts.len())
+}
+
+/// Convert a string to a list of single-character strings.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_to_chars(s: ValueHandle) -> ValueHandle {
+    if s.is_null() {
+        return coral_make_list(std::ptr::null(), 0);
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_list(std::ptr::null(), 0);
+    }
+    let bytes = string_to_bytes(vs);
+    let mut chars: Vec<ValueHandle> = Vec::with_capacity(bytes.len());
+    for byte in &bytes {
+        let char_str = coral_make_string(byte as *const u8, 1);
+        chars.push(char_str);
+    }
+    coral_make_list(chars.as_ptr(), chars.len())
+}
+
+/// Check if a string starts with a given prefix.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_starts_with(s: ValueHandle, prefix: ValueHandle) -> ValueHandle {
+    if s.is_null() || prefix.is_null() {
+        return coral_make_bool(0);
+    }
+    let vs = unsafe { &*s };
+    let vp = unsafe { &*prefix };
+    if vs.tag != ValueTag::String as u8 || vp.tag != ValueTag::String as u8 {
+        return coral_make_bool(0);
+    }
+    let s_bytes = string_to_bytes(vs);
+    let p_bytes = string_to_bytes(vp);
+    coral_make_bool(if s_bytes.starts_with(&p_bytes) { 1 } else { 0 })
+}
+
+/// Check if a string ends with a given suffix.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_ends_with(s: ValueHandle, suffix: ValueHandle) -> ValueHandle {
+    if s.is_null() || suffix.is_null() {
+        return coral_make_bool(0);
+    }
+    let vs = unsafe { &*s };
+    let vx = unsafe { &*suffix };
+    if vs.tag != ValueTag::String as u8 || vx.tag != ValueTag::String as u8 {
+        return coral_make_bool(0);
+    }
+    let s_bytes = string_to_bytes(vs);
+    let x_bytes = string_to_bytes(vx);
+    coral_make_bool(if s_bytes.ends_with(&x_bytes) { 1 } else { 0 })
+}
+
+/// Trim whitespace from both ends of a string.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_trim(s: ValueHandle) -> ValueHandle {
+    if s.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let bytes = string_to_bytes(vs);
+    let s_str = String::from_utf8_lossy(&bytes);
+    let trimmed = s_str.trim();
+    coral_make_string(trimmed.as_ptr(), trimmed.len())
+}
+
+/// Convert a string to uppercase.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_to_upper(s: ValueHandle) -> ValueHandle {
+    if s.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let bytes = string_to_bytes(vs);
+    let s_str = String::from_utf8_lossy(&bytes);
+    let upper = s_str.to_uppercase();
+    coral_make_string(upper.as_ptr(), upper.len())
+}
+
+/// Convert a string to lowercase.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_to_lower(s: ValueHandle) -> ValueHandle {
+    if s.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let bytes = string_to_bytes(vs);
+    let s_str = String::from_utf8_lossy(&bytes);
+    let lower = s_str.to_lowercase();
+    coral_make_string(lower.as_ptr(), lower.len())
+}
+
+/// Replace all occurrences of a substring with another string.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_replace(s: ValueHandle, old: ValueHandle, new: ValueHandle) -> ValueHandle {
+    if s.is_null() || old.is_null() || new.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    let vo = unsafe { &*old };
+    let vn = unsafe { &*new };
+    if vs.tag != ValueTag::String as u8 || vo.tag != ValueTag::String as u8 || vn.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let s_bytes = string_to_bytes(vs);
+    let o_bytes = string_to_bytes(vo);
+    let n_bytes = string_to_bytes(vn);
+    
+    let s_str = String::from_utf8_lossy(&s_bytes);
+    let o_str = String::from_utf8_lossy(&o_bytes);
+    let n_str = String::from_utf8_lossy(&n_bytes);
+    
+    let result = s_str.replace(&*o_str, &*n_str);
+    coral_make_string(result.as_ptr(), result.len())
+}
+
+/// Check if a string contains a substring.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_contains(haystack: ValueHandle, needle: ValueHandle) -> ValueHandle {
+    if haystack.is_null() || needle.is_null() {
+        return coral_make_bool(0);
+    }
+    let vh = unsafe { &*haystack };
+    let vn = unsafe { &*needle };
+    if vh.tag != ValueTag::String as u8 || vn.tag != ValueTag::String as u8 {
+        return coral_make_bool(0);
+    }
+    let h_bytes = string_to_bytes(vh);
+    let n_bytes = string_to_bytes(vn);
+    
+    if n_bytes.is_empty() {
+        return coral_make_bool(1);
+    }
+    
+    let h_str = String::from_utf8_lossy(&h_bytes);
+    let n_str = String::from_utf8_lossy(&n_bytes);
+    
+    coral_make_bool(if h_str.contains(&*n_str) { 1 } else { 0 })
+}
+
+/// Parse a string as a number.
+/// Returns the parsed number or Unit on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_parse_number(s: ValueHandle) -> ValueHandle {
+    if s.is_null() {
+        return coral_make_unit();
+    }
+    let vs = unsafe { &*s };
+    if vs.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
+    let bytes = string_to_bytes(vs);
+    let s_str = String::from_utf8_lossy(&bytes);
+    match s_str.trim().parse::<f64>() {
+        Ok(n) => coral_make_number(n),
+        Err(_) => coral_make_unit(),
+    }
+}
+
+/// Convert a number to a string.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_number_to_string(n: ValueHandle) -> ValueHandle {
+    if n.is_null() {
+        return coral_make_unit();
+    }
+    let vn = unsafe { &*n };
+    if vn.tag != ValueTag::Number as u8 {
+        return coral_make_unit();
+    }
+    let num = unsafe { vn.payload.number };
+    let s = num.to_string();
+    coral_make_string(s.as_ptr(), s.len())
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_add(a: ValueHandle, b: ValueHandle) -> ValueHandle {
     if a.is_null() || b.is_null() {
@@ -1808,6 +3033,21 @@ pub extern "C" fn coral_value_add(a: ValueHandle, b: ValueHandle) -> ValueHandle
     }
     let va = unsafe { &*a };
     let vb = unsafe { &*b };
+    
+    // Error propagation: if either operand is an error, return that error
+    if va.is_err() {
+        unsafe { coral_value_retain(a); }
+        return a;
+    }
+    if vb.is_err() {
+        unsafe { coral_value_retain(b); }
+        return b;
+    }
+    // Absent propagation
+    if va.is_absent() || vb.is_absent() {
+        return coral_make_absent();
+    }
+    
     if va.tag == ValueTag::Number as u8 && vb.tag == ValueTag::Number as u8 {
         let result = unsafe { va.payload.number } + unsafe { vb.payload.number };
         coral_make_number(result)
@@ -1822,36 +3062,110 @@ pub extern "C" fn coral_value_add(a: ValueHandle, b: ValueHandle) -> ValueHandle
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_equals(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    // Error propagation for equality checks
+    if !a.is_null() {
+        let va = unsafe { &*a };
+        if va.is_err() {
+            unsafe { coral_value_retain(a); }
+            return a;
+        }
+    }
+    if !b.is_null() {
+        let vb = unsafe { &*b };
+        if vb.is_err() {
+            unsafe { coral_value_retain(b); }
+            return b;
+        }
+    }
+    
     let result = values_equal_handles(a, b);
     coral_make_bool(if result { 1 } else { 0 })
 }
 
+/// Helper to propagate errors in binary operations.
+/// Returns Some(error_handle) if either operand is an error/absent, None otherwise.
+#[inline]
+fn propagate_binary_error(a: ValueHandle, b: ValueHandle) -> Option<ValueHandle> {
+    if !a.is_null() {
+        let va = unsafe { &*a };
+        if va.is_err() {
+            unsafe { coral_value_retain(a); }
+            return Some(a);
+        }
+        if va.is_absent() {
+            return Some(coral_make_absent());
+        }
+    }
+    if !b.is_null() {
+        let vb = unsafe { &*b };
+        if vb.is_err() {
+            unsafe { coral_value_retain(b); }
+            return Some(b);
+        }
+        if vb.is_absent() {
+            return Some(coral_make_absent());
+        }
+    }
+    None
+}
+
+/// Helper to propagate errors in unary operations.
+#[inline]
+fn propagate_unary_error(a: ValueHandle) -> Option<ValueHandle> {
+    if !a.is_null() {
+        let va = unsafe { &*a };
+        if va.is_err() {
+            unsafe { coral_value_retain(a); }
+            return Some(a);
+        }
+        if va.is_absent() {
+            return Some(coral_make_absent());
+        }
+    }
+    None
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_bitand(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
     let result = handle_to_i64(a) & handle_to_i64(b);
     coral_make_number(result as f64)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_bitor(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
     let result = handle_to_i64(a) | handle_to_i64(b);
     coral_make_number(result as f64)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_bitxor(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
     let result = handle_to_i64(a) ^ handle_to_i64(b);
     coral_make_number(result as f64)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_bitnot(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
     let result = !handle_to_i64(value);
     coral_make_number(result as f64)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_shift_left(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
     let lhs = handle_to_i64(a);
     let rhs = (handle_to_i64(b) & 63) as u32;
     coral_make_number(lhs.wrapping_shl(rhs) as f64)
@@ -1859,10 +3173,307 @@ pub extern "C" fn coral_value_shift_left(a: ValueHandle, b: ValueHandle) -> Valu
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_shift_right(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
     let lhs = handle_to_i64(a);
     let rhs = (handle_to_i64(b) & 63) as u32;
     coral_make_number((lhs >> rhs) as f64)
 }
+
+// ==================== Math Functions ====================
+
+/// Extract f64 from a number Value, or return None if not a number.
+#[inline]
+fn handle_to_f64(handle: ValueHandle) -> Option<f64> {
+    if handle.is_null() {
+        return None;
+    }
+    let value = unsafe { &*handle };
+    if value.tag == ValueTag::Number as u8 {
+        Some(unsafe { value.payload.number })
+    } else {
+        None
+    }
+}
+
+/// Absolute value of a number.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_abs(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.abs()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Square root of a number.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_sqrt(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.sqrt()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Floor of a number.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_floor(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.floor()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Ceiling of a number.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_ceil(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.ceil()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Round a number to nearest integer.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_round(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.round()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Sine of a number (radians).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_sin(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.sin()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Cosine of a number (radians).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_cos(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.cos()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Tangent of a number (radians).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_tan(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.tan()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Power: a^b
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_pow(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
+    match (handle_to_f64(a), handle_to_f64(b)) {
+        (Some(base), Some(exp)) => coral_make_number(base.powf(exp)),
+        _ => coral_make_unit(),
+    }
+}
+
+/// Minimum of two numbers.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_min(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
+    match (handle_to_f64(a), handle_to_f64(b)) {
+        (Some(x), Some(y)) => coral_make_number(x.min(y)),
+        _ => coral_make_unit(),
+    }
+}
+
+/// Maximum of two numbers.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_max(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(a, b) {
+        return err;
+    }
+    match (handle_to_f64(a), handle_to_f64(b)) {
+        (Some(x), Some(y)) => coral_make_number(x.max(y)),
+        _ => coral_make_unit(),
+    }
+}
+
+/// Natural logarithm (ln).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_ln(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.ln()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Base-10 logarithm.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_log10(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.log10()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Exponential (e^x).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_exp(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.exp()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Arc sine (inverse sine).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_asin(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.asin()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Arc cosine (inverse cosine).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_acos(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.acos()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Arc tangent (inverse tangent).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_atan(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.atan()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Two-argument arc tangent (atan2).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_atan2(y: ValueHandle, x: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_binary_error(y, x) {
+        return err;
+    }
+    match (handle_to_f64(y), handle_to_f64(x)) {
+        (Some(y_val), Some(x_val)) => coral_make_number(y_val.atan2(x_val)),
+        _ => coral_make_unit(),
+    }
+}
+
+/// Hyperbolic sine.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_sinh(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.sinh()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Hyperbolic cosine.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_cosh(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.cosh()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Hyperbolic tangent.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_tanh(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.tanh()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Truncate to integer (towards zero).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_trunc(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.trunc()),
+        None => coral_make_unit(),
+    }
+}
+
+/// Sign of a number: -1, 0, or 1.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_math_sign(value: ValueHandle) -> ValueHandle {
+    if let Some(err) = propagate_unary_error(value) {
+        return err;
+    }
+    match handle_to_f64(value) {
+        Some(n) => coral_make_number(n.signum()),
+        None => coral_make_unit(),
+    }
+}
+
+// ==================== End Math Functions ====================
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_list_push(list: ValueHandle, value: ValueHandle) -> ValueHandle {
@@ -2068,15 +3679,19 @@ pub unsafe extern "C" fn coral_value_retain(value: ValueHandle) {
     if value.is_null() {
         return;
     }
-    let value = unsafe { &mut *value };
-    debug_assert!(value.refcount > 0, "retain on freed value");
-    if value.refcount == u64::MAX {
+    let value = unsafe { &*value };
+    let rc = value.refcount.load(Ordering::Relaxed);
+    debug_assert!(rc > 0, "retain on freed value");
+    if rc == u64::MAX {
         RETAIN_SATURATED.fetch_add(1, Ordering::Relaxed);
-        value.retain_events = value.retain_events.saturating_add(1);
+        // retain_events is not atomic, but only updated on same thread for debugging
+        // In multi-threaded contexts, this becomes unreliable (acceptable for debug stats)
         return;
     }
-    value.refcount = value.refcount.saturating_add(1);
-    value.retain_events = value.retain_events.saturating_add(1);
+    // Use fetch_add for atomic increment - Relaxed is sufficient for retain
+    // since we don't need to synchronize with any particular memory operations.
+    // The Release in coral_value_release will ensure proper visibility.
+    value.refcount.fetch_add(1, Ordering::Relaxed);
     RETAIN_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -2085,25 +3700,39 @@ pub unsafe extern "C" fn coral_value_release(value: ValueHandle) {
     if value.is_null() {
         return;
     }
-    let value_ref = unsafe { &mut *value };
-    debug_assert!(value_ref.refcount > 0, "release on freed value");
-    if value_ref.refcount == 0 {
+    let value_ref = unsafe { &*value };
+    let rc = value_ref.refcount.load(Ordering::Relaxed);
+    debug_assert!(rc > 0, "release on freed value");
+    if rc == 0 {
         RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
         debug_assert!(false, "release underflow on value tag {}", value_ref.tag);
         return;
     }
-    value_ref.release_events = value_ref.release_events.saturating_add(1);
     RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
-    value_ref.refcount = value_ref.refcount.saturating_sub(1);
-    if value_ref.refcount == 0 {
+    // Use fetch_sub for atomic decrement with Release ordering
+    // The Release ensures all writes before this are visible to other threads
+    let prev = value_ref.refcount.fetch_sub(1, Ordering::Release);
+    if prev == 1 {
+        // Acquire fence to ensure we see all writes before freeing
+        std::sync::atomic::fence(Ordering::Acquire);
+        
+        // Notify weak reference system before deallocation
+        weak_ref::notify_value_deallocated(value);
+        
+        let value_ref_mut = unsafe { &mut *value };
         RELEASE_QUEUE.with(|queue| {
-            if let Some(q) = &mut *queue.borrow_mut() {
-                if let Some(nn) = ptr::NonNull::new(value as *mut c_void) {
-                    q.push(nn);
-                    return;
+            // Use try_borrow_mut to avoid panic on reentrant releases
+            // (e.g., when drop_heap_value releases contained values)
+            if let Ok(mut guard) = queue.try_borrow_mut() {
+                if let Some(q) = &mut *guard {
+                    if let Some(nn) = ptr::NonNull::new(value as *mut c_void) {
+                        q.push(nn);
+                        return;
+                    }
                 }
             }
-            unsafe { drop_heap_value(value_ref); }
+            // Either no queue or reentrant call - free immediately
+            unsafe { drop_heap_value(value_ref_mut); }
             LIVE_VALUE_COUNT.fetch_sub(1, Ordering::Relaxed);
             if !recycle_value_box(value) {
                 unsafe { drop(Box::from_raw(value)); }
@@ -2288,7 +3917,7 @@ pub extern "C" fn coral_value_metrics(value: ValueHandle, out: *mut CoralHandleM
     let value_ref = unsafe { &*value };
     unsafe {
         *out = CoralHandleMetrics {
-            refcount: value_ref.refcount,
+            refcount: value_ref.refcount.load(Ordering::Relaxed),
             retains: value_ref.retain_events as u64,
             releases: value_ref.release_events as u64,
         };
@@ -3189,161 +4818,6 @@ mod tests {
             coral_value_release(double);
             coral_value_release(even);
             coral_value_release(sum);
-        }
-    }
-}
-
-// ================================
-// Low-level memory FFI for Coral runtime bootstrap
-// ================================
-
-/// Allocate `size` bytes and return pointer (usize); returns 0 on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_malloc(size: usize) -> usize {
-    if size == 0 {
-        return 0;
-    }
-    unsafe {
-        let ptr = malloc(size);
-        if ptr.is_null() {
-            0
-        } else {
-            ptr as usize
-        }
-    }
-}
-
-/// Free memory at `ptr` (usize).
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_free(ptr: usize) {
-    if ptr != 0 {
-        unsafe {
-            free(ptr as *mut c_void);
-        }
-    }
-}
-
-/// Copy `len` bytes from `src` to `dst`; returns `dst`.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_memcpy(dst: usize, src: usize, len: usize) -> usize {
-    if dst == 0 || src == 0 || len == 0 {
-        return dst;
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, len);
-    }
-    dst
-}
-
-/// Set `len` bytes at `dst` to `value`; returns `dst`.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_memset(dst: usize, value: u8, len: usize) -> usize {
-    if dst == 0 || len == 0 {
-        return dst;
-    }
-    unsafe {
-        ptr::write_bytes(dst as *mut u8, value, len);
-    }
-    dst
-}
-
-/// Add `offset` bytes to pointer; returns new pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_ptr_add(ptr: usize, offset: usize) -> usize {
-    ptr.wrapping_add(offset)
-}
-
-/// Load u8 from pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_load_u8(ptr: usize) -> u8 {
-    if ptr == 0 {
-        return 0;
-    }
-    unsafe { *(ptr as *const u8) }
-}
-
-/// Load u16 from pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_load_u16(ptr: usize) -> u16 {
-    if ptr == 0 {
-        return 0;
-    }
-    unsafe { *(ptr as *const u16) }
-}
-
-/// Load u32 from pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_load_u32(ptr: usize) -> u32 {
-    if ptr == 0 {
-        return 0;
-    }
-    unsafe { *(ptr as *const u32) }
-}
-
-/// Load u64 from pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_load_u64(ptr: usize) -> u64 {
-    if ptr == 0 {
-        return 0;
-    }
-    unsafe { *(ptr as *const u64) }
-}
-
-/// Load f64 from pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_load_f64(ptr: usize) -> f64 {
-    if ptr == 0 {
-        return 0.0;
-    }
-    unsafe { *(ptr as *const f64) }
-}
-
-/// Store u8 to pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_store_u8(ptr: usize, value: u8) {
-    if ptr != 0 {
-        unsafe {
-            *(ptr as *mut u8) = value;
-        }
-    }
-}
-
-/// Store u16 to pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_store_u16(ptr: usize, value: u16) {
-    if ptr != 0 {
-        unsafe {
-            *(ptr as *mut u16) = value;
-        }
-    }
-}
-
-/// Store u32 to pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_store_u32(ptr: usize, value: u32) {
-    if ptr != 0 {
-        unsafe {
-            *(ptr as *mut u32) = value;
-        }
-    }
-}
-
-/// Store u64 to pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_store_u64(ptr: usize, value: u64) {
-    if ptr != 0 {
-        unsafe {
-            *(ptr as *mut u64) = value;
-        }
-    }
-}
-
-/// Store f64 to pointer.
-#[unsafe(no_mangle)]
-pub extern "C" fn coral_store_f64(ptr: usize, value: f64) {
-    if ptr != 0 {
-        unsafe {
-            *(ptr as *mut f64) = value;
         }
     }
 }

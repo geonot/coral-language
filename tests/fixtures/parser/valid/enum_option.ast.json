@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "type": {
+        "fields": [],
+        "methods": [],
+        "name": "Option",
+        "variants": [
+          {
+            "fields": [
+              {
+                "name": "value"
+              }
+            ],
+            "name": "Some"
+          },
+          {
+            "fields": [],
+            "name": "None"
+          }
+        ]
+      }
+    }
+  ]
+}

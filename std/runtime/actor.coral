@@ -7,6 +7,14 @@ extern fn coral_actor_self() : usize
 extern fn coral_make_closure(fn_ptr: usize, env: usize, ctx: usize) : usize
 extern fn coral_closure_invoke(func: usize, args: usize, len: usize) : usize
 
+# Named actor registry functions
+extern fn coral_actor_spawn_named(name: usize, handler: usize) : usize
+extern fn coral_actor_lookup(name: usize) : usize
+extern fn coral_actor_register(name: usize) : usize
+extern fn coral_actor_unregister(name: usize) : usize
+extern fn coral_actor_send_named(name: usize, message: usize) : usize
+extern fn coral_actor_list_named() : usize
+
 *spawn(handler: usize)
     coral_actor_spawn(handler)
 
@@ -24,3 +32,54 @@ extern fn coral_closure_invoke(func: usize, args: usize, len: usize) : usize
 
 *call(func: usize, args_ptr: usize, len: usize)
     coral_closure_invoke(func, args_ptr, len)
+
+# Named Actor Registry
+
+# Spawn a named actor. Returns the actor or unit if name is taken.
+*spawn_named(name: String, handler: usize)
+    coral_actor_spawn_named(name, handler)
+
+# Look up an actor by name. Returns the actor or unit if not found.
+*lookup(name: String)
+    coral_actor_lookup(name)
+
+# Register the current actor with a name. Returns true on success.
+*register(name: String)
+    coral_actor_register(name)
+
+# Unregister a named actor. Returns true if name existed.
+*unregister(name: String)
+    coral_actor_unregister(name)
+
+# Send a message to a named actor. Returns true on success.
+*send_to(name: String, message: usize)
+    coral_actor_send_named(name, message)
+
+# List all registered named actors. Returns a list of names.
+*list_named()
+    coral_actor_list_named()
+
+# Timer Functions
+
+extern fn coral_timer_send_after(delay_ms: usize, actor: usize, message: usize) : usize
+extern fn coral_timer_schedule_repeat(interval_ms: usize, actor: usize, message: usize) : usize
+extern fn coral_timer_cancel(timer_id: usize) : usize
+extern fn coral_timer_pending_count() : usize
+
+# Send a message to an actor after a delay (in milliseconds).
+# Returns a timer ID that can be used to cancel the timer.
+*send_after(delay_ms, actor, message)
+    coral_timer_send_after(delay_ms, actor, message)
+
+# Schedule a message to be sent repeatedly to an actor at the given interval.
+# Returns a timer ID that can be used to cancel the timer.
+*schedule_repeat(interval_ms, actor, message)
+    coral_timer_schedule_repeat(interval_ms, actor, message)
+
+# Cancel a timer by its ID. Returns true if the timer was cancelled.
+*cancel_timer(timer_id)
+    coral_timer_cancel(timer_id)
+
+# Get the number of pending timers.
+*pending_timers()
+    coral_timer_pending_count()

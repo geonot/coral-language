@@ -1,6 +1,7 @@
 pi is 3.141592653589793
 half_pi is pi / 2
 tau is pi * 2
+e is 2.718281828459045
 
 *deg_to_rad(degrees)
 	degrees * (pi / 180)
@@ -10,3 +11,37 @@ tau is pi * 2
 
 *average(a, b)
 	(a + b) / 2
+
+*is_positive(x)
+	x > 0
+
+*is_negative(x)
+	x < 0
+
+*is_zero(x)
+	x == 0
+
+*clamp(value, low, high)
+	min(high, max(low, value))
+
+*lerp(a, b, t)
+	a + (b - a) * t
+
+*squared(x)
+	x * x
+
+*cubed(x)
+	x * x * x
+
+*reciprocal(x)
+	1 / x
+
+*distance(x1, y1, x2, y2)
+	sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2))
+
+*hypot(a, b)
+	sqrt(pow(a, 2) + pow(b, 2))
+
+*magnitude(x, y)
+	sqrt(pow(x, 2) + pow(y, 2))
+

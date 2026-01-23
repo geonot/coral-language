@@ -1,0 +1,69 @@
+use std.prelude
+
+# Convert to uppercase
+*upper(s)
+    to_upper(s)
+
+# Convert to lowercase
+*lower(s)
+    to_lower(s)
+
+# Remove leading and trailing whitespace
+*strip(s)
+    trim(s)
+
+# Find position of substring (returns -1 if not found)
+*find(s, needle)
+    index_of(s, needle)
+
+# Check if string contains substring
+*has(s, needle)
+    contains(s, needle)
+
+# Check if string starts with prefix
+*begins_with(s, prefix)
+    starts_with(s, prefix)
+
+# Check if string ends with suffix
+*finishes_with(s, suffix)
+    ends_with(s, suffix)
+
+# Replace all occurrences of old with new
+*sub(s, old, new)
+    replace(s, old, new)
+
+# Split string by delimiter
+*divide(s, delimiter)
+    split(s, delimiter)
+
+# Get substring from start to end (exclusive)
+*part(s, start, end)
+    slice(s, start, end)
+
+# Get character at index
+*at(s, index)
+    char_at(s, index)
+
+# Convert string to list of characters
+*to_list(s)
+    chars(s)
+
+# Parse string to integer
+*parse_int(s)
+    parse_number(s)
+
+# Convert number to string
+*from_int(n)
+    number_to_string(n)
+
+# Get string length
+*len(s)
+    s.length
+
+# Check if string is empty
+*empty(s)
+    s.length == 0
+
+# Concatenate two strings
+*join_two(a, b)
+    concat(a, b)

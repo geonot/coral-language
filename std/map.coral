@@ -1,0 +1,32 @@
+# std/map.coral - Map/Dictionary operations
+
+use std.prelude
+
+# Get value for key, or none if not found
+*get_key(m, key)
+    m.get(key)
+
+# Set key to value (returns new map)
+*set_key(m, key, value)
+    m.set(key, value)
+
+# Get number of entries
+*len(m)
+    m.size
+
+# Check if map is empty
+*empty(m)
+    m.size == 0
+
+# Get all keys as a list
+*keys_list(m)
+    m.keys()
+
+# Check if key exists (returns true if key is present)
+*has(m, key)
+    m.get(key).equals(none).not()
+
+# Get value or default if not found
+*get_or(m, key, default)
+    result is m.get(key)
+    result.equals(none) ? default ! result

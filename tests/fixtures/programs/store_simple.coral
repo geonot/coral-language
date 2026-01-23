@@ -1,0 +1,10 @@
+store Point
+    x is 0
+    y is 0
+
+
+*main()
+    p is make_Point()
+    log(p.x)
+    log(p.y)
+    0

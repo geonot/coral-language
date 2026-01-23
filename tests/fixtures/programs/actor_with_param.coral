@@ -1,0 +1,13 @@
+actor Counter
+    count is 0
+    
+    @ping()
+        log("ping received")
+    
+    @set_value(n)
+        log(n)
+
+
+*main()
+    c is make_Counter()
+    0

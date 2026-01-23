@@ -20,7 +20,51 @@ pub enum Item {
     Type(TypeDefinition),
     Store(StoreDefinition),
     Taxonomy(TaxonomyNode),
+    ErrorDefinition(ErrorDefinition),
+    TraitDefinition(TraitDefinition),
     Expression(Expression),
+}
+
+/// Hierarchical error definition
+/// ```coral
+/// err Database
+///     err Connection
+///         err Timeout
+///             code is 5001
+///             message is 'Connection timed out'
+///         err Refused
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrorDefinition {
+    pub name: String,
+    pub code: Option<i64>,
+    pub message: Option<String>,
+    pub children: Vec<ErrorDefinition>,
+    pub span: Span,
+}
+
+/// Trait definition for mixins/interfaces
+/// ```coral
+/// trait Printable
+///     *to_string()
+///     *print()
+///         log(to_string())
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDefinition {
+    pub name: String,
+    pub required_traits: Vec<String>,  // `with TraitName` dependencies
+    pub methods: Vec<TraitMethod>,
+    pub span: Span,
+}
+
+/// A method in a trait - may have a default implementation
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub body: Option<Block>,  // None = required method, Some = default implementation
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,19 +141,57 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDefinition {
     pub name: String,
+    pub with_traits: Vec<String>,  // `with TraitName` clauses
     pub fields: Vec<Field>,
     pub methods: Vec<Function>,
+    pub variants: Vec<TypeVariant>,  // For sum types (ADTs)
+    pub span: Span,
+}
+
+/// A variant of a sum type (ADT).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeVariant {
+    pub name: String,
+    pub fields: Vec<VariantField>,  // Named or positional fields
+    pub span: Span,
+}
+
+/// A field in a type variant (can be named or positional).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantField {
+    pub name: Option<String>,  // None for positional fields like Some(value)
+    pub type_annotation: Option<TypeAnnotation>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoreDefinition {
     pub name: String,
+    pub with_traits: Vec<String>,  // `with TraitName` clauses
     pub fields: Vec<Field>,
     pub methods: Vec<Function>,
     pub is_actor: bool,
+    pub is_persistent: bool,  // `persist store` vs `store`
     pub span: Span,
 }
+
+/// Persistence mode for stores
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum PersistenceMode {
+    #[default]
+    Snapshot,   // Periodic full snapshots
+    Journal,    // Append-only log of changes
+}
+
+/// Default fields automatically added to persistent stores
+pub const STORE_DEFAULT_FIELDS: &[(&str, &str)] = &[
+    ("_index", "Int"),       // Auto-increment primary key
+    ("_uuid", "String"),     // UUID identifier
+    ("_created_at", "Int"),  // Unix timestamp
+    ("_updated_at", "Int"),  // Unix timestamp
+    ("_deleted_at", "Int"),  // Unix timestamp (0 if not deleted, soft delete)
+    ("_version", "Int"),     // Optimistic concurrency version
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaxonomyNode {
@@ -130,6 +212,7 @@ pub struct Field {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     Unit,
+    None(Span),  // the `none` keyword - represents absence/null
     Identifier(String, Span),
     Integer(i64, Span),
     Float(f64, Span),
@@ -173,6 +256,23 @@ pub enum Expression {
         else_branch: Box<Expression>,
         span: Span,
     },
+    /// Pipeline operator: `expr ~ fn(args)` desugars to `fn(expr, args)`
+    /// Chains left-to-right for better readability of data flow
+    Pipeline {
+        left: Box<Expression>,
+        right: Box<Expression>,
+        span: Span,
+    },
+    /// Error value expression: `err Name` or `err Name:SubName`
+    ErrorValue {
+        path: Vec<String>,
+        span: Span,
+    },
+    /// Error propagation: `expr ! return err` - returns immediately if expr is error
+    ErrorPropagate {
+        expr: Box<Expression>,
+        span: Span,
+    },
     Match(Box<MatchExpression>),
     InlineAsm {
         template: String,
@@ -194,6 +294,7 @@ impl Expression {
     pub fn span(&self) -> Span {
         match self {
             Expression::Unit => Span::default(),
+            Expression::None(span) => *span,
             Expression::Identifier(_, span)
             | Expression::Integer(_, span)
             | Expression::Float(_, span)
@@ -208,7 +309,10 @@ impl Expression {
             | Expression::Unary { span, .. }
             | Expression::Call { span, .. }
             | Expression::Member { span, .. }
-            | Expression::Ternary { span, .. } => *span,
+            | Expression::Ternary { span, .. }
+            | Expression::Pipeline { span, .. }
+            | Expression::ErrorValue { span, .. }
+            | Expression::ErrorPropagate { span, .. } => *span,
             Expression::Match(expr) => expr.span,
             Expression::Throw { span, .. } => *span,
             Expression::Lambda { span, .. } => *span,
@@ -234,7 +338,6 @@ pub enum BinaryOp {
     ShiftLeft,
     ShiftRight,
     Equals,
-    NotEquals,
     Greater,
     GreaterEq,
     Less,
@@ -269,4 +372,12 @@ pub enum MatchPattern {
     Identifier(String),
     String(String),
     List(Vec<Expression>),
+    /// Constructor pattern for sum types: Some(x), None, Ok(val), Err(e)
+    Constructor {
+        name: String,
+        fields: Vec<MatchPattern>,  // Nested patterns for fields
+        span: Span,
+    },
+    /// Wildcard pattern that matches anything without binding
+    Wildcard(Span),
 }

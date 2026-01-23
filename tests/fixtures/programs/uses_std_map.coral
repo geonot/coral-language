@@ -1,0 +1,11 @@
+use std.prelude
+use std.map
+
+*main()
+    m is map("name" is "John", "age" is 30)
+    name is get_key(m, "name")
+    keys is keys_list(m)
+    has_name is has(m, "name")
+    size is len(m)
+    default is get_or(m, "missing", "default")
+    name

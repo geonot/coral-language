@@ -1,0 +1,198 @@
+# HTTP Server - Simple HTTP server using Coral actors
+
+use std.net
+
+# Error definitions
+err Http
+    err InvalidRequest
+    err NotFound
+    err InternalError
+
+# HTTP request parser
+*parse_request(raw)
+    lines is raw.split('\r\n')
+    lines.length < 1 ? ! err Http:InvalidRequest
+    
+    # Parse request line: GET /path HTTP/1.1
+    request_line is lines.get(0).split(' ')
+    request_line.length < 2 ? ! err Http:InvalidRequest
+    
+    method is request_line.get(0)
+    path is request_line.get(1)
+    
+    # Parse headers
+    headers is map()
+    i is 1
+    while i < lines.length
+        line is lines.get(i)
+        line.length == 0 ? break
+        
+        parts is line.split(': ')
+        parts.length >= 2 ?
+            headers.set(parts.get(0).to_lower(), parts.get(1))
+        
+        i is i + 1
+    
+    map(
+        'method' is method,
+        'path' is path,
+        'headers' is headers
+    )
+
+# HTTP response builder
+*response(status, body)
+    status_text is match status
+        200 ? 'OK'
+        201 ? 'Created'
+        400 ? 'Bad Request'
+        404 ? 'Not Found'
+        500 ? 'Internal Server Error'
+            ! 'Unknown'
+    
+    headers is [
+        'HTTP/1.1 {status} {status_text}',
+        'Content-Type: text/html; charset=utf-8',
+        'Content-Length: {body.length}',
+        'Connection: close',
+        ''
+    ]
+    
+    headers.join('\r\n') + '\r\n' + body
+
+*json_response(status, data)
+    body is json.encode(data)
+    status_text is status == 200 ? 'OK' ! 'Error'
+    
+    headers is [
+        'HTTP/1.1 {status} {status_text}',
+        'Content-Type: application/json',
+        'Content-Length: {body.length}',
+        'Connection: close',
+        ''
+    ]
+    
+    headers.join('\r\n') + '\r\n' + body
+
+# Request handler actor
+actor RequestHandler
+    routes
+
+    @handle(conn, raw_request)
+        request is parse_request(raw_request)
+        
+        request.is_err ?
+            return conn.send(response(400, '<h1>Bad Request</h1>'))
+        
+        # Route the request
+        handler is routes.get(request.get('path'))
+        
+        result is handler ?
+            handler(request)
+          ! response(404, '<h1>Not Found</h1>')
+        
+        conn.send(result)
+        conn.close()
+
+# Application routes
+*setup_routes()
+    map(
+        '/' is (req) -> response(200, '
+            <html>
+            <head><title>Coral Server</title></head>
+            <body>
+                <h1>Welcome to Coral HTTP Server</h1>
+                <p>This server is written entirely in Coral!</p>
+                <ul>
+                    <li><a href="/about">About</a></li>
+                    <li><a href="/api/time">Current Time (JSON)</a></li>
+                    <li><a href="/api/stats">Server Stats (JSON)</a></li>
+                </ul>
+            </body>
+            </html>
+        '),
+        
+        '/about' is (req) -> response(200, '
+            <html>
+            <head><title>About</title></head>
+            <body>
+                <h1>About Coral Server</h1>
+                <p>Coral is a modern programming language featuring:</p>
+                <ul>
+                    <li>Complete type inference</li>
+                    <li>Actor-based concurrency</li>
+                    <li>Transparent error handling</li>
+                    <li>Pipeline operators</li>
+                </ul>
+                <p><a href="/">Back to Home</a></p>
+            </body>
+            </html>
+        '),
+        
+        '/api/time' is (req) -> json_response(200, map(
+            'time' is time.now(),
+            'timezone' is 'UTC'
+        )),
+        
+        '/api/stats' is (req) -> json_response(200, map(
+            'uptime' is server_uptime,
+            'requests' is request_count,
+            'version' is '0.1.0'
+        ))
+    )
+
+# Server state (would be in a store in real app)
+server_uptime is 0
+request_count is 0
+
+# Main server actor
+store actor HttpServer
+    &logger
+    port
+    running
+
+    *HttpServer(port)
+        logger is Logger('/var/log/coral_http.log')
+        running is true
+
+    @start()
+        socket is net.tcp_listen('0.0.0.0', port) ! 
+            logger.write('ERROR', 'Failed to bind: {err}')
+            return err
+
+        logger.write('INFO', 'Server listening on port {port}')
+        
+        routes is setup_routes()
+        handler is RequestHandler(routes is routes)
+        
+        while running
+            conn is socket.accept() ! continue
+            
+            request_count is request_count + 1
+            
+            # Read request (simplified - real impl handles chunking)
+            raw is conn.read(4096)
+            
+            # Dispatch to handler actor
+            handler.handle(conn, raw)
+
+    @stop()
+        running is false
+        logger.write('INFO', 'Server stopping')
+
+# Logger actor
+actor Logger
+    log_file
+
+    @write(level, message)
+        timestamp is time.format(time.now(), '%Y-%m-%d %H:%M:%S')
+        line is '[{timestamp}] [{level}] {message}\n'
+        io.append(log_file, line)
+
+*main()
+    port is 8080
+    
+    log('Starting Coral HTTP Server on port {port}...')
+    log('Press Ctrl+C to stop')
+    
+    server is HttpServer(port)
+    server.start()

@@ -1,0 +1,7 @@
+use std.runtime.actor
+
+*main()
+    log('Timer support enabled')
+    pending is pending_timers()
+    log('Pending timers: {pending}')
+    0

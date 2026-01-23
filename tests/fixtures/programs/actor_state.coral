@@ -1,0 +1,10 @@
+actor Greeter
+    greeting is "Hello"
+    
+    @say_hello()
+        log(self.greeting)
+
+
+*main()
+    g is make_Greeter()
+    0

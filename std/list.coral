@@ -1,0 +1,55 @@
+# std/list.coral - List operations
+
+use std.prelude
+
+# Transform each element using a function
+*map_list(lst, func)
+    lst.map(func)
+
+# Keep only elements matching predicate
+*filter_list(lst, predicate)
+    lst.filter(predicate)
+
+# Reduce list to single value
+*fold(lst, initial, func)
+    lst.reduce(initial, func)
+
+# Alias for fold
+*reduce_list(lst, initial, func)
+    lst.reduce(initial, func)
+
+# Get element at index (0-based)
+*at(lst, index)
+    lst.get(index)
+
+# Get first element
+*first(lst)
+    lst.get(0)
+
+# Get last element
+*last(lst)
+    lst.get(lst.length - 1)
+
+# Get list length
+*len(lst)
+    lst.length
+
+# Check if list is empty
+*empty(lst)
+    lst.length == 0
+
+# Append element to end
+*push_item(lst, elem)
+    lst.push(elem)
+
+# Remove and return last element
+*pop_item(lst)
+    lst.pop()
+
+# Sum all numbers in list
+*sum(lst)
+    lst.reduce(0, *fn(acc, x) acc + x)
+
+# Product of all numbers in list
+*product(lst)
+    lst.reduce(1, *fn(acc, x) acc * x)

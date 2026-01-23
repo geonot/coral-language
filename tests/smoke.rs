@@ -10,7 +10,8 @@ fn compiles_basic_program() {
     let ir = compiler.compile_to_ir(source).expect(
         "failed to compile source",
     );
-    assert!(ir.contains("define double @__user_main"));
+    // Functions now return ptr (Value*) instead of double
+    assert!(ir.contains("define ptr @__user_main"));
 }
 
 #[test]
@@ -204,6 +205,90 @@ fn lowers_log_builtin() {
     assert!(
         ir.contains("@coral_log"),
         "log builtin should call coral_log runtime helper",
+    );
+}
+
+#[test]
+fn compiles_closure_capturing_outer_scope() {
+    let source = r"*main()
+    x is 10
+    f is *fn(y) x + y
+    f(5)
+";
+    let compiler = Compiler;
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile closure with capture");
+    // Should create a closure environment struct
+    assert!(
+        ir.contains("closure_env_alloc") || ir.contains("@coral_heap_alloc"),
+        "closure should allocate environment for captured variables"
+    );
+    // Should store captured value in env
+    assert!(
+        ir.contains("env_store_capture") || ir.contains("capture"),
+        "closure should store captured value `x` in environment"
+    );
+    // Should invoke closure
+    assert!(
+        ir.contains("@coral_closure_invoke"),
+        "calling closure `f` should use coral_closure_invoke"
+    );
+}
+
+#[test]
+fn compiles_list_map_with_closure() {
+    // Test list.map with inline lambda
+    let source = r#"*main()
+    numbers is [1, 2, 3]
+    doubled is numbers.map(*fn(x) x + x)
+    doubled.length
+"#;
+    let compiler = Compiler;
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile list.map with closure");
+    assert!(
+        ir.contains("@coral_list_map"),
+        "list.map should call coral_list_map runtime helper"
+    );
+    assert!(
+        ir.contains("@coral_make_closure") || ir.contains("lambda_invoke"),
+        "list.map callback should be compiled as closure"
+    );
+}
+
+#[test]
+fn compiles_list_filter_with_closure() {
+    let source = r#"*main()
+    numbers is [1, 2, 3, 4, 5]
+    evens is numbers.filter(*fn(x) x > 2)
+    evens.length
+"#;
+    let compiler = Compiler;
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile list.filter with closure");
+    assert!(
+        ir.contains("@coral_list_filter"),
+        "list.filter should call coral_list_filter runtime helper"
+    );
+}
+
+#[test]
+fn compiles_list_reduce_with_closure() {
+    let source = r#"*main()
+    numbers is [1, 2, 3, 4]
+    total is numbers.reduce(0, *fn(acc, x) acc + x)
+    total
+"#;
+    let compiler = Compiler;
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile list.reduce with closure");
+    assert!(
+        ir.contains("@coral_list_reduce"),
+        "list.reduce should call coral_list_reduce runtime helper"
     );
 }
 

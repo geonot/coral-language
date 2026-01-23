@@ -15,7 +15,7 @@
 	value
 
 *when(condition, value)
-	condition ? value ! ()
+	condition ? value ! none
 
 true_value is true
 false_value is false

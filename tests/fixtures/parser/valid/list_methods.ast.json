@@ -56,6 +56,25 @@
                   ]
                 }
               }
+            },
+            {
+              "expression": {
+                "call": {
+                  "args": [
+                    {
+                      "integer": 4
+                    }
+                  ],
+                  "callee": {
+                    "member": {
+                      "property": "push",
+                      "target": {
+                        "identifier": "values"
+                      }
+                    }
+                  }
+                }
+              }
             }
           ],
           "value": {

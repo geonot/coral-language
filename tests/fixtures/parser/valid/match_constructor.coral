@@ -1,0 +1,4 @@
+x is match 1
+  Ok(v) ? v
+  Err(e) ? 0
+  _ ? -1

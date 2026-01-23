@@ -1,0 +1,71 @@
+{
+  "items": [
+    {
+      "binding": {
+        "name": "x",
+        "value": {
+          "match": {
+            "arms": [
+              {
+                "body": {
+                  "statements": [],
+                  "value": {
+                    "identifier": "v"
+                  }
+                },
+                "pattern": {
+                  "constructor": {
+                    "fields": [
+                      {
+                        "identifier": "v"
+                      }
+                    ],
+                    "name": "Ok"
+                  }
+                }
+              },
+              {
+                "body": {
+                  "statements": [],
+                  "value": {
+                    "integer": 0
+                  }
+                },
+                "pattern": {
+                  "constructor": {
+                    "fields": [
+                      {
+                        "identifier": "e"
+                      }
+                    ],
+                    "name": "Err"
+                  }
+                }
+              },
+              {
+                "body": {
+                  "statements": [],
+                  "value": {
+                    "unary": {
+                      "expr": {
+                        "integer": 1
+                      },
+                      "op": "Neg"
+                    }
+                  }
+                },
+                "pattern": {
+                  "wildcard": "_"
+                }
+              }
+            ],
+            "default": null,
+            "value": {
+              "integer": 1
+            }
+          }
+        }
+      }
+    }
+  ]
+}

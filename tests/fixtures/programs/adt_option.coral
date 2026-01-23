@@ -1,0 +1,14 @@
+enum Option
+  Some(value)
+  None
+
+test_some is Some(42)
+test_none is None
+
+result1 is match test_some
+  Some(v) ? v
+  None ? 0
+
+result2 is match test_none
+  Some(v) ? v
+  None ? 999

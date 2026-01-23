@@ -55,7 +55,7 @@ impl Interpreter {
                     }
                     Instr::Call { dst, func, args } => {
                         if func == "log" {
-                            let arg0 = args.get(0).and_then(|o| self.eval_operand_opt(o, &locals));
+                            let arg0 = args.first().and_then(|o| self.eval_operand_opt(o, &locals));
                             if let Some(v) = arg0 {
                                 println!("{}", self.format_value(&v));
                             }

@@ -81,6 +81,12 @@ fn item_snapshot(item: &Item) -> Value {
                 "return_type": extern_fn.return_type.as_ref().map(|t| t.segments.join("."))
             }
         }),
+        Item::ErrorDefinition(err_def) => json!({
+            "error_def": error_def_snapshot(err_def)
+        }),
+        Item::TraitDefinition(trait_def) => json!({
+            "trait_def": trait_def_snapshot(trait_def)
+        }),
     }
 }
 
@@ -128,11 +134,64 @@ fn statement_snapshot(statement: &Statement) -> Value {
 }
 
 fn type_snapshot(ty: &TypeDefinition) -> Value {
-    json!({
+    let mut obj = json!({
         "name": ty.name,
         "fields": ty.fields.iter().map(field_snapshot).collect::<Vec<_>>(),
         "methods": ty.methods.iter().map(function_snapshot).collect::<Vec<_>>()
+    });
+    
+    // Include variants if this is an enum/ADT
+    if !ty.variants.is_empty() {
+        obj["variants"] = json!(ty.variants.iter().map(variant_snapshot).collect::<Vec<_>>());
+    }
+    
+    obj
+}
+
+fn variant_snapshot(variant: &TypeVariant) -> Value {
+    json!({
+        "name": variant.name,
+        "fields": variant.fields.iter().map(|f| {
+            json!({
+                "name": f.name.clone().unwrap_or_default()
+            })
+        }).collect::<Vec<_>>()
     })
+}
+
+fn error_def_snapshot(err_def: &coralc::ast::ErrorDefinition) -> Value {
+    let mut obj = json!({
+        "name": err_def.name,
+    });
+    if let Some(code) = err_def.code {
+        obj["code"] = json!(code);
+    }
+    if let Some(ref message) = err_def.message {
+        obj["message"] = json!(message);
+    }
+    if !err_def.children.is_empty() {
+        obj["children"] = json!(err_def.children.iter().map(error_def_snapshot).collect::<Vec<_>>());
+    }
+    obj
+}
+
+fn trait_def_snapshot(trait_def: &coralc::ast::TraitDefinition) -> Value {
+    json!({
+        "name": trait_def.name,
+        "required_traits": trait_def.required_traits,
+        "methods": trait_def.methods.iter().map(trait_method_snapshot).collect::<Vec<_>>()
+    })
+}
+
+fn trait_method_snapshot(method: &coralc::ast::TraitMethod) -> Value {
+    let mut obj = json!({
+        "name": method.name,
+        "params": method.params.iter().map(parameter_snapshot).collect::<Vec<_>>(),
+    });
+    if let Some(ref body) = method.body {
+        obj["body"] = json!(body.statements.iter().map(statement_snapshot).collect::<Vec<_>>());
+    }
+    obj
 }
 
 fn store_snapshot(store: &StoreDefinition) -> Value {
@@ -163,6 +222,7 @@ fn field_snapshot(field: &Field) -> Value {
 fn expression_snapshot(expr: &Expression) -> Value {
     match expr {
         Expression::Unit => json!({ "unit": null }),
+        Expression::None(_) => json!({ "none": null }),
         Expression::Identifier(name, _) => json!({ "identifier": name }),
         Expression::Integer(value, _) => json!({ "integer": value }),
         Expression::Float(value, _) => json!({ "float": value }),
@@ -254,6 +314,18 @@ fn expression_snapshot(expr: &Expression) -> Value {
         Expression::Unsafe { block, .. } => json!({
             "unsafe": block_snapshot(block)
         }),
+        Expression::Pipeline { left, right, .. } => json!({
+            "pipeline": {
+                "left": expression_snapshot(left),
+                "right": expression_snapshot(right)
+            }
+        }),
+        Expression::ErrorValue { path, .. } => json!({
+            "error_value": path
+        }),
+        Expression::ErrorPropagate { expr, .. } => json!({
+            "error_propagate": expression_snapshot(expr)
+        }),
     }
 }
 
@@ -266,6 +338,13 @@ fn pattern_snapshot(pattern: &MatchPattern) -> Value {
         MatchPattern::List(items) => json!({
             "list": items.iter().map(expression_snapshot).collect::<Vec<_>>()
         }),
+        MatchPattern::Constructor { name, fields, .. } => json!({
+            "constructor": {
+                "name": name,
+                "fields": fields.iter().map(pattern_snapshot).collect::<Vec<_>>()
+            }
+        }),
+        MatchPattern::Wildcard(_) => json!({ "wildcard": "_" }),
     }
 }
 
@@ -284,7 +363,6 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
         BinaryOp::ShiftLeft => "ShiftLeft",
         BinaryOp::ShiftRight => "ShiftRight",
         BinaryOp::Equals => "Equals",
-        BinaryOp::NotEquals => "NotEquals",
         BinaryOp::Greater => "Greater",
         BinaryOp::GreaterEq => "GreaterEq",
         BinaryOp::Less => "Less",

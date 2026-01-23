@@ -1,0 +1,38 @@
+# Hello World - Basic Coral syntax demonstration
+
+*main()
+    log('Hello, Coral!')
+    
+    # Variables are declared with 'is'
+    name is 'World'
+    greeting is 'Hello, {name}!'
+    log(greeting)
+    
+    # Numbers
+    answer is 42
+    pi is 3.14159
+    log('The answer is {answer}')
+    log('Pi is approximately {pi}')
+    
+    # Booleans
+    ready is true
+    log('Ready: {ready}')
+    
+    # Lists
+    fruits is ['apple', 'banana', 'cherry']
+    log('Fruits: {fruits}')
+    log('First fruit: {fruits.get(0)}')
+    
+    # Maps
+    config is map(
+        'host' is 'localhost',
+        'port' is 8080,
+        'debug' is true
+    )
+    log('Host: {config.get("host")}')
+    
+    # Conditionals with ? !
+    status is answer > 40 ? 'big' ! 'small'
+    log('Answer is {status}')
+    
+    'Program complete'

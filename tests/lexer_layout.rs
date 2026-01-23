@@ -52,3 +52,14 @@ fn lex_blank_lines_without_spurious_indents() {
         );
     }
 }
+
+#[test]
+fn lex_bang_alone() {
+    // Single ! should still work for error propagation
+    let tokens = lexer::lex("!x").expect("lexing failed");
+    let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+    assert!(
+        kinds.contains(&&TokenKind::Bang),
+        "should lex single ! as Bang token, got: {:?}", kinds
+    );
+}

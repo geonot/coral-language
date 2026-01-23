@@ -1,0 +1,14 @@
+test_str is "hello world"
+
+upper is to_upper(test_str)
+lower is to_lower("HELLO")
+trimmed is trim("  spaces  ")
+parts is split(test_str, " ")
+sliced is slice(test_str, 0, 5)
+idx is index_of(test_str, "world")
+has_world is contains(test_str, "world")
+starts is starts_with(test_str, "hello")
+ends is ends_with(test_str, "world")
+replaced is replace(test_str, "world", "coral")
+num_str is to_string(42)
+parsed is parse_number("123")

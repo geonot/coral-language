@@ -1,0 +1,19 @@
+store Counter
+    count is 0
+
+    *increment()
+        self.count is self.count + 1
+        self.count
+
+    *add(n)
+        self.count is self.count + n
+        self.count
+
+
+*main()
+    c is make_Counter()
+    log(c.count)
+    log(c.increment())
+    log(c.add(5))
+    0
+

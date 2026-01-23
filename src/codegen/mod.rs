@@ -1,3 +1,11 @@
+//! LLVM code generation for Coral programs.
+//!
+//! This module transforms semantic models into LLVM IR using inkwell bindings.
+
+mod runtime;
+
+use runtime::RuntimeBindings;
+
 use crate::ast::{
     BinaryOp,
     Binding,
@@ -21,7 +29,7 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType, FunctionType, IntType, PointerType, StructType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType, FunctionType, IntType, StructType};
 use inkwell::values::{
     BasicMetadataValueEnum,
     BasicValue,
@@ -54,6 +62,12 @@ pub struct CodeGenerator<'ctx> {
     allocation_hints: HashMap<String, AllocationStrategy>,
     extern_sigs: HashMap<String, ExternSignature<'ctx>>,
     inline_asm_mode: InlineAsmMode,
+    /// Maps store method name to (store_name, param_count) for dynamic dispatch
+    store_methods: HashMap<String, (String, usize)>,
+    /// Maps (store_name, field_name) to is_reference for reference field tracking
+    reference_fields: HashSet<(String, String)>,
+    /// Maps enum constructor name to (enum_name, field_count) for ADT construction
+    enum_constructors: HashMap<String, (String, usize)>,
 }
 
 #[derive(Clone)]
@@ -98,6 +112,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             allocation_hints: HashMap::new(),
             extern_sigs: HashMap::new(),
             inline_asm_mode: InlineAsmMode::Deny,
+            store_methods: HashMap::new(),
+            reference_fields: HashSet::new(),
+            enum_constructors: HashMap::new(),
         }
     }
 
@@ -139,40 +156,88 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         
         // Declare user functions
+        // All Coral functions use Value* (pointer to tagged value) for params and returns.
+        // This ensures non-numeric values (strings, lists, etc.) are passed correctly.
         for function in &model.functions {
             let llvm_name = if function.name == "main" {
                 "__user_main"
             } else {
                 &function.name
             };
-            let fn_type = self.f64_type.fn_type(
-                &vec![self.f64_type.into(); function.params.len()],
+            let fn_type = self.runtime.value_ptr_type.fn_type(
+                &vec![self.runtime.value_ptr_type.into(); function.params.len()],
                 false,
             );
             let llvm_fn = self.module.add_function(llvm_name, fn_type, None);
             self.functions.insert(function.name.clone(), llvm_fn);
         }
-        // Handle actor send and self
+        // Handle stores and actors
         for store in &model.stores {
+            // Track reference fields for this store
+            for field in &store.fields {
+                if field.is_reference {
+                    self.reference_fields.insert((store.name.clone(), field.name.clone()));
+                }
+            }
+            
+            // All stores get a constructor that returns a Map with fields
+            let constructor_name = format!("make_{}", store.name);
+            let ctor_type = self.runtime.value_ptr_type.fn_type(&[], false);
+            let ctor_fn = self.module.add_function(&constructor_name, ctor_type, None);
+            self.functions.insert(constructor_name, ctor_fn);
+            
             if store.is_actor {
-                let constructor_name = format!("make_{}", store.name);
-                let ctor_type = self.runtime.value_ptr_type.fn_type(&[], false);
-                let ctor_fn = self.module.add_function(&constructor_name, ctor_type, None);
-                self.functions.insert(constructor_name, ctor_fn);
                 // Declare message handler functions for each @method
+                // Actor methods take state (ValuePtr) as hidden first param, plus user params (ValuePtr)
                 for method in &store.methods {
                     if method.kind == FunctionKind::ActorMessage {
                         let mangled = format!("{}_{}", store.name, method.name);
-                        let fn_type = self.f64_type.fn_type(
-                            &vec![self.f64_type.into(); method.params.len()],
-                            false,
-                        );
+                        // Hidden first param: state pointer (ValuePtr), user params also ValuePtr
+                        let mut param_types: Vec<BasicMetadataTypeEnum> = 
+                            vec![self.runtime.value_ptr_type.into()];
+                        for _ in 0..method.params.len() {
+                            param_types.push(self.runtime.value_ptr_type.into());
+                        }
+                        // Return ValuePtr
+                        let fn_type = self.runtime.value_ptr_type.fn_type(&param_types, false);
                         let llvm_fn = self.module.add_function(&mangled, fn_type, None);
                         self.functions.insert(mangled, llvm_fn);
                     }
                 }
+            } else {
+                // Non-actor store methods: take self (store Map) as first param
+                for method in &store.methods {
+                    if method.kind == FunctionKind::Method {
+                        let mangled = format!("{}_{}", store.name, method.name);
+                        let mut param_types: Vec<BasicMetadataTypeEnum> = 
+                            vec![self.runtime.value_ptr_type.into()];
+                        // For alpha, all method params are CoralValue* pointers (not f64)
+                        // This allows passing stores, lists, and other values without corruption
+                        for _ in 0..method.params.len() {
+                            param_types.push(self.runtime.value_ptr_type.into());
+                        }
+                        // Return ptr (CoralValue*) instead of f64 to avoid corruption
+                        let fn_type = self.runtime.value_ptr_type.fn_type(&param_types, false);
+                        let llvm_fn = self.module.add_function(&mangled, fn_type, None);
+                        self.functions.insert(mangled.clone(), llvm_fn);
+                        // Track store methods for dynamic dispatch
+                        self.store_methods.insert(method.name.clone(), (store.name.clone(), method.params.len()));
+                    }
+                }
             }
         }
+        
+        // Register enum constructors from type definitions
+        for type_def in &model.type_defs {
+            for variant in &type_def.variants {
+                // Track constructor: (enum_name, field_count)
+                self.enum_constructors.insert(
+                    variant.name.clone(), 
+                    (type_def.name.clone(), variant.fields.len())
+                );
+            }
+        }
+        
         self.build_global_initializer(&model.globals)?;
         
         for function in &model.functions {
@@ -180,23 +245,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_function_body(function, *llvm_fn)?;
             }
         }
+        // Build store/actor method bodies
         for store in &model.stores {
             if store.is_actor {
                 for method in &store.methods {
                     if method.kind == FunctionKind::ActorMessage {
                         let mangled = format!("{}_{}", store.name, method.name);
                         if let Some(llvm_fn) = self.functions.get(&mangled) {
-                            self.build_function_body(method, *llvm_fn)?;
+                            self.build_actor_method_body(method, *llvm_fn)?;
+                        }
+                    }
+                }
+            } else {
+                // Non-actor store methods
+                for method in &store.methods {
+                    if method.kind == FunctionKind::Method {
+                        let mangled = format!("{}_{}", store.name, method.name);
+                        if let Some(llvm_fn) = self.functions.get(&mangled) {
+                            self.build_store_method_body(method, *llvm_fn)?;
                         }
                     }
                 }
             }
         }
         
-        // Generate actor constructor bodies
+        // Generate store/actor constructor bodies
         for store in &model.stores {
             if store.is_actor {
                 self.build_actor_constructor(store)?;
+            } else {
+                self.build_store_constructor(store)?;
             }
         }
         
@@ -317,17 +395,53 @@ impl<'ctx> CodeGenerator<'ctx> {
             function: llvm_fn,
         };
 
+        // Parameters are Value* pointers - use them directly without wrapping
         for (param, param_ast) in llvm_fn
             .get_param_iter()
             .zip(function.params.iter())
         {
-            let number_ptr = self.wrap_number(param.into_float_value());
-            ctx.variables.insert(param_ast.name.clone(), number_ptr);
+            // Parameter is already a Value* pointer
+            let value_ptr = param.into_pointer_value();
+            ctx.variables.insert(param_ast.name.clone(), value_ptr);
         }
 
         let block_value = self.emit_block(&mut ctx, &function.body)?;
-        let return_value = self.value_to_number(block_value);
-        self.builder.build_return(Some(&return_value)).unwrap();
+        // Return Value* pointer directly, not as f64
+        self.builder.build_return(Some(&block_value)).unwrap();
+        Ok(())
+    }
+
+    /// Build body for an actor @message method.
+    /// Actor methods have a hidden first parameter (state Map) accessible as `self`.
+    fn build_actor_method_body(
+        &mut self,
+        function: &Function,
+        llvm_fn: FunctionValue<'ctx>,
+    ) -> Result<(), Diagnostic> {
+        let entry = self.context.append_basic_block(llvm_fn, "entry");
+        self.builder.position_at_end(entry);
+        self.ensure_globals_initialized();
+        let mut ctx = FunctionContext {
+            variables: HashMap::new(),
+            function: llvm_fn,
+        };
+
+        // First param is the state pointer (ValuePtr), inject as `self`
+        let state_ptr = llvm_fn.get_nth_param(0).unwrap().into_pointer_value();
+        // Store state directly as `self` - it's already a ValuePtr to the state Map
+        ctx.variables.insert("self".to_string(), state_ptr);
+
+        // Remaining params are user params (starting at index 1) - now Value* pointers
+        for (i, param_ast) in function.params.iter().enumerate() {
+            let param = llvm_fn.get_nth_param((i + 1) as u32).unwrap();
+            // Parameter is already a Value* pointer
+            let value_ptr = param.into_pointer_value();
+            ctx.variables.insert(param_ast.name.clone(), value_ptr);
+        }
+
+        let block_value = self.emit_block(&mut ctx, &function.body)?;
+        // Return Value* pointer directly
+        self.builder.build_return(Some(&block_value)).unwrap();
         Ok(())
     }
 
@@ -474,10 +588,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     // Then check user functions
                     if let Some(&function) = self.functions.get(name) {
+                        // Pass Value* pointers directly, not as f64
                         let mut arg_values = Vec::new();
                         for arg in args {
                             let value = self.emit_expression(ctx, arg)?;
-                            arg_values.push(self.value_to_number(value));
+                            arg_values.push(value);
                         }
                         let metadata_args: Vec<BasicMetadataValueEnum> =
                             arg_values.iter().map(|v| (*v).into()).collect();
@@ -485,12 +600,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_call(function, &metadata_args, "call")
                             .unwrap();
+                        // Return is Value* pointer
                         let value = call
                             .try_as_basic_value()
                             .left()
                             .ok_or_else(|| Diagnostic::new("call produced no value", expr.span()))?
-                            .into_float_value();
-                        Ok(self.wrap_number(value))
+                            .into_pointer_value();
+                        Ok(value)
+                    } else if let Some((enum_name, expected_field_count)) = self.enum_constructors.get(name).cloned() {
+                        // Enum constructor call - create tagged value
+                        if args.len() != expected_field_count {
+                            return Err(Diagnostic::new(
+                                format!(
+                                    "enum constructor `{}::{}` expects {} argument(s), found {}",
+                                    enum_name, name, expected_field_count, args.len()
+                                ),
+                                expr.span(),
+                            ));
+                        }
+                        self.emit_enum_constructor(ctx, name, args)
+                    } else if ctx.variables.contains_key(name) {
+                        // Local variable - might be a closure stored in a binding.
+                        let callee_value = self.emit_expression(ctx, callee)?;
+                        self.emit_closure_call(ctx, callee_value, args)
                     } else {
                         Err(Diagnostic::new(
                             format!("unknown function `{}`", name),
@@ -512,6 +644,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             } => self.emit_ternary(ctx, condition, then_branch, else_branch),
             Expression::Match(match_expr) => self.emit_match(ctx, match_expr),
             Expression::Unit => Ok(self.wrap_unit()),
+            Expression::None(_) => Ok(self.wrap_unit()),
             Expression::InlineAsm { template, inputs, span, .. } => {
                 let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(inputs.len());
                 let mut constraint_parts: Vec<&str> = Vec::with_capacity(inputs.len());
@@ -560,6 +693,123 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Unsafe { block, .. } => {
                 // Unsafe is transparent to codegen for now.
                 self.emit_block(ctx, block)
+            }
+            Expression::Pipeline { left, right, span } => {
+                // Desugar pipeline: `a ~ f(args)` becomes `f(a, args)`
+                // With explicit $ placeholder: `a ~ f($, extra)` becomes `f(a, extra)`
+                match right.as_ref() {
+                    Expression::Call { callee, args, span: call_span } => {
+                        // Check if any argument is a placeholder (or contains one)
+                        let has_placeholder = args.iter().any(|arg| self.contains_placeholder(arg));
+                        
+                        let new_args = if has_placeholder {
+                            // Replace $ placeholders with the piped value
+                            args.iter()
+                                .map(|arg| self.replace_placeholder_with(arg, left.as_ref()))
+                                .collect()
+                        } else {
+                            // No placeholder - prepend left as first argument
+                            let mut new_args = vec![left.as_ref().clone()];
+                            new_args.extend(args.iter().cloned());
+                            new_args
+                        };
+                        
+                        let desugared = Expression::Call {
+                            callee: callee.clone(),
+                            args: new_args,
+                            span: *call_span,
+                        };
+                        self.emit_expression(ctx, &desugared)
+                    }
+                    Expression::Identifier(name, id_span) => {
+                        // `a ~ f` becomes `f(a)`
+                        let desugared = Expression::Call {
+                            callee: Box::new(Expression::Identifier(name.clone(), *id_span)),
+                            args: vec![left.as_ref().clone()],
+                            span: *span,
+                        };
+                        self.emit_expression(ctx, &desugared)
+                    }
+                    _ => Err(Diagnostic::new(
+                        "pipeline right-hand side must be a function call or identifier",
+                        *span,
+                    ))
+                }
+            }
+            Expression::ErrorValue { path, span: _ } => {
+                // Create an error value with the given path
+                let error_name = path.join(":");
+                let name_bytes = error_name.as_bytes();
+                
+                // Create a global constant for the error name string
+                let name_array = self.context.const_string(name_bytes, false);
+                let name_global = self.module.add_global(
+                    name_array.get_type(),
+                    Some(AddressSpace::default()),
+                    &format!("err_name_{}", error_name.replace(':', "_")),
+                );
+                name_global.set_linkage(inkwell::module::Linkage::Private);
+                name_global.set_initializer(&name_array);
+                name_global.set_constant(true);
+                
+                // Get pointer to name string
+                let name_ptr = self.builder.build_pointer_cast(
+                    name_global.as_pointer_value(),
+                    self.i8_type.ptr_type(AddressSpace::default()),
+                    "err_name_ptr",
+                ).unwrap();
+                
+                // Error code: could be derived from the error definition, for now use 0
+                let error_code = self.context.i32_type().const_int(0, false);
+                let name_len = self.usize_type.const_int(name_bytes.len() as u64, false);
+                
+                // Call coral_make_error(code, name_ptr, name_len)
+                Ok(self.call_runtime_ptr(
+                    self.runtime.make_error,
+                    &[error_code.into(), name_ptr.into(), name_len.into()],
+                    "make_error",
+                ))
+            }
+            Expression::ErrorPropagate { expr, span: _ } => {
+                // Error propagation: `expr ! return err`
+                // 1. Evaluate the expression
+                // 2. Check if it's an error
+                // 3. If error, return it from the current function
+                // 4. Otherwise, continue with the value
+                
+                let value = self.emit_expression(ctx, expr)?;
+                
+                // Call coral_is_err to check if value is an error (returns i8)
+                let is_err = self.builder
+                    .build_call(self.runtime.is_err, &[value.into()], "is_err_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                
+                let is_err_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_err,
+                    self.i8_type.const_zero(),
+                    "is_err_bool",
+                ).unwrap();
+                
+                // Create basic blocks for the branch
+                let current_fn = ctx.function;
+                let err_return_bb = self.context.append_basic_block(current_fn, "err_return");
+                let continue_bb = self.context.append_basic_block(current_fn, "err_continue");
+                
+                self.builder.build_conditional_branch(is_err_bool, err_return_bb, continue_bb).unwrap();
+                
+                // Error return block: return the error value
+                self.builder.position_at_end(err_return_bb);
+                self.builder.build_return(Some(&value)).unwrap();
+                
+                // Continue block: value is not an error, use it
+                self.builder.position_at_end(continue_bb);
+                
+                Ok(value)
             }
         }
     }
@@ -751,6 +1001,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         property: &str,
         _span: Span,
     ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        // For 'self' target (store instance), always use map lookup for field access
+        if let Expression::Identifier(name, _) = target {
+            if name == "self" {
+                let target_value = self.emit_expression(ctx, target)?;
+                let key_value = self.emit_string_literal(property);
+                return Ok(self.call_runtime_ptr(
+                    self.runtime.map_get,
+                    &[target_value.into(), key_value.into()],
+                    "map_get_property",
+                ));
+            }
+        }
         let target_value = self.emit_expression(ctx, target)?;
         match property {
             "length" | "count" => Ok(self.call_runtime_ptr(
@@ -763,6 +1025,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[target_value.into()],
                 "map_length",
             )),
+            "err" => {
+                // x.err - returns true if x is an error value
+                let is_err = self.builder
+                    .build_call(self.runtime.is_err, &[target_value.into()], "is_err_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_err_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_err,
+                    self.context.i8_type().const_zero(),
+                    "is_err_bool",
+                ).unwrap();
+                Ok(self.wrap_bool(is_err_bool))
+            }
             _ => {
                 let key_value = self.emit_string_literal(property);
                 Ok(self.call_runtime_ptr(
@@ -788,6 +1067,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         match property {
+            // x.equals(y) - value equality comparison
+            "equals" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("equals expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_equals,
+                    &[target_value.into(), arg_value.into()],
+                    "value_equals",
+                ))
+            }
+            // x.not() - boolean negation
+            "not" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("not does not take arguments", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let bool_val = self.value_to_bool(target_value);
+                let inverted = self.builder.build_not(bool_val, "not").unwrap();
+                Ok(self.wrap_bool(inverted))
+            }
             "iter" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("iter does not take arguments", span));
@@ -847,11 +1149,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     (self.emit_expression(ctx, &args[0])?, self.emit_expression(ctx, &args[1])?)
                 };
-                let seed_meta: BasicMetadataValueEnum<'ctx> = if args.len() == 1 {
-                    seed_arg.into()
-                } else {
-                    seed_arg.into()
-                };
+                let seed_meta: BasicMetadataValueEnum<'ctx> = seed_arg.into();
                 Ok(self.call_runtime_ptr(
                     self.runtime.list_reduce,
                     &[list_value.into(), seed_meta, func_value.into()],
@@ -912,6 +1210,39 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let map_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_expression(ctx, &args[0])?;
                 let new_value = self.emit_expression(ctx, &args[1])?;
+                
+                // For self.field = value on stores with reference fields, handle retain/release
+                if let Expression::Identifier(name, _) = target {
+                    if name == "self" {
+                        // Extract field name from key if it's a string literal
+                        if let Expression::String(field_name, _) = &args[0] {
+                            // Check all stores to see if any have this as a reference field
+                            // Since we don't track the current store context, check if field is a reference in ANY store
+                            let is_ref = self.reference_fields.iter().any(|(_, f)| f == field_name);
+                            
+                            if is_ref {
+                                // Get old value before setting
+                                let old_value = self.call_runtime_ptr(
+                                    self.runtime.map_get,
+                                    &[map_value.into(), key_value.into()],
+                                    "get_old_ref",
+                                );
+                                // Retain new value
+                                self.call_runtime_void(self.runtime.value_retain, &[new_value.into()], "retain_new_ref");
+                                // Set the field
+                                let result = self.call_runtime_ptr(
+                                    self.runtime.map_set,
+                                    &[map_value.into(), key_value.into(), new_value.into()],
+                                    "map_set_method",
+                                );
+                                // Release old value
+                                self.call_runtime_void(self.runtime.value_release, &[old_value.into()], "release_old_ref");
+                                return Ok(result);
+                            }
+                        }
+                    }
+                }
+                
                 Ok(self.call_runtime_ptr(
                     self.runtime.map_set,
                     &[map_value.into(), key_value.into(), new_value.into()],
@@ -933,10 +1264,49 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "list_get",
                 ))
             }
-            _ => Err(Diagnostic::new(
-                format!("method `{property}` not supported yet"),
-                span,
-            )),
+            _ => {
+                // Check if this is a store method call
+                if let Some((store_name, param_count)) = self.store_methods.get(property).cloned() {
+                    // Verify argument count
+                    if args.len() != param_count {
+                        return Err(Diagnostic::new(
+                            format!("method `{}` expects {} argument(s), but {} were provided", 
+                                    property, param_count, args.len()),
+                            span,
+                        ));
+                    }
+                    // Emit target (the store instance)
+                    let target_value = self.emit_expression(ctx, target)?;
+                    // Build arguments: self (target) + user args as CoralValue* pointers
+                    let mut call_args: Vec<BasicMetadataValueEnum> = vec![target_value.into()];
+                    for arg in args {
+                        let arg_val = self.emit_expression(ctx, arg)?;
+                        // Pass as pointer (CoralValue*), not as number
+                        call_args.push(arg_val.into());
+                    }
+                    // Build the mangled function name and look up function
+                    let mangled = format!("{}_{}", store_name, property);
+                    let store_method = *self.functions.get(&mangled)
+                        .ok_or_else(|| Diagnostic::new(
+                            format!("internal error: store method {} not found", mangled),
+                            span,
+                        ))?;
+                    // Call the store method (returns ptr, not f64)
+                    let result = self.builder.build_call(store_method, &call_args, "store_method_call")
+                        .unwrap()
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap()
+                        .into_pointer_value();
+                    // Return the ptr directly (CoralValue*)
+                    Ok(result)
+                } else {
+                    Err(Diagnostic::new(
+                        format!("method `{property}` not supported yet"),
+                        span,
+                    ))
+                }
+            }
         }
     }
 
@@ -1000,13 +1370,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let args = &[lhs.into(), rhs.into()];
             return Ok(self.call_runtime_ptr(self.runtime.value_equals, args, "value_equals"));
         }
-        if matches!(op, BinaryOp::NotEquals) {
-            let args = &[lhs.into(), rhs.into()];
-            let equals_ptr = self.call_runtime_ptr(self.runtime.value_equals, args, "value_equals");
-            let equals_bool = self.value_to_bool(equals_ptr);
-            let inverted = self.builder.build_not(equals_bool, "neq").unwrap();
-            return Ok(self.wrap_bool(inverted));
-        }
+
         if matches!(op, BinaryOp::BitAnd) {
             let args = &[lhs.into(), rhs.into()];
             return Ok(self.call_runtime_ptr(self.runtime.value_bitand, args, "bitand"));
@@ -1056,7 +1420,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_float_compare(FloatPredicate::OLE, lhs_num, rhs_num, "le")
                     .unwrap(),
             ),
-            Equals | NotEquals | And | Or => unreachable!(),
+            Equals | And | Or => unreachable!(),
         })
     }
 
@@ -1203,10 +1567,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap();
 
             self.builder.position_at_end(arm_block);
-            if let MatchPattern::Identifier(name) = &arm.pattern {
-                self.call_runtime_void(self.runtime.value_retain, &[match_value.into()], "retain_match_binding");
-                ctx.variables.insert(name.clone(), match_value);
-            }
+            // Bind pattern variables (including nested patterns)
+            self.bind_pattern_variables(ctx, match_value, &arm.pattern);
             let result = self.emit_block(ctx, &arm.body)?;
             if arm_block.get_terminator().is_none() {
                 self.builder
@@ -1256,7 +1618,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn emit_match_condition(
         &mut self,
-        _ctx: &mut FunctionContext<'ctx>,
+        ctx: &mut FunctionContext<'ctx>,
         match_value: PointerValue<'ctx>,
         pattern: &MatchPattern,
         _span: Span,
@@ -1299,7 +1661,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(as_bool)
             }
             MatchPattern::List(items) => {
-                let list_lit = self.emit_list_literal(_ctx, items)?;
+                let list_lit = self.emit_list_literal(ctx, items)?;
                 let eq = self.call_runtime_ptr(
                     self.runtime.value_equals,
                     &[match_value.into(), list_lit.into()],
@@ -1311,6 +1673,121 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(as_bool)
             }
             MatchPattern::Identifier(_) => Ok(self.bool_type.const_int(1, false)),
+            MatchPattern::Wildcard(_) => Ok(self.bool_type.const_int(1, false)),
+            MatchPattern::Constructor { name, fields, span } => {
+                // For ADT constructor patterns, check if the tagged value's tag matches
+                let tag_name_bytes = name.as_bytes();
+                let tag_name_global = self.get_or_create_string_constant(name);
+                let tag_name_ptr = self.builder
+                    .build_pointer_cast(
+                        tag_name_global.as_pointer_value(),
+                        self.i8_type.ptr_type(AddressSpace::default()),
+                        "tag_name_ptr",
+                    )
+                    .unwrap();
+                let tag_name_len = self.usize_type.const_int(tag_name_bytes.len() as u64, false);
+                
+                // Call coral_tagged_is_tag(value, tag_name, tag_name_len)
+                let is_tag_result = self.call_runtime_ptr(
+                    self.runtime.tagged_is_tag,
+                    &[match_value.into(), tag_name_ptr.into(), tag_name_len.into()],
+                    "is_tag",
+                );
+                let tag_matches = self.value_to_bool(is_tag_result);
+                self.call_runtime_void(self.runtime.value_release, &[is_tag_result.into()], "is_tag_drop");
+                
+                // If there are no nested field patterns, we're done
+                if fields.is_empty() {
+                    return Ok(tag_matches);
+                }
+                
+                // For nested patterns, we need to check each field recursively
+                // First, get the current function and create blocks for the nested check
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let nested_check_bb = self.context.append_basic_block(function, "nested_check");
+                let nested_fail_bb = self.context.append_basic_block(function, "nested_fail");
+                let nested_cont_bb = self.context.append_basic_block(function, "nested_cont");
+                
+                // Branch: if tag matches, check nested patterns; else fail
+                self.builder.build_conditional_branch(tag_matches, nested_check_bb, nested_fail_bb).unwrap();
+                
+                // Nested check block: recursively check each field pattern
+                self.builder.position_at_end(nested_check_bb);
+                let mut all_fields_match = self.bool_type.const_int(1, false);
+                
+                for (idx, field_pattern) in fields.iter().enumerate() {
+                    // Skip identifier and wildcard patterns - they always match
+                    match field_pattern {
+                        MatchPattern::Identifier(_) | MatchPattern::Wildcard(_) => continue,
+                        _ => {}
+                    }
+                    
+                    // Extract the field value
+                    let idx_val = self.usize_type.const_int(idx as u64, false);
+                    let field_value = self.call_runtime_ptr(
+                        self.runtime.tagged_get_field,
+                        &[match_value.into(), idx_val.into()],
+                        &format!("nested_field_{}", idx),
+                    );
+                    
+                    // Recursively check the nested pattern
+                    let field_matches = self.emit_match_condition(ctx, field_value, field_pattern, *span)?;
+                    
+                    // Combine with previous results
+                    all_fields_match = self.builder.build_and(all_fields_match, field_matches, "and_fields").unwrap();
+                }
+                
+                self.builder.build_unconditional_branch(nested_cont_bb).unwrap();
+                let nested_check_end = self.builder.get_insert_block().unwrap();
+                
+                // Nested fail block
+                self.builder.position_at_end(nested_fail_bb);
+                self.builder.build_unconditional_branch(nested_cont_bb).unwrap();
+                
+                // Continue block with phi
+                self.builder.position_at_end(nested_cont_bb);
+                let phi = self.builder.build_phi(self.bool_type, "nested_result").unwrap();
+                phi.add_incoming(&[
+                    (&all_fields_match, nested_check_end),
+                    (&self.bool_type.const_int(0, false), nested_fail_bb),
+                ]);
+                
+                Ok(phi.as_basic_value().into_int_value())
+            }
+        }
+    }
+
+    /// Recursively bind pattern variables, extracting fields from nested constructor patterns
+    fn bind_pattern_variables(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        value: PointerValue<'ctx>,
+        pattern: &MatchPattern,
+    ) {
+        match pattern {
+            MatchPattern::Identifier(name) => {
+                self.call_runtime_void(self.runtime.value_retain, &[value.into()], "retain_match_binding");
+                ctx.variables.insert(name.clone(), value);
+            }
+            MatchPattern::Constructor { fields, .. } => {
+                // Extract field values and recursively bind them
+                for (idx, field_pattern) in fields.iter().enumerate() {
+                    let idx_val = self.usize_type.const_int(idx as u64, false);
+                    let field_value = self.call_runtime_ptr(
+                        self.runtime.tagged_get_field,
+                        &[value.into(), idx_val.into()],
+                        &format!("get_field_{}", idx),
+                    );
+                    // Recursively bind nested patterns
+                    self.bind_pattern_variables(ctx, field_value, field_pattern);
+                }
+            }
+            MatchPattern::Wildcard(_) => {
+                // Wildcard patterns don't bind anything
+            }
+            _ => {
+                // Other patterns (Integer, Bool, String, List) don't create bindings
+            }
         }
     }
 
@@ -1334,6 +1811,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .into_pointer_value();
             self.call_runtime_void(self.runtime.value_retain, &[loaded.into()], "retain_global");
             return Ok(loaded);
+        }
+        // Check if this is a nullary enum constructor (e.g., None)
+        if let Some((_, field_count)) = self.enum_constructors.get(name).cloned() {
+            if field_count == 0 {
+                // Emit a nullary constructor call
+                return self.emit_enum_constructor_nullary(name);
+            }
         }
         Err(Diagnostic::new(
             format!("unknown variable `{name}`"),
@@ -1414,8 +1898,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value()
     }
 
-    fn emit_string_literal(&mut self, literal: &str) -> PointerValue<'ctx> {
-        let global = if let Some(global) = self.string_pool.get(literal) {
+    /// Get or create a raw string constant (global) for use in runtime calls.
+    /// Returns the GlobalValue which can be cast to i8* for runtime functions.
+    fn get_or_create_string_constant(&mut self, literal: &str) -> GlobalValue<'ctx> {
+        if let Some(global) = self.string_pool.get(literal) {
             *global
         } else {
             let name = format!("str_{}", self.string_pool.len());
@@ -1425,7 +1911,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap();
             self.string_pool.insert(literal.to_string(), gv);
             gv
-        };
+        }
+    }
+
+    fn emit_string_literal(&mut self, literal: &str) -> PointerValue<'ctx> {
+        let global = self.get_or_create_string_constant(literal);
         let i8_ptr_type = self.i8_type.ptr_type(AddressSpace::default());
         let cast_ptr = self
             .builder
@@ -1604,6 +2094,84 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Check if an expression contains a $ placeholder (for pipeline desugaring)
+    fn contains_placeholder(&self, expr: &Expression) -> bool {
+        match expr {
+            Expression::Placeholder(_, _) => true,
+            Expression::Binary { left, right, .. } => {
+                self.contains_placeholder(left) || self.contains_placeholder(right)
+            }
+            Expression::Unary { expr, .. } => self.contains_placeholder(expr),
+            Expression::Call { callee, args, .. } => {
+                self.contains_placeholder(callee) || args.iter().any(|a| self.contains_placeholder(a))
+            }
+            Expression::List(items, _) => items.iter().any(|i| self.contains_placeholder(i)),
+            Expression::Map(entries, _) => entries.iter().any(|(k, v)| {
+                self.contains_placeholder(k) || self.contains_placeholder(v)
+            }),
+            Expression::Member { target, .. } => self.contains_placeholder(target),
+            Expression::Ternary { condition, then_branch, else_branch, .. } => {
+                self.contains_placeholder(condition)
+                    || self.contains_placeholder(then_branch)
+                    || self.contains_placeholder(else_branch)
+            }
+            Expression::Lambda { body, .. } => {
+                body.statements.iter().any(|s| match s {
+                    Statement::Binding(b) => self.contains_placeholder(&b.value),
+                    Statement::Expression(e) => self.contains_placeholder(e),
+                    Statement::Return(e, _) => self.contains_placeholder(e),
+                }) || body.value.as_ref().map_or(false, |v| self.contains_placeholder(v))
+            }
+            _ => false,
+        }
+    }
+
+    /// Replace $ placeholders in an expression with a replacement expression
+    fn replace_placeholder_with(&self, expr: &Expression, replacement: &Expression) -> Expression {
+        match expr {
+            Expression::Placeholder(_, _) => replacement.clone(),
+            Expression::Binary { op, left, right, span } => Expression::Binary {
+                op: *op,
+                left: Box::new(self.replace_placeholder_with(left, replacement)),
+                right: Box::new(self.replace_placeholder_with(right, replacement)),
+                span: *span,
+            },
+            Expression::Unary { op, expr: inner, span } => Expression::Unary {
+                op: *op,
+                expr: Box::new(self.replace_placeholder_with(inner, replacement)),
+                span: *span,
+            },
+            Expression::Call { callee, args, span } => Expression::Call {
+                callee: Box::new(self.replace_placeholder_with(callee, replacement)),
+                args: args.iter().map(|a| self.replace_placeholder_with(a, replacement)).collect(),
+                span: *span,
+            },
+            Expression::List(items, span) => Expression::List(
+                items.iter().map(|i| self.replace_placeholder_with(i, replacement)).collect(),
+                *span,
+            ),
+            Expression::Map(entries, span) => Expression::Map(
+                entries.iter().map(|(k, v)| {
+                    (self.replace_placeholder_with(k, replacement), self.replace_placeholder_with(v, replacement))
+                }).collect(),
+                *span,
+            ),
+            Expression::Member { target, property, span } => Expression::Member {
+                target: Box::new(self.replace_placeholder_with(target, replacement)),
+                property: property.clone(),
+                span: *span,
+            },
+            Expression::Ternary { condition, then_branch, else_branch, span } => Expression::Ternary {
+                condition: Box::new(self.replace_placeholder_with(condition, replacement)),
+                then_branch: Box::new(self.replace_placeholder_with(then_branch, replacement)),
+                else_branch: Box::new(self.replace_placeholder_with(else_branch, replacement)),
+                span: *span,
+            },
+            // For expressions that don't contain placeholders or shouldn't be traversed, return as-is
+            other => other.clone(),
+        }
+    }
+
     fn value_to_bool(&mut self, value: PointerValue<'ctx>) -> IntValue<'ctx> {
         let byte = self
             .builder
@@ -1695,6 +2263,98 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(self.call_runtime_ptr(self.runtime.make_closure, args, "make_closure"))
     }
 
+    /// Emit code to construct an enum (ADT) variant value.
+    fn emit_enum_constructor(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        variant_name: &str,
+        args: &[Expression],
+    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        // Create tag name as a global string constant
+        let tag_name_bytes = variant_name.as_bytes();
+        let tag_name_global = self.get_or_create_string_constant(variant_name);
+        let tag_name_ptr = self.builder
+            .build_pointer_cast(
+                tag_name_global.as_pointer_value(),
+                self.i8_type.ptr_type(AddressSpace::default()),
+                "tag_name_ptr",
+            )
+            .unwrap();
+        let tag_name_len = self.usize_type.const_int(tag_name_bytes.len() as u64, false);
+        
+        // Build array of field values
+        let field_count = args.len();
+        let (fields_ptr, field_count_val) = if field_count == 0 {
+            let null_ptr = self.runtime.value_ptr_type
+                .ptr_type(AddressSpace::default())
+                .const_null();
+            (null_ptr, self.usize_type.const_zero())
+        } else {
+            let mut field_values = Vec::with_capacity(field_count);
+            for arg in args {
+                let value = self.emit_expression(ctx, arg)?;
+                field_values.push(value);
+            }
+            
+            let array_type = self.runtime.value_ptr_type.array_type(field_count as u32);
+            let mut temp_array = array_type.get_undef();
+            for (idx, value) in field_values.iter().enumerate() {
+                temp_array = self
+                    .builder
+                    .build_insert_value(temp_array, *value, idx as u32, "field")
+                    .unwrap()
+                    .into_array_value();
+            }
+            
+            let alloca = self.builder.build_alloca(array_type, "tagged_fields").unwrap();
+            self.builder.build_store(alloca, temp_array).unwrap();
+            
+            let ptr = self.builder
+                .build_pointer_cast(
+                    alloca,
+                    self.runtime.value_ptr_type.ptr_type(AddressSpace::default()),
+                    "fields_ptr",
+                )
+                .unwrap();
+            (ptr, self.usize_type.const_int(field_count as u64, false))
+        };
+        
+        // Call coral_make_tagged(tag_name, tag_name_len, fields, field_count)
+        Ok(self.call_runtime_ptr(
+            self.runtime.make_tagged,
+            &[tag_name_ptr.into(), tag_name_len.into(), fields_ptr.into(), field_count_val.into()],
+            "make_tagged",
+        ))
+    }
+    
+    /// Emit a nullary enum constructor (no fields, e.g., None)
+    fn emit_enum_constructor_nullary(
+        &mut self,
+        variant_name: &str,
+    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        let tag_name_bytes = variant_name.as_bytes();
+        let tag_name_global = self.get_or_create_string_constant(variant_name);
+        let tag_name_ptr = self.builder
+            .build_pointer_cast(
+                tag_name_global.as_pointer_value(),
+                self.i8_type.ptr_type(AddressSpace::default()),
+                "tag_name_ptr",
+            )
+            .unwrap();
+        let tag_name_len = self.usize_type.const_int(tag_name_bytes.len() as u64, false);
+        
+        let null_ptr = self.runtime.value_ptr_type
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let zero = self.usize_type.const_zero();
+        
+        Ok(self.call_runtime_ptr(
+            self.runtime.make_tagged,
+            &[tag_name_ptr.into(), tag_name_len.into(), null_ptr.into(), zero.into()],
+            "make_tagged_nullary",
+        ))
+    }
+
     fn emit_closure_call(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -1762,6 +2422,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.runtime.log,
                     &[value.into()],
                     "log_call",
+                )))
+            }
+            "concat" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "concat expects exactly two arguments",
+                        span,
+                    ));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.value_add,
+                    &[a.into(), b.into()],
+                    "concat_call",
                 )))
             }
             "fs_read" => {
@@ -1865,6 +2540,430 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.runtime.actor_self,
                     &[],
                     "actor_self_builtin",
+                )))
+            }
+            // String operations
+            "string_slice" | "slice" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("string_slice expects string, start, end", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let start = self.emit_expression(ctx, &args[1])?;
+                let end = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_slice,
+                    &[s.into(), start.into(), end.into()],
+                    "string_slice_call",
+                )))
+            }
+            "string_char_at" | "char_at" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_char_at expects string, index", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let idx = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_char_at,
+                    &[s.into(), idx.into()],
+                    "string_char_at_call",
+                )))
+            }
+            "string_index_of" | "index_of" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_index_of expects haystack, needle", span));
+                }
+                let haystack = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_index_of,
+                    &[haystack.into(), needle.into()],
+                    "string_index_of_call",
+                )))
+            }
+            "string_split" | "split" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_split expects string, delimiter", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let delim = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_split,
+                    &[s.into(), delim.into()],
+                    "string_split_call",
+                )))
+            }
+            "string_to_chars" | "chars" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_to_chars expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_to_chars,
+                    &[s.into()],
+                    "string_to_chars_call",
+                )))
+            }
+            "string_starts_with" | "starts_with" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_starts_with expects string, prefix", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let prefix = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_starts_with,
+                    &[s.into(), prefix.into()],
+                    "string_starts_with_call",
+                )))
+            }
+            "string_ends_with" | "ends_with" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_ends_with expects string, suffix", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let suffix = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_ends_with,
+                    &[s.into(), suffix.into()],
+                    "string_ends_with_call",
+                )))
+            }
+            "string_trim" | "trim" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_trim expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_trim,
+                    &[s.into()],
+                    "string_trim_call",
+                )))
+            }
+            "string_to_upper" | "to_upper" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_to_upper expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_to_upper,
+                    &[s.into()],
+                    "string_to_upper_call",
+                )))
+            }
+            "string_to_lower" | "to_lower" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_to_lower expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_to_lower,
+                    &[s.into()],
+                    "string_to_lower_call",
+                )))
+            }
+            "string_replace" | "replace" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("string_replace expects string, old, new", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let old = self.emit_expression(ctx, &args[1])?;
+                let new = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_replace,
+                    &[s.into(), old.into(), new.into()],
+                    "string_replace_call",
+                )))
+            }
+            "string_contains" | "contains" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_contains expects haystack, needle", span));
+                }
+                let haystack = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_contains,
+                    &[haystack.into(), needle.into()],
+                    "string_contains_call",
+                )))
+            }
+            "string_parse_number" | "parse_number" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_parse_number expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_parse_number,
+                    &[s.into()],
+                    "string_parse_number_call",
+                )))
+            }
+            "number_to_string" | "to_string" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("number_to_string expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.number_to_string,
+                    &[n.into()],
+                    "number_to_string_call",
+                )))
+            }
+            // Math functions - unary
+            "abs" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("abs expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_abs,
+                    &[n.into()],
+                    "math_abs_call",
+                )))
+            }
+            "sqrt" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sqrt expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sqrt,
+                    &[n.into()],
+                    "math_sqrt_call",
+                )))
+            }
+            "floor" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("floor expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_floor,
+                    &[n.into()],
+                    "math_floor_call",
+                )))
+            }
+            "ceil" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("ceil expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_ceil,
+                    &[n.into()],
+                    "math_ceil_call",
+                )))
+            }
+            "round" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("round expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_round,
+                    &[n.into()],
+                    "math_round_call",
+                )))
+            }
+            "sin" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sin expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sin,
+                    &[n.into()],
+                    "math_sin_call",
+                )))
+            }
+            "cos" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("cos expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_cos,
+                    &[n.into()],
+                    "math_cos_call",
+                )))
+            }
+            "tan" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("tan expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_tan,
+                    &[n.into()],
+                    "math_tan_call",
+                )))
+            }
+            "ln" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("ln expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_ln,
+                    &[n.into()],
+                    "math_ln_call",
+                )))
+            }
+            "log10" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("log10 expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_log10,
+                    &[n.into()],
+                    "math_log10_call",
+                )))
+            }
+            "exp" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("exp expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_exp,
+                    &[n.into()],
+                    "math_exp_call",
+                )))
+            }
+            "asin" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("asin expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_asin,
+                    &[n.into()],
+                    "math_asin_call",
+                )))
+            }
+            "acos" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("acos expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_acos,
+                    &[n.into()],
+                    "math_acos_call",
+                )))
+            }
+            "atan" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("atan expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_atan,
+                    &[n.into()],
+                    "math_atan_call",
+                )))
+            }
+            "sinh" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sinh expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sinh,
+                    &[n.into()],
+                    "math_sinh_call",
+                )))
+            }
+            "cosh" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("cosh expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_cosh,
+                    &[n.into()],
+                    "math_cosh_call",
+                )))
+            }
+            "tanh" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("tanh expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_tanh,
+                    &[n.into()],
+                    "math_tanh_call",
+                )))
+            }
+            "trunc" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("trunc expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_trunc,
+                    &[n.into()],
+                    "math_trunc_call",
+                )))
+            }
+            "sign" | "signum" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sign expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sign,
+                    &[n.into()],
+                    "math_sign_call",
+                )))
+            }
+            // Math functions - binary
+            "pow" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("pow expects two arguments (base, exponent)", span));
+                }
+                let base = self.emit_expression(ctx, &args[0])?;
+                let exp = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_pow,
+                    &[base.into(), exp.into()],
+                    "math_pow_call",
+                )))
+            }
+            "min" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("min expects two arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_min,
+                    &[a.into(), b.into()],
+                    "math_min_call",
+                )))
+            }
+            "max" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("max expects two arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_max,
+                    &[a.into(), b.into()],
+                    "math_max_call",
+                )))
+            }
+            "atan2" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("atan2 expects two arguments (y, x)", span));
+                }
+                let y = self.emit_expression(ctx, &args[0])?;
+                let x = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_atan2,
+                    &[y.into(), x.into()],
+                    "math_atan2_call",
                 )))
             }
             _ => {
@@ -2007,6 +3106,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::Throw { value, .. } =>
                 self.collect_captures_expr(value, available, locals, captures, seen),
+            Expression::Pipeline { left, right, .. } => {
+                self.collect_captures_expr(left, available, locals, captures, seen);
+                self.collect_captures_expr(right, available, locals, captures, seen);
+            }
+            Expression::ErrorValue { .. } => {
+                // Error values don't capture any variables
+            }
+            Expression::ErrorPropagate { expr, .. } => {
+                self.collect_captures_expr(expr, available, locals, captures, seen);
+            }
             Expression::Integer(_, _)
             | Expression::Float(_, _)
             | Expression::Bool(_, _)
@@ -2016,7 +3125,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             | Expression::InlineAsm { .. }
             | Expression::PtrLoad { .. }
             | Expression::Unsafe { .. }
-            | Expression::Unit => {}
+            | Expression::Unit
+            | Expression::None(_) => {}
         }
     }
 
@@ -2335,85 +3445,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(entry);
         self.ensure_globals_initialized();
 
-        // Build message handler closure
-        // For now, we'll create a dummy closure that ignores messages
-        // Real implementation: match on message fields and call @message methods
-        let handler_fn_name = format!("__{}_handler", store.name);
-        let handler_fn_type = self.context.void_type().fn_type(
-            &[
-                self.runtime.value_ptr_type.into(), // self (actor handle)
-                self.runtime.value_ptr_type.into(), // message
-            ],
-            false,
-        );
-        let handler_fn = self.module.add_function(&handler_fn_name, handler_fn_type, None);
-        let handler_entry = self.context.append_basic_block(handler_fn, "entry");
-        self.builder.position_at_end(handler_entry);
-        // Extract message name/data and dispatch to @message methods by string match
-        let name_key = self.emit_string_literal("name");
-        let data_key = self.emit_string_literal("data");
-        let msg_param = handler_fn.get_nth_param(1).unwrap().into_pointer_value();
-        let name_field = self.call_runtime_ptr(
-            self.runtime.map_get,
-            &[msg_param.into(), name_key.into()],
-            "msg_name",
-        );
-        let data_field = self.call_runtime_ptr(
-            self.runtime.map_get,
-            &[msg_param.into(), data_key.into()],
-            "msg_data",
-        );
-
-        let mut current_bb = handler_entry;
-        let done_bb = self.context.append_basic_block(handler_fn, "msg_done");
-        for method in &store.methods {
-            if method.kind != crate::ast::FunctionKind::ActorMessage {
-                continue;
-            }
-            let match_bb = self.context.append_basic_block(handler_fn, &format!("msg_{}_match", method.name));
-            let next_bb = self.context.append_basic_block(handler_fn, &format!("msg_{}_next", method.name));
-
-            self.builder.position_at_end(current_bb);
-            let method_name = self.emit_string_literal(&method.name);
-            let eq = self.call_runtime_ptr(
-                self.runtime.value_equals,
-                &[name_field.into(), method_name.into()],
-                "msg_name_eq",
+        // 1. Create state Map with field defaults
+        let state_map = self.call_runtime_ptr(self.runtime.make_map, &[], "actor_state");
+        // Emit a dummy context for field evaluation
+        let mut ctx = FunctionContext {
+            variables: HashMap::new(),
+            function: ctor_fn,
+        };
+        for field in &store.fields {
+            let key = self.emit_string_literal(&field.name);
+            let value = if let Some(default) = &field.default {
+                self.emit_expression(&mut ctx, default)?
+            } else {
+                // Default to 0 for fields without default
+                self.wrap_number(self.f64_type.const_float(0.0))
+            };
+            self.call_runtime_ptr(
+                self.runtime.map_set,
+                &[state_map.into(), key.into(), value.into()],
+                "set_field",
             );
-            let is_match = self.value_to_bool(eq);
-            self.builder
-                .build_conditional_branch(is_match, match_bb, next_bb)
-                .unwrap();
-
-            self.builder.position_at_end(match_bb);
-            let mangled = format!("{}_{}", store.name, method.name);
-            if let Some(target_fn) = self.functions.get(&mangled).copied() {
-                let mut args = Vec::new();
-                if method.params.len() == 1 {
-                    // Pass payload as single argument when method expects one parameter
-                    args.push(self.value_to_number(data_field));
-                }
-                let meta_args: Vec<BasicMetadataValueEnum> = args.iter().map(|v| (*v).into()).collect();
-                let _ = self.builder.build_call(target_fn, &meta_args, "call_msg_fn");
-            }
-            self.builder.build_unconditional_branch(done_bb).unwrap();
-            current_bb = next_bb;
         }
 
-        self.builder.position_at_end(current_bb);
-        self.builder.build_unconditional_branch(done_bb).unwrap();
-        self.builder.position_at_end(done_bb);
-        self.builder.build_return(None).unwrap();
+        // 2. Build the handler invoke function (follows closure signature)
+        // Signature: fn(env: *mut c_void, args: *const ValueHandle, len: usize, out: *mut ValueHandle)
+        let handler_fn_name = format!("__{}_handler_invoke", store.name);
+        let handler_invoke_fn = self.module.add_function(
+            &handler_fn_name,
+            self.runtime.closure_invoke_type,
+            None,
+        );
+        self.build_actor_handler_invoke(handler_invoke_fn, store)?;
 
-        // Back to constructor: wrap handler as closure and spawn
+        // 3. Build the handler release function
+        let release_fn_name = format!("__{}_handler_release", store.name);
+        let release_fn = self.module.add_function(
+            &release_fn_name,
+            self.runtime.closure_release_type,
+            None,
+        );
+        self.build_actor_handler_release(release_fn);
+
+        // 4. Back to constructor: create closure with state as env and spawn actor
         self.builder.position_at_end(entry);
-        let null_env = self.runtime.value_ptr_type.const_null();
         let handler_closure = self.call_runtime_ptr(
             self.runtime.make_closure,
             &[
-                handler_fn.as_global_value().as_pointer_value().into(),
-                null_env.into(),
-                self.runtime.value_ptr_type.const_null().into(), // release_fn = null (no captured env)
+                handler_invoke_fn.as_global_value().as_pointer_value().into(),
+                release_fn.as_global_value().as_pointer_value().into(),
+                state_map.into(), // state Map as closure environment
             ],
             "handler_closure",
         );
@@ -2428,6 +3508,317 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Build handler invoke function for actor message dispatch.
+    /// env = actor state Map, args[0] = self (actor handle), args[1] = message
+    fn build_actor_handler_invoke(
+        &mut self,
+        invoke_fn: FunctionValue<'ctx>,
+        store: &crate::ast::StoreDefinition,
+    ) -> Result<(), Diagnostic> {
+        let saved_block = self.builder.get_insert_block();
+        let handler_entry = self.context.append_basic_block(invoke_fn, "entry");
+        self.builder.position_at_end(handler_entry);
+
+        // env = state Map (ValuePtr cast from *mut c_void)
+        let env_param = invoke_fn.get_nth_param(0).unwrap().into_pointer_value();
+        let args_param = invoke_fn.get_nth_param(1).unwrap().into_pointer_value();
+        // Cast env to ValuePtr for state access
+        let state = self.builder.build_pointer_cast(
+            env_param,
+            self.runtime.value_ptr_type,
+            "actor_state",
+        ).unwrap();
+        
+        // args[1] = message
+        let msg_index = self.usize_type.const_int(1, false);
+        let msg_ptr = unsafe {
+            self.builder.build_in_bounds_gep(
+                self.runtime.value_ptr_type,
+                args_param,
+                &[msg_index],
+                "msg_ptr",
+            ).unwrap()
+        };
+        let msg_param = self.builder.build_load(
+            self.runtime.value_ptr_type,
+            msg_ptr,
+            "msg",
+        ).unwrap().into_pointer_value();
+
+        // Extract message name/data and dispatch to @message methods
+        // Use hash-based dispatch table for efficient message routing
+        let name_key = self.emit_string_literal("name");
+        let data_key = self.emit_string_literal("data");
+        let name_field = self.call_runtime_ptr(
+            self.runtime.map_get,
+            &[msg_param.into(), name_key.into()],
+            "msg_name",
+        );
+        let data_field = self.call_runtime_ptr(
+            self.runtime.map_get,
+            &[msg_param.into(), data_key.into()],
+            "msg_data",
+        );
+
+        // Collect message handlers
+        let handlers: Vec<_> = store.methods.iter()
+            .filter(|m| m.kind == crate::ast::FunctionKind::ActorMessage)
+            .collect();
+
+        if handlers.is_empty() {
+            // No handlers, just return
+            self.builder.build_return(None).unwrap();
+            if let Some(block) = saved_block {
+                self.builder.position_at_end(block);
+            }
+            return Ok(());
+        }
+
+        // For small handler counts (<=4), use sequential comparison
+        // For larger counts, use hash-based switch
+        let done_bb = self.context.append_basic_block(invoke_fn, "msg_done");
+
+        if handlers.len() <= 4 {
+            // Sequential dispatch for small handler sets
+            let mut current_bb = handler_entry;
+            for method in &handlers {
+                let match_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_match", method.name));
+                let next_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_next", method.name));
+
+                self.builder.position_at_end(current_bb);
+                let method_name = self.emit_string_literal(&method.name);
+                let eq = self.call_runtime_ptr(
+                    self.runtime.value_equals,
+                    &[name_field.into(), method_name.into()],
+                    "msg_name_eq",
+                );
+                let is_match = self.value_to_bool(eq);
+                self.builder
+                    .build_conditional_branch(is_match, match_bb, next_bb)
+                    .unwrap();
+
+                self.builder.position_at_end(match_bb);
+                let mangled = format!("{}_{}", store.name, method.name);
+                if let Some(target_fn) = self.functions.get(&mangled).copied() {
+                    let mut args: Vec<BasicMetadataValueEnum> = vec![state.into()];
+                    if !method.params.is_empty() {
+                        args.push(self.value_to_number(data_field).into());
+                    }
+                    let _ = self.builder.build_call(target_fn, &args, "call_msg_fn");
+                }
+                self.builder.build_unconditional_branch(done_bb).unwrap();
+                current_bb = next_bb;
+            }
+            self.builder.position_at_end(current_bb);
+            self.builder.build_unconditional_branch(done_bb).unwrap();
+        } else {
+            // Hash-based dispatch for larger handler sets
+            // Compute hash of message name and use switch statement
+            let hash = self.call_runtime_ptr(
+                self.runtime.value_hash,
+                &[name_field.into()],
+                "msg_name_hash",
+            );
+            // value_hash returns a Value (tagged number), extract the raw f64 and convert to int
+            let hash_num = self.value_to_number(hash);
+            let hash_int = self.builder.build_float_to_unsigned_int(
+                hash_num,
+                self.usize_type,
+                "hash_int",
+            ).unwrap();
+
+            // Build dispatch table: map hash values to handler blocks
+            let default_bb = self.context.append_basic_block(invoke_fn, "msg_default");
+            
+            // Collect (hash, block) pairs for the switch
+            let mut cases: Vec<(inkwell::values::IntValue, BasicBlock)> = Vec::new();
+            
+            for method in &handlers {
+                let method_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}", method.name));
+                
+                // Compute compile-time hash of handler name
+                use std::hash::{Hash, Hasher};
+                use std::collections::hash_map::DefaultHasher;
+                let mut hasher = DefaultHasher::new();
+                method.name.hash(&mut hasher);
+                let name_hash = hasher.finish();
+                
+                cases.push((self.usize_type.const_int(name_hash, false), method_bb));
+                
+                // Build handler block
+                self.builder.position_at_end(method_bb);
+                // Still verify the name matches (hash collision protection)
+                let method_name = self.emit_string_literal(&method.name);
+                let eq = self.call_runtime_ptr(
+                    self.runtime.value_equals,
+                    &[name_field.into(), method_name.into()],
+                    "verify_name",
+                );
+                let is_match = self.value_to_bool(eq);
+                let call_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_call", method.name));
+                self.builder.build_conditional_branch(is_match, call_bb, default_bb).unwrap();
+                
+                self.builder.position_at_end(call_bb);
+                let mangled = format!("{}_{}", store.name, method.name);
+                if let Some(target_fn) = self.functions.get(&mangled).copied() {
+                    let mut args: Vec<BasicMetadataValueEnum> = vec![state.into()];
+                    if !method.params.is_empty() {
+                        args.push(self.value_to_number(data_field).into());
+                    }
+                    let _ = self.builder.build_call(target_fn, &args, "call_msg_fn");
+                }
+                self.builder.build_unconditional_branch(done_bb).unwrap();
+            }
+
+            // Build switch instruction
+            self.builder.position_at_end(handler_entry);
+            let switch = self.builder.build_switch(hash_int, default_bb, &cases).unwrap();
+            let _ = switch; // silence unused warning
+
+            // Default block just jumps to done
+            self.builder.position_at_end(default_bb);
+            self.builder.build_unconditional_branch(done_bb).unwrap();
+        }
+
+        self.builder.position_at_end(done_bb);
+        self.builder.build_return(None).unwrap();
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(())
+    }
+
+    /// Release function for actor handler closure - releases state Map
+    fn build_actor_handler_release(&mut self, release_fn: FunctionValue<'ctx>) {
+        let saved_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(release_fn, "entry");
+        self.builder.position_at_end(entry);
+        
+        let env_param = release_fn.get_first_param().unwrap().into_pointer_value();
+        let is_null = self.builder.build_is_null(env_param, "env_is_null").unwrap();
+        
+        let exit_block = self.context.append_basic_block(release_fn, "release_exit");
+        let body_block = self.context.append_basic_block(release_fn, "release_body");
+        self.builder.build_conditional_branch(is_null, exit_block, body_block).unwrap();
+        
+        self.builder.position_at_end(body_block);
+        // Release the state Map
+        let state = self.builder.build_pointer_cast(
+            env_param,
+            self.runtime.value_ptr_type,
+            "actor_state",
+        ).unwrap();
+        self.builder.build_call(
+            self.runtime.value_release,
+            &[state.into()],
+            "",
+        ).unwrap();
+        self.builder.build_unconditional_branch(exit_block).unwrap();
+        
+        self.builder.position_at_end(exit_block);
+        self.builder.build_return(None).unwrap();
+        
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+    }
+
+    /// Build constructor for non-actor stores.
+    /// Creates a Map with all fields initialized to defaults, returns the Map.
+    fn build_store_constructor(&mut self, store: &crate::ast::StoreDefinition) -> Result<(), Diagnostic> {
+        let constructor_name = format!("make_{}", store.name);
+        let ctor_fn = *self.functions.get(&constructor_name).unwrap();
+        let entry = self.context.append_basic_block(ctor_fn, "entry");
+        self.builder.position_at_end(entry);
+        self.ensure_globals_initialized();
+
+        // Create store as a Map with fields
+        let null_entries = self.runtime.map_entry_type
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let zero_len = self.usize_type.const_zero();
+        let store_map = self.call_runtime_ptr(
+            self.runtime.make_map,
+            &[null_entries.into(), zero_len.into()],
+            "store_data",
+        );
+        
+        // Create a dummy context for field evaluation
+        let mut ctx = FunctionContext {
+            variables: HashMap::new(),
+            function: ctor_fn,
+        };
+        
+        // Set __type__ field so we know what store type this is for method dispatch
+        let type_key = self.emit_string_literal("__type__");
+        let type_value = self.emit_string_literal(&store.name);
+        self.call_runtime_ptr(
+            self.runtime.map_set,
+            &[store_map.into(), type_key.into(), type_value.into()],
+            "set_type",
+        );
+        
+        // Initialize each field
+        for field in &store.fields {
+            let key = self.emit_string_literal(&field.name);
+            let value = if let Some(default) = &field.default {
+                let val = self.emit_expression(&mut ctx, default)?;
+                // For reference fields, retain the initial value
+                if field.is_reference {
+                    self.call_runtime_void(self.runtime.value_retain, &[val.into()], "retain_ref_field");
+                }
+                val
+            } else if field.is_reference {
+                // Reference fields default to unit (null reference)
+                self.call_runtime_ptr(self.runtime.make_unit, &[], "null_ref")
+            } else {
+                // Value fields default to 0
+                self.wrap_number(self.f64_type.const_float(0.0))
+            };
+            self.call_runtime_ptr(
+                self.runtime.map_set,
+                &[store_map.into(), key.into(), value.into()],
+                "set_field",
+            );
+        }
+
+        self.builder.build_return(Some(&store_map)).unwrap();
+        Ok(())
+    }
+
+    /// Build body for a store method.
+    /// Store methods have self (store Map) as hidden first parameter.
+    fn build_store_method_body(
+        &mut self,
+        function: &Function,
+        llvm_fn: FunctionValue<'ctx>,
+    ) -> Result<(), Diagnostic> {
+        let entry = self.context.append_basic_block(llvm_fn, "entry");
+        self.builder.position_at_end(entry);
+        self.ensure_globals_initialized();
+        let mut ctx = FunctionContext {
+            variables: HashMap::new(),
+            function: llvm_fn,
+        };
+
+        // First param is the store (Map), inject as `self`
+        let store_ptr = llvm_fn.get_nth_param(0).unwrap().into_pointer_value();
+        ctx.variables.insert("self".to_string(), store_ptr);
+
+        // Remaining params are CoralValue* pointers (not f64)
+        for (i, param_ast) in function.params.iter().enumerate() {
+            let param = llvm_fn.get_nth_param((i + 1) as u32).unwrap();
+            let value_ptr = param.into_pointer_value();
+            ctx.variables.insert(param_ast.name.clone(), value_ptr);
+        }
+
+        let block_value = self.emit_block(&mut ctx, &function.body)?;
+        // Return the value directly as ptr (CoralValue*) instead of converting to f64
+        self.builder.build_return(Some(&block_value)).unwrap();
+        Ok(())
+    }
+
     fn boolean_to_int(&self, value: bool) -> IntValue<'ctx> {
         self.bool_type.const_int(if value { 1 } else { 0 }, false)
     }
@@ -2436,444 +3827,4 @@ impl<'ctx> CodeGenerator<'ctx> {
 struct FunctionContext<'ctx> {
     variables: HashMap<String, PointerValue<'ctx>>,
     function: FunctionValue<'ctx>,
-}
-
-#[allow(dead_code)]
-struct RuntimeBindings<'ctx> {
-    value_ptr_type: PointerType<'ctx>,
-    make_number: FunctionValue<'ctx>,
-    make_bool: FunctionValue<'ctx>,
-    make_string: FunctionValue<'ctx>,
-    make_bytes: FunctionValue<'ctx>,
-    make_unit: FunctionValue<'ctx>,
-    make_list: FunctionValue<'ctx>,
-    make_list_hinted: FunctionValue<'ctx>,
-    make_map: FunctionValue<'ctx>,
-    make_map_hinted: FunctionValue<'ctx>,
-    value_as_number: FunctionValue<'ctx>,
-    value_as_bool: FunctionValue<'ctx>,
-    value_add: FunctionValue<'ctx>,
-    value_equals: FunctionValue<'ctx>,
-    value_hash: FunctionValue<'ctx>,
-    value_bitand: FunctionValue<'ctx>,
-    value_bitor: FunctionValue<'ctx>,
-    value_bitxor: FunctionValue<'ctx>,
-    value_bitnot: FunctionValue<'ctx>,
-    value_shift_left: FunctionValue<'ctx>,
-    value_shift_right: FunctionValue<'ctx>,
-    value_iter: FunctionValue<'ctx>,
-    list_push: FunctionValue<'ctx>,
-    list_get: FunctionValue<'ctx>,
-    list_pop: FunctionValue<'ctx>,
-    list_iter: FunctionValue<'ctx>,
-    list_iter_next: FunctionValue<'ctx>,
-    list_map: FunctionValue<'ctx>,
-    list_filter: FunctionValue<'ctx>,
-    list_reduce: FunctionValue<'ctx>,
-    map_get: FunctionValue<'ctx>,
-    map_set: FunctionValue<'ctx>,
-    map_length: FunctionValue<'ctx>,
-    map_keys: FunctionValue<'ctx>,
-    map_iter: FunctionValue<'ctx>,
-    map_iter_next: FunctionValue<'ctx>,
-    value_length: FunctionValue<'ctx>,
-    map_entry_type: StructType<'ctx>,
-    make_closure: FunctionValue<'ctx>,
-    closure_invoke: FunctionValue<'ctx>,
-    log: FunctionValue<'ctx>,
-    fs_read: FunctionValue<'ctx>,
-    fs_write: FunctionValue<'ctx>,
-    fs_exists: FunctionValue<'ctx>,
-    value_retain: FunctionValue<'ctx>,
-    value_release: FunctionValue<'ctx>,
-    heap_alloc: FunctionValue<'ctx>,
-    heap_free: FunctionValue<'ctx>,
-    actor_spawn: FunctionValue<'ctx>,
-    actor_send: FunctionValue<'ctx>,
-    actor_stop: FunctionValue<'ctx>,
-    actor_self: FunctionValue<'ctx>,
-    closure_invoke_type: FunctionType<'ctx>,
-    closure_release_type: FunctionType<'ctx>,
-}
-
-impl<'ctx> RuntimeBindings<'ctx> {
-    fn declare(context: &'ctx Context, module: &Module<'ctx>) -> Self {
-        let i8_type = context.i8_type();
-        let i16_type = context.i16_type();
-        let i32_type = context.i32_type();
-        let payload = i8_type.array_type(16);
-        let i64_type = context.i64_type();
-        let value_type = context.struct_type(
-            &[
-                i8_type.into(),
-                i8_type.into(),
-                i16_type.into(),
-                i64_type.into(),
-                i32_type.into(),
-                i32_type.into(),
-                payload.into(),
-            ],
-            false,
-        );
-        let value_ptr_type = value_type.ptr_type(AddressSpace::default());
-        let f64_type = context.f64_type();
-        let usize_type = context.i64_type();
-        let i8_ptr = i8_type.ptr_type(AddressSpace::default());
-        let map_entry_type = context.struct_type(
-            &[value_ptr_type.into(), value_ptr_type.into()],
-            false,
-        );
-        let map_entry_ptr_type = map_entry_type.ptr_type(AddressSpace::default());
-        let value_ptr_ptr_type = value_ptr_type.ptr_type(AddressSpace::default());
-        let closure_invoke_type = context.void_type().fn_type(
-            &[
-                i8_ptr.into(),
-                value_ptr_ptr_type.into(),
-                usize_type.into(),
-                value_ptr_ptr_type.into(),
-            ],
-            false,
-        );
-        let closure_release_type = context
-            .void_type()
-            .fn_type(&[i8_ptr.into()], false);
-
-        let make_number = module.add_function(
-            "coral_make_number",
-            value_ptr_type.fn_type(&[f64_type.into()], false),
-            None,
-        );
-        let make_bool = module.add_function(
-            "coral_make_bool",
-            value_ptr_type.fn_type(&[i8_type.into()], false),
-            None,
-        );
-        let make_string = module.add_function(
-            "coral_make_string",
-            value_ptr_type.fn_type(&[i8_ptr.into(), usize_type.into()], false),
-            None,
-        );
-        let make_bytes = module.add_function(
-            "coral_make_bytes",
-            value_ptr_type.fn_type(&[i8_ptr.into(), usize_type.into()], false),
-            None,
-        );
-        let make_unit = module.add_function(
-            "coral_make_unit",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
-        let make_list = module.add_function(
-            "coral_make_list",
-            value_ptr_type.fn_type(
-                &[value_ptr_ptr_type.into(), usize_type.into()],
-                false,
-            ),
-            None,
-        );
-        let make_list_hinted = module.add_function(
-            "coral_make_list_hinted",
-            value_ptr_type.fn_type(
-                &[value_ptr_ptr_type.into(), usize_type.into(), i8_type.into()],
-                false,
-            ),
-            None,
-        );
-        let make_map = module.add_function(
-            "coral_make_map",
-            value_ptr_type.fn_type(&[map_entry_ptr_type.into(), usize_type.into()], false),
-            None,
-        );
-        let make_map_hinted = module.add_function(
-            "coral_make_map_hinted",
-            value_ptr_type.fn_type(
-                &[map_entry_ptr_type.into(), usize_type.into(), i8_type.into()],
-                false,
-            ),
-            None,
-        );
-
-        let list_push = module.add_function(
-            "coral_list_push",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let list_get = module.add_function(
-            "coral_list_get",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let list_pop = module.add_function(
-            "coral_list_pop",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let list_iter = module.add_function(
-            "coral_list_iter",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let list_iter_next = module.add_function(
-            "coral_list_iter_next",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let list_map = module.add_function(
-            "coral_list_map",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let list_filter = module.add_function(
-            "coral_list_filter",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let list_reduce = module.add_function(
-            "coral_list_reduce",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
-            None,
-        );
-        let map_get = module.add_function(
-            "coral_map_get",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let map_set = module.add_function(
-            "coral_map_set",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
-            None,
-        );
-        let map_length = module.add_function(
-            "coral_map_length",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let map_keys = module.add_function(
-            "coral_map_keys",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let map_iter = module.add_function(
-            "coral_map_iter",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let map_iter_next = module.add_function(
-            "coral_map_iter_next",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_length = module.add_function(
-            "coral_value_length",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_iter = module.add_function(
-            "coral_value_iter",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_as_number = module.add_function(
-            "coral_value_as_number",
-            f64_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_as_bool = module.add_function(
-            "coral_value_as_bool",
-            i8_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_add = module.add_function(
-            "coral_value_add",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let value_equals = module.add_function(
-            "coral_value_equals",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let value_hash = module.add_function(
-            "coral_value_hash",
-            i64_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_bitand = module.add_function(
-            "coral_value_bitand",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let value_bitor = module.add_function(
-            "coral_value_bitor",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let value_bitxor = module.add_function(
-            "coral_value_bitxor",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let value_bitnot = module.add_function(
-            "coral_value_bitnot",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_shift_left = module.add_function(
-            "coral_value_shift_left",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let value_shift_right = module.add_function(
-            "coral_value_shift_right",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let log = module.add_function(
-            "coral_log",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let fs_read = module.add_function(
-            "coral_fs_read",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let fs_write = module.add_function(
-            "coral_fs_write",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let fs_exists = module.add_function(
-            "coral_fs_exists",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let make_closure = module.add_function(
-            "coral_make_closure",
-            value_ptr_type.fn_type(
-                &[
-                    closure_invoke_type
-                        .ptr_type(AddressSpace::default())
-                        .into(),
-                    closure_release_type
-                        .ptr_type(AddressSpace::default())
-                        .into(),
-                    i8_ptr.into(),
-                ],
-                false,
-            ),
-            None,
-        );
-        let closure_invoke = module.add_function(
-            "coral_closure_invoke",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_ptr_type.into(), usize_type.into()],
-                false,
-            ),
-            None,
-        );
-        let value_retain = module.add_function(
-            "coral_value_retain",
-            context.void_type().fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let value_release = module.add_function(
-            "coral_value_release",
-            context.void_type().fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let heap_alloc = module.add_function(
-            "coral_heap_alloc",
-            i8_ptr.fn_type(&[usize_type.into()], false),
-            None,
-        );
-        let heap_free = module.add_function(
-            "coral_heap_free",
-            context.void_type().fn_type(&[i8_ptr.into()], false),
-            None,
-        );
-        let actor_spawn = module.add_function(
-            "coral_actor_spawn",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let actor_send = module.add_function(
-            "coral_actor_send",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
-            None,
-        );
-        let actor_stop = module.add_function(
-            "coral_actor_stop",
-            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
-            None,
-        );
-        let actor_self = module.add_function(
-            "coral_actor_self",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
-
-        Self {
-            value_ptr_type,
-            make_number,
-            make_bool,
-            make_string,
-            make_bytes,
-            make_unit,
-            make_list,
-            make_list_hinted,
-            value_as_number,
-            value_as_bool,
-            value_add,
-            value_equals,
-            value_hash,
-            value_bitand,
-            value_bitor,
-            value_bitxor,
-            value_bitnot,
-            value_shift_left,
-            value_shift_right,
-            value_iter,
-            list_push,
-            list_get,
-            list_pop,
-            list_iter,
-            list_iter_next,
-            list_map,
-            list_filter,
-            list_reduce,
-            map_get,
-            map_set,
-            map_length,
-            map_keys,
-            map_iter,
-            map_iter_next,
-            value_length,
-            make_map,
-            make_map_hinted,
-            map_entry_type,
-            make_closure,
-            closure_invoke,
-            log,
-            fs_read,
-            fs_write,
-            fs_exists,
-            value_retain,
-            value_release,
-            heap_alloc,
-            heap_free,
-            actor_spawn,
-            actor_send,
-            actor_stop,
-            actor_self,
-            closure_invoke_type,
-            closure_release_type,
-        }
-    }
 }

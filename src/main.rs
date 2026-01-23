@@ -56,7 +56,7 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let loader = ModuleLoader::with_default_std();
+    let mut loader = ModuleLoader::with_default_std();
     let source = loader
         .load(&args.input)
         .with_context(|| format!("failed to load {}", args.input.display()))?;

@@ -1,0 +1,90 @@
+# Calculator - Expression evaluation with Coral's error model
+
+# Error definitions
+err Calc
+    err DivisionByZero
+        message is 'Cannot divide by zero'
+    err InvalidOperator
+        message is 'Unknown operator'
+    err InvalidInput
+        message is 'Invalid input format'
+
+# Basic operations that can fail
+*divide(a, b)
+    b == 0 ? ! err Calc:DivisionByZero
+    a / b
+
+*calculate(left, op, right)
+    match op
+        '+' ? left + right
+        '-' ? left - right
+        '*' ? left * right
+        '/' ? divide(left, right)
+        '%' ? right == 0 ? ! err Calc:DivisionByZero ! left % right
+        '^' ? math.pow(left, right)
+            ! err Calc:InvalidOperator
+
+# Parse a simple expression like "10 + 5"
+*parse_expression(input)
+    parts is input.split(' ')
+    parts.length != 3 ? ! err Calc:InvalidInput
+    
+    left is parts.get(0).to_number() ! return err
+    op is parts.get(1)
+    right is parts.get(2).to_number() ! return err
+    
+    map('left' is left, 'op' is op, 'right' is right)
+
+# Evaluate an expression string
+*evaluate(input)
+    expr is parse_expression(input) ! return err
+    calculate(expr.get('left'), expr.get('op'), expr.get('right'))
+
+# Interactive calculator
+*run_calculator()
+    log('Coral Calculator')
+    log('Enter expressions like: 10 + 5')
+    log('Supported operators: + - * / % ^')
+    log('Type "quit" to exit')
+    log('')
+    
+    loop
+        log('> ')
+        input is readline()
+        
+        input == 'quit' ? break
+        
+        result is evaluate(input)
+        
+        # Handle errors gracefully
+        result.is_err ?
+            log('Error: {result.err.message}')
+          ! log('= {result}')
+
+# Demo mode with preset expressions
+*demo()
+    log('Calculator Demo')
+    log('===============')
+    log('')
+    
+    expressions is [
+        '10 + 5',
+        '20 - 8',
+        '6 * 7',
+        '100 / 4',
+        '17 % 5',
+        '2 ^ 10',
+        '10 / 0',      # This will error
+        '5 @ 3'        # This will error (invalid operator)
+    ]
+    
+    expressions.each(expr)
+        log('Expression: {expr}')
+        result is evaluate(expr)
+        result.is_err ?
+            log('  Error: {result.err.message}')
+          ! log('  Result: {result}')
+        log('')
+
+*main()
+    demo()

@@ -1,0 +1,43 @@
+store ListNode
+    value is 0
+    &next
+    
+    *set_value(v)
+        self.value is v
+    
+    *set_next(n)
+        self.next is n
+
+store LinkedList
+    &head
+    size is 0
+    
+    *add(value)
+        node is make_ListNode()
+        node.set_value(value)
+        node.set_next(self.head)
+        self.head is node
+        self.size is self.size + 1
+    
+    *get_head()
+        self.head
+
+*main()
+    list is make_LinkedList()
+    
+    list.add(10)
+    list.add(20)
+    list.add(30)
+    
+    head is list.get_head()
+    log(head.value)
+    
+    second is head.next
+    log(second.value)
+    
+    third is second.next
+    log(third.value)
+    
+    log(list.size)
+    
+    0

@@ -91,6 +91,25 @@
                   }
                 }
               }
+            },
+            {
+              "expression": {
+                "call": {
+                  "args": [
+                    {
+                      "integer": 5
+                    }
+                  ],
+                  "callee": {
+                    "member": {
+                      "property": "deposit",
+                      "target": {
+                        "identifier": "ledger"
+                      }
+                    }
+                  }
+                }
+              }
             }
           ],
           "value": {

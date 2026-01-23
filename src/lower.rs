@@ -4,7 +4,7 @@ use crate::span::Span;
 use std::collections::BTreeSet;
 
 pub fn lower(program: Program) -> Result<Program, Diagnostic> {
-    PlaceholderLowerer::default().lower_program(program)
+    PlaceholderLowerer.lower_program(program)
 }
 
 #[derive(Default)]
@@ -33,6 +33,8 @@ impl PlaceholderLowerer {
             Item::Store(store) => self.lower_store(store).map(Item::Store),
             Item::Taxonomy(node) => self.lower_taxonomy(node).map(Item::Taxonomy),
             Item::ExternFunction(_) => Ok(item),
+            Item::ErrorDefinition(_) => Ok(item),  // Error definitions are already in final form
+            Item::TraitDefinition(_) => Ok(item),  // Trait definitions are already in final form
             Item::Expression(expr) => {
                 let expr = self
                     .lower_expression(expr)?

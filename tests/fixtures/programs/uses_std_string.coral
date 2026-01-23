@@ -1,0 +1,16 @@
+use std.prelude
+use std.string
+
+*main()
+    s is "Hello World"
+    up is upper(s)
+    low is lower(s)
+    found is find(s, "World")
+    has_res is has(s, "ello")
+    trimmed is strip("  spaces  ")
+    parts is divide(s, " ")
+    first is at(s, 0)
+    result is sub(s, "World", "Universe")
+    chars_list is to_list("abc")
+    slen is len(s)
+    up

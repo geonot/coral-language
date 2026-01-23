@@ -1,0 +1,17 @@
+use std.prelude
+use std.math
+
+*main()
+    radians is deg_to_rad(180)
+    degrees is rad_to_deg(3.14159)
+    avg is average(10, 20)
+    pos is is_positive(5)
+    neg is is_negative(0 - 5)
+    zero is is_zero(0)
+    clamped is clamp(15, 0, 10)
+    lerped is lerp(0, 100, 0.5)
+    sq is squared(5)
+    cu is cubed(3)
+    dist is distance(0, 0, 3, 4)
+    mag is magnitude(3, 4)
+    sq

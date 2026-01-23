@@ -122,20 +122,181 @@ sys_log is logger('/var/log/app.log')
 stripe is payment_processor(sys_log, 'https://api.stripe.com')
 stripe.charge(99.00, 'USD')
 
-!!Database
-    !!Connection
-        !!Timeout
+err Database
+    err Connection
+        err Timeout
             code is 5001
             message is 'DB Connection Timed Out'
-        !!Refused
+        err Refused
             code is 5002
             message is 'Connection Refused'
-    !!Query
-        !!Syntax
+    err Query
+        err Syntax
             code is 4001
             message is 'Invalid SQL'
 
 *connect_db(host)
-    host.is_empty() ? ! !!Database:Connection:Refused
-    ping(host) > 1000 ? ! !!Database:Connection:Timeout
+    host.is_empty() ? ! err Database:Connection:Refused
+    ping(host) > 1000 ? ! err Database:Connection:Timeout
     true
+
+# ============================================
+# Error Handling & Propagation
+# ============================================
+
+# Error values are attributes of values, not containers
+# Every value can be checked with .is_err, .is_ok, .is_absent
+
+*do_something(p)
+    p.is_active() ? p.process() ! err NotActive
+
+*some_function(bar)
+    # Error propagation: if do_something errors, return that error
+    foo is do_something(bar) ! return err
+    
+    # Continue processing with foo (guaranteed non-error)
+    process(foo)
+
+*go_ahead(x)
+    return match something_else(x)
+        101 ? 'ok'
+        102 ? 'no'
+            ! err  # naked err returns generic error
+
+*handle_errors(x)
+    result is some_function(x)
+    
+    # Check and handle errors explicitly
+    result.is_err ?
+        log('Error occurred: {result.err}')
+        default_value
+      ! result
+
+# ============================================
+# Pipeline Operator (~)
+# ============================================
+
+# Pipeline operator chains operations left-to-right
+# More readable than nested function calls
+
+data is [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+# Without pipeline (nested)
+result1 is sum(filter(map(data, $ * 2), $ > 10))
+
+# With pipeline (linear)
+result2 is data 
+    ~ map($ * 2) 
+    ~ filter($ > 10) 
+    ~ sum()
+
+# Pipeline with named functions
+*double(x)
+    x * 2
+
+*is_large(x)
+    x > 10
+
+result3 is data ~ map(double($)) ~ filter(is_large($)) ~ sum()
+
+# Complex pipeline example
+users is fetch_users()
+    ~ filter($.is_active)
+    ~ map($.name)
+    ~ sort()
+    ~ take(10)
+    ~ join(', ')
+
+# ============================================
+# Traits / Mixins
+# ============================================
+
+trait Printable
+    # Required method (must be implemented)
+    *to_string()
+    
+    # Default implementation (optional to override)
+    *print()
+        log(to_string())
+    
+    *print_with_prefix(prefix)
+        log('{prefix}: {to_string()}')
+
+trait Comparable
+    *compare(other)
+    
+    # Derived from compare
+    *less_than(other)
+        compare(other) < 0
+    
+    *equals(other)
+        compare(other) == 0
+    
+    *greater_than(other)
+        compare(other) > 0
+
+# Trait composition
+trait Equatable
+    with Comparable
+    
+    *not_equals(other)
+        not equals(other)
+
+# Using traits in type
+type Point
+    with Printable
+    with Comparable
+    
+    x ? 0
+    y ? 0
+    
+    *to_string()
+        'Point({x}, {y})'
+    
+    *compare(other)
+        dist_self is math.sqrt(x*x + y*y)
+        dist_other is math.sqrt(other.x*other.x + other.y*other.y)
+        dist_self - dist_other
+
+p1 is Point(3, 4)
+p2 is Point(1, 1)
+
+p1.print()                    # Uses Printable trait
+p1.less_than(p2)             # Uses Comparable trait
+p1.print_with_prefix('Origin') # Uses default implementation
+
+# ============================================
+# Complete Example: Error + Pipeline + Traits
+# ============================================
+
+err Validation
+    err Required
+    err TooShort
+    err Invalid
+
+trait Validatable
+    *validate()
+
+type Email
+    with Validatable
+    with Printable
+    
+    value
+    
+    *validate()
+        value.is_empty() ? ! err Validation:Required
+        not value.contains('@') ? ! err Validation:Invalid
+        true
+    
+    *to_string()
+        value
+
+*process_emails(raw_list)
+    raw_list
+        ~ map(Email(value is $))
+        ~ filter($.validate().is_ok)
+        ~ map($.to_string())
+        ~ join('; ')
+
+emails is ['alice@example.com', 'invalid', 'bob@test.org', '']
+valid_emails is process_emails(emails)  # 'alice@example.com; bob@test.org'

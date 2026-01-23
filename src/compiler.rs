@@ -1,4 +1,4 @@
-use crate::ast::Expression;
+use crate::ast::{BinaryOp, Expression, UnaryOp};
 use crate::codegen::{CodeGenerator, InlineAsmMode};
 use crate::diagnostics::{CompileError, Stage};
 use crate::lexer;
@@ -27,6 +27,9 @@ impl Compiler {
         let mir_module = mir_lower::lower_semantic_model(&model);
         let const_eval = ConstEvaluator::new(mir_module);
         self.fold_const_globals(&mut model, &const_eval);
+        
+        // Fold constant expressions (1 + 2 → 3, true and false → false, etc.)
+        Self::fold_expressions(&mut model);
 
         let context = Context::create();
         let inline_mode = match std::env::var("CORAL_INLINE_ASM") {
@@ -118,6 +121,160 @@ impl Compiler {
             crate::mir_interpreter::Value::String(s) => Expression::String(s.clone(), span),
             crate::mir_interpreter::Value::Bytes(bytes) => Expression::Bytes(bytes.clone(), span),
             crate::mir_interpreter::Value::Unit => Expression::Unit,
+        }
+    }
+    
+    /// Fold constant expressions in the semantic model.
+    /// This includes arithmetic on literals (e.g., 1 + 2 → 3) and boolean operations.
+    fn fold_expressions(model: &mut semantic::SemanticModel) {
+        // Fold globals
+        for binding in &mut model.globals {
+            binding.value = Self::fold_expr(binding.value.clone());
+        }
+        // Fold function bodies
+        for func in &mut model.functions {
+            Self::fold_block(&mut func.body);
+        }
+    }
+    
+    fn fold_block(block: &mut crate::ast::Block) {
+        for stmt in &mut block.statements {
+            match stmt {
+                crate::ast::Statement::Binding(binding) => {
+                    binding.value = Self::fold_expr(binding.value.clone());
+                }
+                crate::ast::Statement::Expression(expr) => {
+                    *expr = Self::fold_expr(expr.clone());
+                }
+                crate::ast::Statement::Return(expr, _) => {
+                    *expr = Self::fold_expr(expr.clone());
+                }
+            }
+        }
+        if let Some(value) = &mut block.value {
+            *value = Box::new(Self::fold_expr(*value.clone()));
+        }
+    }
+    
+    /// Recursively fold constant expressions.
+    fn fold_expr(expr: Expression) -> Expression {
+        match expr {
+            Expression::Binary { op, left, right, span } => {
+                let left = Box::new(Self::fold_expr(*left));
+                let right = Box::new(Self::fold_expr(*right));
+                
+                // Try to fold numeric operations
+                match (left.as_ref(), right.as_ref()) {
+                    (Expression::Integer(a, _), Expression::Integer(b, _)) => {
+                        match op {
+                            BinaryOp::Add => return Expression::Integer(a + b, span),
+                            BinaryOp::Sub => return Expression::Integer(a - b, span),
+                            BinaryOp::Mul => return Expression::Integer(a * b, span),
+                            BinaryOp::Div if *b != 0 => return Expression::Integer(a / b, span),
+                            BinaryOp::Mod if *b != 0 => return Expression::Integer(a % b, span),
+                            BinaryOp::BitAnd => return Expression::Integer(a & b, span),
+                            BinaryOp::BitOr => return Expression::Integer(a | b, span),
+                            BinaryOp::BitXor => return Expression::Integer(a ^ b, span),
+                            BinaryOp::Equals => return Expression::Bool(a == b, span),
+                            BinaryOp::Less => return Expression::Bool(a < b, span),
+                            BinaryOp::LessEq => return Expression::Bool(a <= b, span),
+                            BinaryOp::Greater => return Expression::Bool(a > b, span),
+                            BinaryOp::GreaterEq => return Expression::Bool(a >= b, span),
+                            _ => {}
+                        }
+                    }
+                    (Expression::Float(a, _), Expression::Float(b, _)) => {
+                        match op {
+                            BinaryOp::Add => return Expression::Float(a + b, span),
+                            BinaryOp::Sub => return Expression::Float(a - b, span),
+                            BinaryOp::Mul => return Expression::Float(a * b, span),
+                            BinaryOp::Div => return Expression::Float(a / b, span),
+                            BinaryOp::Less => return Expression::Bool(a < b, span),
+                            BinaryOp::LessEq => return Expression::Bool(a <= b, span),
+                            BinaryOp::Greater => return Expression::Bool(a > b, span),
+                            BinaryOp::GreaterEq => return Expression::Bool(a >= b, span),
+                            _ => {}
+                        }
+                    }
+                    (Expression::Bool(a, _), Expression::Bool(b, _)) => {
+                        match op {
+                            BinaryOp::And => return Expression::Bool(*a && *b, span),
+                            BinaryOp::Or => return Expression::Bool(*a || *b, span),
+                            BinaryOp::Equals => return Expression::Bool(a == b, span),
+                            _ => {}
+                        }
+                    }
+                    (Expression::String(a, _), Expression::String(b, _)) => {
+                        if op == BinaryOp::Add {
+                            // String concatenation at compile time
+                            let mut result = a.clone();
+                            result.push_str(b);
+                            return Expression::String(result, span);
+                        }
+                    }
+                    _ => {}
+                }
+                
+                Expression::Binary { op, left, right, span }
+            }
+            Expression::Unary { op, expr, span } => {
+                let inner = Box::new(Self::fold_expr(*expr));
+                
+                match (op, inner.as_ref()) {
+                    (UnaryOp::Neg, Expression::Integer(n, _)) => {
+                        return Expression::Integer(-n, span);
+                    }
+                    (UnaryOp::Neg, Expression::Float(n, _)) => {
+                        return Expression::Float(-n, span);
+                    }
+                    (UnaryOp::Not, Expression::Bool(b, _)) => {
+                        return Expression::Bool(!b, span);
+                    }
+                    (UnaryOp::BitNot, Expression::Integer(n, _)) => {
+                        return Expression::Integer(!n, span);
+                    }
+                    _ => {}
+                }
+                
+                Expression::Unary { op, expr: inner, span }
+            }
+            Expression::Ternary { condition, then_branch, else_branch, span } => {
+                let cond = Box::new(Self::fold_expr(*condition));
+                let then_b = Box::new(Self::fold_expr(*then_branch));
+                let else_b = Box::new(Self::fold_expr(*else_branch));
+                
+                // If condition is a constant bool, return the appropriate branch
+                if let Expression::Bool(b, _) = cond.as_ref() {
+                    return if *b { *then_b } else { *else_b };
+                }
+                
+                Expression::Ternary { condition: cond, then_branch: then_b, else_branch: else_b, span }
+            }
+            Expression::Call { callee, args, span } => {
+                let callee = Box::new(Self::fold_expr(*callee));
+                let args: Vec<_> = args.into_iter().map(Self::fold_expr).collect();
+                Expression::Call { callee, args, span }
+            }
+            Expression::List(items, span) => {
+                let items: Vec<_> = items.into_iter().map(Self::fold_expr).collect();
+                Expression::List(items, span)
+            }
+            Expression::Map(entries, span) => {
+                let entries: Vec<_> = entries.into_iter()
+                    .map(|(k, v)| (Self::fold_expr(k), Self::fold_expr(v)))
+                    .collect();
+                Expression::Map(entries, span)
+            }
+            Expression::Member { target, property, span } => {
+                let target = Box::new(Self::fold_expr(*target));
+                Expression::Member { target, property, span }
+            }
+            Expression::Lambda { params, mut body, span } => {
+                Self::fold_block(&mut body);
+                Expression::Lambda { params, body, span }
+            }
+            // Pass through literals and other expressions unchanged
+            other => other,
         }
     }
 }

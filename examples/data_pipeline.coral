@@ -1,0 +1,141 @@
+# Data Pipeline - Demonstrating Coral's pipeline operator and HOF
+
+# Sample data: list of users
+users_data is [
+    map('id' is 1, 'name' is 'Alice', 'age' is 28, 'dept' is 'Engineering', 'salary' is 95000),
+    map('id' is 2, 'name' is 'Bob', 'age' is 35, 'dept' is 'Marketing', 'salary' is 72000),
+    map('id' is 3, 'name' is 'Carol', 'age' is 42, 'dept' is 'Engineering', 'salary' is 120000),
+    map('id' is 4, 'name' is 'David', 'age' is 29, 'dept' is 'Sales', 'salary' is 65000),
+    map('id' is 5, 'name' is 'Eve', 'age' is 31, 'dept' is 'Engineering', 'salary' is 105000),
+    map('id' is 6, 'name' is 'Frank', 'age' is 45, 'dept' is 'Marketing', 'salary' is 88000),
+    map('id' is 7, 'name' is 'Grace', 'age' is 26, 'dept' is 'Engineering', 'salary' is 85000),
+    map('id' is 8, 'name' is 'Henry', 'age' is 38, 'dept' is 'Sales', 'salary' is 78000)
+]
+
+# Helper functions
+*get_field(record, field)
+    record.get(field)
+
+*is_engineer(user)
+    user.get('dept') == 'Engineering'
+
+*is_senior(user)
+    user.get('age') >= 30
+
+*format_user(user)
+    '{user.get("name")} ({user.get("age")}) - ${user.get("salary")}'
+
+# Pipeline operations using ~ operator
+*example_pipeline()
+    log('=== Engineering Team Seniors ===')
+    
+    # Traditional chained method calls
+    result1 is users_data
+        .filter(is_engineer($))
+        .filter(is_senior($))
+        .map(format_user($))
+    
+    result1.each(log($))
+    log('')
+    
+    # Using pipeline operator ~ (reads left to right)
+    log('=== Same with pipeline operator ===')
+    
+    result2 is users_data 
+        ~ filter(is_engineer($)) 
+        ~ filter(is_senior($)) 
+        ~ map(format_user($))
+    
+    result2.each(log($))
+
+# Aggregation example
+*salary_analysis()
+    log('')
+    log('=== Salary Analysis ===')
+    
+    # Total salary
+    total is users_data 
+        ~ map($.get('salary')) 
+        ~ reduce(+)
+    log('Total payroll: ${total}')
+    
+    # Average salary
+    avg is total / users_data.length
+    log('Average salary: ${avg}')
+    
+    # Engineering average
+    eng_salaries is users_data 
+        ~ filter(is_engineer($)) 
+        ~ map($.get('salary'))
+    eng_avg is eng_salaries.reduce(+) / eng_salaries.length
+    log('Engineering average: ${eng_avg}')
+    
+    # Highest paid
+    highest is users_data 
+        ~ reduce(acc, user)
+            acc.get('salary') > user.get('salary') ? acc ! user
+    log('Highest paid: {highest.get("name")} at ${highest.get("salary")}')
+
+# Grouping example
+*group_by_dept()
+    log('')
+    log('=== Employees by Department ===')
+    
+    # Group users by department
+    groups is map()
+    
+    users_data.each(user)
+        dept is user.get('dept')
+        groups.has(dept) ? 
+            groups.get(dept).push(user)
+          ! groups.set(dept, [user])
+    
+    # Print each group
+    groups.keys().each(dept)
+        log('')
+        log('{dept}:')
+        groups.get(dept).each(user)
+            log('  - {user.get("name")}')
+
+# Complex pipeline: Find departments with avg salary > 80000
+*high_paying_depts()
+    log('')
+    log('=== High-Paying Departments (avg > $80k) ===')
+    
+    # Build department salary aggregates
+    depts is map()
+    
+    users_data.each(user)
+        dept is user.get('dept')
+        salary is user.get('salary')
+        
+        depts.has(dept) ?
+            current is depts.get(dept)
+            depts.set(dept, map(
+                'total' is current.get('total') + salary,
+                'count' is current.get('count') + 1
+            ))
+          ! depts.set(dept, map('total' is salary, 'count' is 1))
+    
+    # Filter to high-paying and format
+    depts.keys()
+        ~ filter(dept)
+            data is depts.get(dept)
+            avg is data.get('total') / data.get('count')
+            avg > 80000
+        ~ each(dept)
+            data is depts.get(dept)
+            avg is data.get('total') / data.get('count')
+            log('{dept}: ${avg} average')
+
+*main()
+    log('Data Pipeline Demo')
+    log('==================')
+    
+    example_pipeline()
+    salary_analysis()
+    group_by_dept()
+    high_paying_depts()
+    
+    log('')
+    log('Pipeline demo complete!')

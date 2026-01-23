@@ -1,10 +1,49 @@
+# std/io.coral - File I/O operations
+
 use std.prelude
 
+# Read entire file contents as string
 *read(path)
     fs_read(path)
 
+# Write string to file (creates or overwrites)
 *write(path, data)
     fs_write(path, data)
 
+# Check if path exists
 *exists(path)
     fs_exists(path)
+
+# Read file as list of lines
+*read_lines(path)
+    content is fs_read(path)
+    split(content, "\n")
+
+# ===== Path operations (pure string manipulation) =====
+
+# Get file extension (without dot)
+*extension(path)
+    parts is split(path, ".")
+    parts.length > 1 ? parts.get(parts.length - 1) ! ""
+
+# Get filename from path
+*filename(path)
+    parts is split(path, "/")
+    parts.get(parts.length - 1)
+
+# Check if path ends with suffix
+*path_ends_with(path, suffix)
+    ends_with(path, suffix)
+
+# Check if path starts with prefix
+*path_starts_with(path, prefix)
+    starts_with(path, prefix)
+
+# ===== Console I/O =====
+
+# Log a message
+*println(msg)
+    log(msg)
+
+
+

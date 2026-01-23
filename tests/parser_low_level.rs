@@ -1,5 +1,6 @@
 use coralc::lexer;
 use coralc::parser::Parser;
+use coralc::ast::Expression;
 
 #[test]
 fn test_extern_fn_declaration() {
@@ -46,4 +47,30 @@ fn test_ptr_load() {
     let tokens = lexer::lex(source).unwrap();
     let program = Parser::new(tokens, source.len()).parse();
     assert!(program.is_ok(), "ptr load should parse: {:?}", program.err());
+}
+
+#[test]
+fn test_none_keyword() {
+    let source = r#"
+*test()
+    let x = none
+    none
+"#;
+    let tokens = lexer::lex(source).unwrap();
+    let program = Parser::new(tokens, source.len()).parse();
+    assert!(program.is_ok(), "none keyword should parse: {:?}", program.err());
+    let prog = program.unwrap();
+    // Check that we got a function with a body that has the none expression
+    if let coralc::ast::Item::Function(func) = &prog.items[0] {
+        // Value expression should be none
+        match &func.body.value {
+            Some(expr) => match expr.as_ref() {
+                Expression::None(_) => {} // Success
+                other => panic!("expected None expression, got {:?}", other),
+            },
+            None => panic!("expected value expression"),
+        }
+    } else {
+        panic!("expected function");
+    }
 }

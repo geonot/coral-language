@@ -1,0 +1,20 @@
+store Node
+    value is 0
+    &next
+
+    *set_value(v)
+        self.value is v
+        
+    *set_next(n)
+        self.next is n
+
+
+*main()
+    n1 is make_Node()
+    n2 is make_Node()
+    n2.set_value(10)
+    n1.set_next(n2)
+    log(n1.value)
+    log(n1.next.value)
+    0
+

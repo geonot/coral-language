@@ -1,0 +1,33 @@
+# std/set.coral - Set operations (implemented using maps)
+# 
+# Sets are maps where values are always true - only keys matter
+
+use std.prelude
+
+# Create empty set (returns empty map)
+*empty_set()
+    map()
+
+# Add element to set (returns new set)
+*add(s, elem)
+    s.set(elem, true)
+
+# Check if element exists in set
+*has(s, elem)
+    s.get(elem).equals(none).not()
+
+# Get number of elements
+*size(s)
+    s.size
+
+# Check if set is empty
+*is_empty(s)
+    s.size == 0
+
+# Get all elements as a list
+*elements(s)
+    s.keys()
+
+# Create set from a single element
+*singleton(elem)
+    map().set(elem, true)
