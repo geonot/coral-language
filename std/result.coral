@@ -1,0 +1,122 @@
+# std/result.coral - Result type for error handling
+
+# Result[T, E] represents either success (Ok) or failure (Err)
+enum Result
+  Ok(value)
+  Err(error)
+
+# Create an Ok result
+*ok(value)
+  Ok(value)
+
+# Create an Err result  
+*err(error)
+  Err(error)
+
+# Check if result is Ok
+*is_ok(result)
+  match result
+    Ok(_) ? true
+    Err(_) ? false
+
+# Check if result is Err
+*is_err(result) 
+  match result
+    Ok(_) ? false
+    Err(_) ? true
+
+# Get the value from Ok, or return default for Err
+*unwrap_or(result, default)
+  match result
+    Ok(value) ? value
+    Err(_) ? default
+
+# Get the value from Ok, panic on Err
+*unwrap(result)
+  match result
+    Ok(value) ? value
+    Err(error) ? log('PANIC: unwrap called on Err: ' + error.to_string())
+
+# Get the error from Err, or return default for Ok  
+*unwrap_err_or(result, default)
+  match result
+    Ok(_) ? default
+    Err(error) ? error
+
+# Get the error from Err, panic on Ok
+*unwrap_err(result)
+  match result
+    Ok(_) ? log('PANIC: unwrap_err called on Ok')
+    Err(error) ? error
+
+# Map function over Ok value, leave Err unchanged
+*map(result, func)
+  match result
+    Ok(value) ? Ok(func(value))
+    Err(error) ? Err(error)
+
+# Map function over Err value, leave Ok unchanged  
+*map_err(result, func)
+  match result
+    Ok(value) ? Ok(value)
+    Err(error) ? Err(func(error))
+
+# Chain operations that return Result (monadic bind)
+*and_then(result, func)
+  match result
+    Ok(value) ? func(value)
+    Err(error) ? Err(error)
+
+# Return this result if Ok, otherwise return other
+*or(result, other)
+  match result
+    Ok(value) ? Ok(value)
+    Err(_) ? other
+
+# Return this result if Ok, otherwise call func to get alternative
+*or_else(result, func)
+  match result
+    Ok(value) ? Ok(value) 
+    Err(error) ? func(error)
+
+# Convert Option to Result with error value for None
+*from_option(option, error_value)
+  match option
+    Some(value) ? Ok(value)
+    None ? Err(error_value)
+
+# Convert Result to Option, discarding error information  
+*to_option(result)
+  match result
+    Ok(value) ? Some(value)
+    Err(_) ? None
+
+# Transpose Result[Option[T], E] to Option[Result[T, E]]
+*transpose(result)
+  match result
+    Ok(option) ? 
+      match option
+        Some(value) ? Some(Ok(value))
+        None ? None
+    Err(error) ? Some(Err(error))
+
+# Collect a list of Results into Result of list
+# If any Result is Err, return the first Err
+# Otherwise return Ok with list of all Ok values
+*collect(results)
+  values is []
+  for result in results
+    match result
+      Ok(value) ? values.push(value)
+      Err(error) ? return Err(error)
+  Ok(values)
+
+# Partition a list of Results into separate Ok and Err lists
+*partition(results) 
+  oks is []
+  errs is []
+  for result in results
+    match result
+      Ok(value) ? oks.push(value)
+      Err(error) ? errs.push(error)
+  map('oks' is oks, 'errs' is errs)

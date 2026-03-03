@@ -1,0 +1,23 @@
+# Test comprehensive syntax to see what's currently supported
+
+*might_fail()
+    err MyError
+
+*might_succeed()
+    42
+
+*test_current_error_syntax()
+    # Test guard clause: cond ! err Name
+    x is 5
+    result1 is x > 0 ! err GuardFail
+    
+    # Test ternary conditional
+    result2 is x > 3 ? 'big' ! 'small'
+    
+    # Test error propagation - this might not work
+    # value is might_fail() ! return err
+    
+    result2
+
+*main()
+    test_current_error_syntax()

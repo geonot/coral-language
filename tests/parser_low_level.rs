@@ -53,7 +53,7 @@ fn test_ptr_load() {
 fn test_none_keyword() {
     let source = r#"
 *test()
-    let x = none
+    x is none
     none
 "#;
     let tokens = lexer::lex(source).unwrap();

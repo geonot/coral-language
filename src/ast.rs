@@ -110,6 +110,7 @@ pub struct Parameter {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAnnotation {
     pub segments: Vec<String>,
+    pub type_args: Vec<TypeAnnotation>,  // For generic types like List[int], Map[string, int]
     pub span: Span,
 }
 
@@ -136,6 +137,33 @@ pub enum Statement {
     Binding(Binding),
     Expression(Expression),
     Return(Expression, Span),
+    If {
+        condition: Expression,
+        body: Block,
+        elif_branches: Vec<(Expression, Block)>,
+        else_body: Option<Block>,
+        span: Span,
+    },
+    While {
+        condition: Expression,
+        body: Block,
+        span: Span,
+    },
+    For {
+        variable: String,
+        iterable: Expression,
+        body: Block,
+        span: Span,
+    },
+    /// Field assignment on a store/actor: `self.field is value`
+    FieldAssign {
+        target: Expression,
+        field: String,
+        value: Expression,
+        span: Span,
+    },
+    Break(Span),
+    Continue(Span),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,24 +202,6 @@ pub struct StoreDefinition {
     pub is_persistent: bool,  // `persist store` vs `store`
     pub span: Span,
 }
-
-/// Persistence mode for stores
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum PersistenceMode {
-    #[default]
-    Snapshot,   // Periodic full snapshots
-    Journal,    // Append-only log of changes
-}
-
-/// Default fields automatically added to persistent stores
-pub const STORE_DEFAULT_FIELDS: &[(&str, &str)] = &[
-    ("_index", "Int"),       // Auto-increment primary key
-    ("_uuid", "String"),     // UUID identifier
-    ("_created_at", "Int"),  // Unix timestamp
-    ("_updated_at", "Int"),  // Unix timestamp
-    ("_deleted_at", "Int"),  // Unix timestamp (0 if not deleted, soft delete)
-    ("_version", "Int"),     // Optimistic concurrency version
-];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaxonomyNode {
@@ -288,6 +298,12 @@ pub enum Expression {
         block: Block,
         span: Span,
     },
+    /// Index/subscript expression: `expr[index]`
+    Index {
+        target: Box<Expression>,
+        index: Box<Expression>,
+        span: Span,
+    },
 }
 
 impl Expression {
@@ -319,6 +335,7 @@ impl Expression {
             Expression::InlineAsm { span, .. } => *span,
             Expression::PtrLoad { span, .. } => *span,
             Expression::Unsafe { span, .. } => *span,
+            Expression::Index { span, .. } => *span,
         }
     }
 }
@@ -338,6 +355,7 @@ pub enum BinaryOp {
     ShiftLeft,
     ShiftRight,
     Equals,
+    NotEquals,
     Greater,
     GreaterEq,
     Less,
@@ -371,7 +389,7 @@ pub enum MatchPattern {
     Bool(bool),
     Identifier(String),
     String(String),
-    List(Vec<Expression>),
+    List(Vec<MatchPattern>),
     /// Constructor pattern for sum types: Some(x), None, Ok(val), Err(e)
     Constructor {
         name: String,

@@ -1,7 +1,7 @@
 # FizzBuzz - Classic programming exercise in Coral
 
 *fizzbuzz(n)
-    match (n % 3 == 0, n % 5 == 0)
+    match (n % 3 is 0, n % 5 is 0)
         (true, true) ? 'FizzBuzz'
         (true, false) ? 'Fizz'
         (false, true) ? 'Buzz'

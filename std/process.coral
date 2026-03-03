@@ -1,0 +1,44 @@
+# std/process.coral - Process and system operations
+
+use std.prelude
+
+# Get command-line arguments as a list of strings
+*argv()
+	process_args()
+
+# Get the number of arguments
+*argc()
+	process_args().length
+
+# Get a specific argument by index (0-based, 0 is the program name)
+*arg(index)
+	args_list is process_args()
+	if index < args_list.length
+		args_list.get(index)
+	else
+		none
+
+# Exit with a code (0 = success)
+*exit_with(code)
+	exit(code)
+
+# Exit with success
+*exit_ok()
+	exit(0)
+
+# Exit with failure
+*exit_fail()
+	exit(1)
+
+# Get environment variable
+*env(name)
+	env_get(name)
+
+# Get environment variable with default
+*env_or(name, default)
+	result is env_get(name)
+	is_absent(result) ? default ! result
+
+# Set environment variable
+*set_env(name, value)
+	env_set(name, value)

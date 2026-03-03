@@ -126,6 +126,10 @@ fn get_children(handle: ValueHandle) -> Vec<ValueHandle> {
                 }
             }
         }
+        // Store values are containers (tracked as roots) but their children
+        // are managed by the persistent store engine, not by refcounting.
+        // No child handles to traverse.
+        Ok(ValueTag::Store) => {}
         _ => {}
     }
     
@@ -159,9 +163,31 @@ pub fn possible_root(handle: ValueHandle) {
     }
 }
 
+/// Called when a value is about to be freed (refcount reached 0).
+/// Removes the value from cycle detection tracking to prevent use-after-free
+/// during concurrent cycle collection scans.
+pub fn notify_value_freed(handle: ValueHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let addr = handle as usize;
+    let mut det = detector().lock().unwrap();
+    det.roots.remove(&addr);
+    det.info.remove(&addr);
+}
+
 /// Run a cycle collection phase.
 /// This should be called periodically or when memory pressure is high.
 pub fn collect_cycles() {
+    // Check if already collecting to prevent recursion
+    {
+        let mut det = detector().lock().unwrap();
+        if det.collecting {
+            return;
+        }
+        det.collecting = true;
+    }
+
     // Mark candidates
     mark_roots();
     
@@ -170,6 +196,12 @@ pub fn collect_cycles() {
     
     // Collect garbage cycles
     collect_roots();
+    
+    // Clear collecting flag
+    {
+        let mut det = detector().lock().unwrap();
+        det.collecting = false;
+    }
 }
 
 /// Phase 1: Mark all potential roots
@@ -185,13 +217,22 @@ fn mark_roots() {
             continue;
         }
         
+        let mut det = detector().lock().unwrap();
+        
+        // Verify the value is still tracked (may have been freed via
+        // notify_value_freed since we collected the roots snapshot).
+        if !det.info.contains_key(&addr) {
+            det.roots.remove(&addr);
+            continue;
+        }
+        
+        // Safe to dereference: if the value were freed, notify_value_freed
+        // would have removed it from det.info under this same lock.
         let value = unsafe { &*handle };
         let refcount = value.refcount.load(Ordering::Relaxed);
         
-        let mut det = detector().lock().unwrap();
-        
         // Get the current color and buffered status
-        let (current_color, is_buffered) = {
+        let (current_color, _is_buffered) = {
             let info = det.info.entry(addr).or_default();
             (info.color, info.buffered)
         };
@@ -224,8 +265,7 @@ fn mark_gray(handle: ValueHandle, det: &mut CycleDetector) {
     if info.color != Color::Gray {
         info.color = Color::Gray;
         
-        // Note: We need to drop the lock before getting children to avoid deadlock
-        // This is a simplified version - production code would need more care
+        // Get children after marking to avoid infinite recursion
         let children = get_children(handle);
         for child in children {
             mark_gray(child, det);
@@ -254,30 +294,41 @@ fn scan(handle: ValueHandle) {
     
     let addr = handle as usize;
     
-    let color = {
-        let det = detector().lock().unwrap();
-        det.info.get(&addr).map(|i| i.color).unwrap_or(Color::Black)
+    // Hold lock while checking color AND reading refcount to prevent
+    // use-after-free (the value can't be freed while we hold the lock
+    // because notify_value_freed also takes this lock).
+    let action = {
+        let mut det = detector().lock().unwrap();
+        let color = det.info.get(&addr).map(|i| i.color).unwrap_or(Color::Black);
+        
+        if color != Color::Gray {
+            None // Not gray, nothing to do
+        } else {
+            // Safe to dereference: value is still tracked
+            let value = unsafe { &*handle };
+            let refcount = value.refcount.load(Ordering::Relaxed);
+            
+            if refcount > 0 {
+                Some(true) // scan_black
+            } else {
+                // Mark white and collect children under lock
+                if let Some(info) = det.info.get_mut(&addr) {
+                    info.color = Color::White;
+                }
+                Some(false) // scan children
+            }
+        }
     };
     
-    if color == Color::Gray {
-        let value = unsafe { &*handle };
-        let refcount = value.refcount.load(Ordering::Relaxed);
-        
-        if refcount > 0 {
-            // This value is still reachable from outside
-            scan_black(handle);
-        } else {
-            // This value is only referenced by the cycle
-            let mut det = detector().lock().unwrap();
-            if let Some(info) = det.info.get_mut(&addr) {
-                info.color = Color::White;
-            }
-            
+    match action {
+        Some(true) => scan_black(handle),
+        Some(false) => {
             let children = get_children(handle);
             for child in children {
                 scan(child);
             }
         }
+        None => {}
     }
 }
 
@@ -289,13 +340,19 @@ fn scan_black(handle: ValueHandle) {
     
     let addr = handle as usize;
     
-    let mut det = detector().lock().unwrap();
-    let info = det.info.entry(addr).or_default();
-    
-    if info.color != Color::Black {
-        info.color = Color::Black;
+    let (need_recurse, children) = {
+        let mut det = detector().lock().unwrap();
+        let info = det.info.entry(addr).or_default();
         
-        let children = get_children(handle);
+        if info.color != Color::Black {
+            info.color = Color::Black;
+            (true, get_children(handle))
+        } else {
+            (false, Vec::new())
+        }
+    }; // lock released before recursion
+    
+    if need_recurse {
         for child in children {
             scan_black(child);
         }
@@ -347,29 +404,37 @@ fn collect_white(handle: ValueHandle) {
     let addr = handle as usize;
     
     let is_white = {
-        let det = detector().lock().unwrap();
-        det.info.get(&addr).map(|i| i.color == Color::White).unwrap_or(false)
-    };
-    
-    if is_white {
-        {
-            let mut det = detector().lock().unwrap();
+        let mut det = detector().lock().unwrap();
+        let white = det.info.get(&addr).map(|i| i.color == Color::White).unwrap_or(false);
+        if white {
+            // Mark black to prevent re-collection, then get children while tracked
             if let Some(info) = det.info.get_mut(&addr) {
                 info.color = Color::Black;
             }
         }
-        
+        white
+    };
+    
+    if is_white {
+        // get_children is safe here: the value is still tracked (Black now),
+        // and notify_value_freed hasn't been called yet for this handle.
         let children = get_children(handle);
         for child in children {
             collect_white(child);
         }
         
-        // Actually free the value
-        // Note: In production, we'd need to be more careful about the order
-        // of releases to avoid double-frees
+        // Notify weak reference system before deallocation
+        crate::weak_ref::notify_value_deallocated(handle);
+        
+        // Deallocate the heap data WITHOUT releasing child handles.
+        // Children in the cycle are handled by their own collect_white call;
+        // non-cycle children had their refcounts adjusted during the scan phase.
+        // Using coral_value_release here would re-release children that are
+        // already freed, causing use-after-free.
         unsafe {
-            crate::coral_value_release(handle);
+            crate::drop_heap_value_for_gc(handle);
         }
+        crate::dealloc_value_box(handle);
         
         // Clean up tracking info
         let mut det = detector().lock().unwrap();
@@ -420,6 +485,30 @@ pub extern "C" fn coral_cycle_roots_count() -> u64 {
     det.roots.len() as u64
 }
 
+/// Force a cycle collection run (for testing/debugging).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_force_cycle_collection() {
+    collect_cycles();
+}
+
+/// Enable/disable automatic cycle collection during value release.
+static AUTO_CYCLE_COLLECTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_set_auto_cycle_collection(enabled: u8) {
+    AUTO_CYCLE_COLLECTION.store(enabled != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_get_auto_cycle_collection() -> u8 {
+    if AUTO_CYCLE_COLLECTION.load(std::sync::atomic::Ordering::Relaxed) { 1 } else { 0 }
+}
+
+/// Check if automatic cycle collection is enabled.
+pub fn auto_cycle_collection_enabled() -> bool {
+    AUTO_CYCLE_COLLECTION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +550,44 @@ mod tests {
         unsafe {
             crate::coral_value_release(list);
             crate::coral_value_release(num);
+        }
+    }
+
+    #[test]
+    fn test_no_false_positives() {
+        reset_cycle_detector();
+        
+        // Create a tree structure (no cycles)
+        let root = coral_make_list(std::ptr::null(), 0);
+        let child1 = coral_make_list(std::ptr::null(), 0);
+        let child2 = coral_make_list(std::ptr::null(), 0);
+        
+        unsafe {
+            // Make root point to children
+            let root_list = &mut *((*root).payload.ptr as *mut crate::ListObject);
+            root_list.items.push(child1);
+            root_list.items.push(child2);
+            coral_value_retain(child1);
+            coral_value_retain(child2);
+        }
+        
+        // Mark as possible roots and collect
+        possible_root(root);
+        possible_root(child1);
+        possible_root(child2);
+        
+        let initial_stats = cycle_stats();
+        collect_cycles();
+        let final_stats = cycle_stats();
+        
+        // Should not collect anything from a tree structure
+        assert_eq!(final_stats.1, initial_stats.1, "Tree structure should not be collected as cycle");
+        
+        // Clean up
+        unsafe {
+            crate::coral_value_release(root);
+            crate::coral_value_release(child1);
+            crate::coral_value_release(child2);
         }
     }
 }

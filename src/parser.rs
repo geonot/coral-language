@@ -26,7 +26,7 @@ impl Parser {
 
     pub fn parse(mut self) -> ParseResult<Program> {
         let mut items = Vec::new();
-        let mut errors = Vec::new();
+
         self.skip_newlines();
         while !self.check(TokenKind::Eof) {
             if self.check(TokenKind::Dedent) {
@@ -35,52 +35,15 @@ impl Parser {
                 self.advance();
                 continue;
             }
-            match self.parse_item() {
-                Ok(item) => items.push(item),
-                Err(error) => {
-                    errors.push(error);
-                    // Recovery: skip to next line or item-starting keyword
-                    self.synchronize();
-                }
-            }
+            let item = self.parse_item()?;
+            items.push(item);
             self.skip_newlines();
         }
         let program = Program::new(items, Span::new(0, self.source_len));
         if let Some(error) = self.pending_error {
             Err(error)
-        } else if !errors.is_empty() {
-            // Return the first error (for now)
-            // TODO: Return all errors once compiler supports multiple diagnostics
-            Err(errors.remove(0))
         } else {
             Ok(program)
-        }
-    }
-
-    /// Synchronize parser state after an error by skipping to a safe recovery point.
-    fn synchronize(&mut self) {
-        // Skip until we find a newline at the top level or an item-starting keyword
-        while !self.check(TokenKind::Eof) {
-            // Check for item-starting tokens
-            match self.peek_kind() {
-                TokenKind::KeywordType
-                | TokenKind::KeywordEnum
-                | TokenKind::KeywordStore
-                | TokenKind::KeywordPersist
-                | TokenKind::KeywordActor
-                | TokenKind::KeywordExtern
-                | TokenKind::Star => return,
-                TokenKind::Newline => {
-                    self.advance();
-                    return;
-                }
-                TokenKind::Dedent => {
-                    return;
-                }
-                _ => {
-                    self.advance();
-                }
-            }
         }
     }
 
@@ -117,6 +80,8 @@ impl Parser {
                     self.parse_expression().map(Item::Expression)
                 }
             }
+            TokenKind::Indent => Err(self.error_here("unexpected indent at top-level")),
+            TokenKind::Dedent => Err(self.error_here("unexpected dedent at top-level")),
             _ => Err(self.error_here("unexpected token at top-level")),
         }
     }
@@ -389,7 +354,7 @@ impl Parser {
             span = span.join(segment_span);
             segments.push(segment);
         }
-        Ok(TypeAnnotation { segments, span })
+        Ok(TypeAnnotation { segments, type_args: Vec::new(), span })
     }
 
     fn parse_taxonomy_node(&mut self) -> ParseResult<TaxonomyNode> {
@@ -593,14 +558,6 @@ impl Parser {
         self.expect(TokenKind::LParen, "expected `(` after method name")?;
         let params = self.parse_parameters()?;
         
-        // Parse optional return type annotation `-> Type`
-        if self.check(TokenKind::Minus) {
-            self.advance(); // consume `-`
-            self.expect(TokenKind::Greater, "expected `>` after `-` for return type")?;
-            // Skip the return type for now (we just need to consume it)
-            self.consume_identifier()?;
-        }
-        
         // Check if there's a body (default implementation) or just a signature
         let body = if self.matches(TokenKind::Newline) {
             // Check if next line is indented (body) or not (signature only)
@@ -764,10 +721,163 @@ impl Parser {
             TokenKind::Identifier(_) if self.peek_is_binding() => {
                 Statement::Binding(self.parse_binding()?)
             }
+            TokenKind::KeywordReturn => {
+                let span = self.current_span();
+                self.advance(); // consume 'return'
+                let expr = self.parse_expression()?;
+                Statement::Return(expr, span)
+            }
+            TokenKind::KeywordIf => {
+                return self.parse_if_statement();
+            }
+            TokenKind::KeywordWhile => {
+                return self.parse_while_statement();
+            }
+            TokenKind::KeywordFor => {
+                return self.parse_for_statement();
+            }
+            TokenKind::KeywordBreak => {
+                let span = self.current_span();
+                self.advance();
+                Statement::Break(span)
+            }
+            TokenKind::KeywordContinue => {
+                let span = self.current_span();
+                self.advance();
+                Statement::Continue(span)
+            }
             _ => Statement::Expression(self.parse_expression()?),
         };
+        // Guard statement: `condition ? body` desugars to `if condition { body }`
+        // Also handles binding-as-condition: `x is val ? body` → `if (x == val) { body }`
+        if self.check(TokenKind::Question) {
+            let guard_span = self.current_span();
+            self.advance(); // consume ?
+            let condition = match stmt {
+                Statement::Binding(ref binding) => {
+                    // Reinterpret `name is value` binding as `name == value` equality check
+                    let name_len = binding.name.len();
+                    let name_span = Span::new(binding.span.start, binding.span.start + name_len);
+                    Expression::Binary {
+                        op: BinaryOp::Equals,
+                        left: Box::new(Expression::Identifier(binding.name.clone(), name_span)),
+                        right: Box::new(binding.value.clone()),
+                        span: binding.span,
+                    }
+                }
+                Statement::Expression(expr) => expr,
+                _ => return Err(Diagnostic::new(
+                    "guard `?` can only follow an expression or binding".to_string(),
+                    guard_span,
+                )),
+            };
+            // Parse the guard body: either a single inline statement or an indented block
+            let body = if self.check(TokenKind::Newline) || self.check(TokenKind::Indent) {
+                self.skip_newlines();
+                self.parse_block()?
+            } else {
+                let body_stmt = self.parse_statement()?;
+                let body_span = match &body_stmt {
+                    Statement::Return(_, s) | Statement::Break(s) | Statement::Continue(s) => *s,
+                    Statement::Expression(e) => e.span(),
+                    Statement::If { span, .. } | Statement::While { span, .. } | Statement::For { span, .. } => *span,
+                    Statement::Binding(b) => b.span,
+                    Statement::FieldAssign { span, .. } => *span,
+                };
+                Block {
+                    statements: vec![body_stmt],
+                    value: None,
+                    span: body_span,
+                }
+            };
+            let span = condition.span().join(body.span);
+            return Ok(Statement::If {
+                condition,
+                body,
+                elif_branches: vec![],
+                else_body: None,
+                span,
+            });
+        }
         self.skip_newlines();
         Ok(stmt)
+    }
+
+    /// Parse `if condition\n  body\n[elif condition\n  body\n]*[else\n  body\n]`
+    fn parse_if_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        self.expect(TokenKind::KeywordIf, "expected 'if'")?;
+        let condition = self.parse_expression()?;
+        self.skip_newlines();
+        let body = self.parse_block()?;
+
+        let mut elif_branches = Vec::new();
+        while self.peek_kind() == TokenKind::KeywordElif {
+            self.advance(); // consume 'elif'
+            let elif_cond = self.parse_expression()?;
+            self.skip_newlines();
+            let elif_body = self.parse_block()?;
+            elif_branches.push((elif_cond, elif_body));
+        }
+
+        let else_body = if self.peek_kind() == TokenKind::KeywordElse {
+            self.advance(); // consume 'else'
+            self.skip_newlines();
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            span,
+        })
+    }
+
+    /// Parse `while condition\n  body`
+    fn parse_while_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        self.expect(TokenKind::KeywordWhile, "expected 'while'")?;
+        let condition = self.parse_expression()?;
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(Statement::While {
+            condition,
+            body,
+            span,
+        })
+    }
+
+    /// Parse `for variable in iterable\n  body`
+    fn parse_for_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        self.expect(TokenKind::KeywordFor, "expected 'for'")?;
+        let variable = match self.peek_kind() {
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                name
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "expected variable name after 'for'".to_string(),
+                    self.current_span(),
+                ));
+            }
+        };
+        self.expect(TokenKind::KeywordIn, "expected 'in' after for variable")?;
+        let iterable = self.parse_expression()?;
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(Statement::For {
+            variable,
+            iterable,
+            body,
+            span,
+        })
     }
     
     /// Check if we have a `self.field is value` pattern
@@ -789,7 +899,7 @@ impl Parser {
         )
     }
     
-    /// Parse `self.field is value` as a member assignment expression
+    /// Parse `self.field is value` as a field assignment statement
     fn parse_self_field_assignment(&mut self) -> ParseResult<Statement> {
         let start_span = self.current_span();
         self.advance(); // consume 'self'
@@ -800,33 +910,15 @@ impl Parser {
         let value = self.parse_expression()?;
         let span = start_span.join(value.span());
         
-        // Generate a synthetic call to set the field: map_set(self, "field", value)
-        // We represent this as Expression::Call to a synthetic __set_self_field function
-        // Actually, let's create a special expression that codegen can handle
-        // For now, use map.set(self, "field", value) syntax
-        
-        // Create: self.set("field", value) call which is essentially map_set
-        // But simpler: create a MemberSet expression (need to add to AST)
-        // For alpha, let's just use a marker expression that codegen handles
-        
-        // Simplest: create Expression::Binary with a special op (hack) or create
-        // a call expression: __self_set_field("field", value)
-        // Actually - we can use map.set(self, field, value) directly
-        // Create call: self.set("field", value)
         let self_expr = Expression::Identifier("self".to_string(), start_span);
-        let field_expr = Expression::String(field_name, span);
-        let call = Expression::Call {
-            callee: Box::new(Expression::Member {
-                target: Box::new(self_expr),
-                property: "set".to_string(),
-                span,
-            }),
-            args: vec![field_expr, value],
-            span,
-        };
         
         self.skip_newlines();
-        Ok(Statement::Expression(call))
+        Ok(Statement::FieldAssign {
+            target: self_expr,
+            field: field_name,
+            value,
+            span,
+        })
     }
 
     fn parse_expression(&mut self) -> ParseResult<Expression> {
@@ -839,19 +931,31 @@ impl Parser {
     /// - `cond ! err Name` - guard clause (return error if cond is false)
     fn parse_ternary_or_propagate(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_pipeline()?;
-        if self.matches(TokenKind::Question) {
-            // Ternary: cond ? then ! else
-            // For then branch, use parse_pipeline to avoid consuming `! err` as guard clause
-            let then_branch = self.parse_pipeline()?;
-            self.expect(TokenKind::Bang, "expected `!` in ternary expression")?;
-            let else_branch = self.parse_expression()?;
-            let span = expr.span().join(else_branch.span());
-            expr = Expression::Ternary {
-                condition: Box::new(expr),
-                then_branch: Box::new(then_branch),
-                else_branch: Box::new(else_branch),
-                span,
+        if self.check(TokenKind::Question) {
+            // Check what follows the `?` to distinguish ternary from guard statement
+            let is_guard = match self.tokens.get(self.index + 1).map(|t| &t.kind) {
+                Some(TokenKind::KeywordReturn)
+                | Some(TokenKind::KeywordBreak)
+                | Some(TokenKind::KeywordContinue)
+                | Some(TokenKind::Newline) => true,
+                _ => false,
             };
+            if !is_guard {
+                // Ternary: cond ? then ! else
+                self.advance(); // consume ?
+                // For then branch, use parse_pipeline to avoid consuming `! err` as guard clause
+                let then_branch = self.parse_pipeline()?;
+                self.expect(TokenKind::Bang, "expected `!` in ternary expression")?;
+                let else_branch = self.parse_expression()?;
+                let span = expr.span().join(else_branch.span());
+                expr = Expression::Ternary {
+                    condition: Box::new(expr),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                    span,
+                };
+            }
+            // else: guard — don't consume ?, let statement parser handle it
         } else if self.check(TokenKind::Bang) && self.check_ahead(1, TokenKind::KeywordReturn) {
             // Error propagation: expr ! return err
             // Only consume if we see `! return` to avoid conflict with ternary `!`
@@ -876,7 +980,7 @@ impl Parser {
             let span = expr.span().join(err_span);
             // Create: condition ? none ! err Name
             // Where `none` means "continue with unit value" if condition is true
-            let then_span = Span { start: span.start, end: span.start }; // tiny span
+            let then_span = Span::new(span.start, span.start); // tiny span
             expr = Expression::Ternary {
                 condition: Box::new(expr),
                 then_branch: Box::new(Expression::None(then_span)),
@@ -981,13 +1085,20 @@ impl Parser {
     fn parse_equality(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_comparison()?;
         loop {
-            let matched_equals = self.matches(TokenKind::Equals);
-            let matched_is = !matched_equals && self.matches(TokenKind::KeywordIs);
-            if matched_equals || matched_is {
+            if self.matches(TokenKind::KeywordIs) {
                 let rhs = self.parse_comparison()?;
                 let span = expr.span().join(rhs.span());
                 expr = Expression::Binary {
                     op: BinaryOp::Equals,
+                    left: Box::new(expr),
+                    right: Box::new(rhs),
+                    span,
+                };
+            } else if self.matches(TokenKind::KeywordIsnt) {
+                let rhs = self.parse_comparison()?;
+                let span = expr.span().join(rhs.span());
+                expr = Expression::Binary {
+                    op: BinaryOp::NotEquals,
                     left: Box::new(expr),
                     right: Box::new(rhs),
                     span,
@@ -1155,6 +1266,16 @@ impl Parser {
                     property: name,
                     span,
                 };
+            } else if self.matches(TokenKind::LBracket) {
+                let index = self.parse_expression()?;
+                let end_span = self.current_span();
+                self.expect(TokenKind::RBracket, "expected `]` to close subscript")?;
+                let span = expr.span().join(end_span);
+                expr = Expression::Index {
+                    target: Box::new(expr),
+                    index: Box::new(index),
+                    span,
+                };
             } else {
                 break;
             }
@@ -1164,17 +1285,66 @@ impl Parser {
 
     fn parse_arguments(&mut self) -> ParseResult<Vec<Expression>> {
         let mut args = Vec::new();
+        
+        // Handle empty argument list
         if self.matches(TokenKind::RParen) {
             return Ok(args);
         }
+        
+        // Check if arguments are indented (multiline)
+        let is_indented = if self.check(TokenKind::Newline) {
+            self.advance(); // consume Newline
+            if self.check(TokenKind::Indent) {
+                self.advance(); // consume Indent
+                self.layout_depth += 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        
         loop {
+            // In indented mode, skip additional newlines
+            if is_indented {
+                while self.check(TokenKind::Newline) {
+                    self.advance();
+                }
+                
+                // Check for dedent (end of indented arguments)
+                if self.check(TokenKind::Dedent) {
+                    self.leave_layout_block(self.current_span());
+                    self.advance(); // consume Dedent
+                    break;
+                }
+            }
+            
+            // Parse the argument expression
             args.push(self.parse_expression()?);
+            
+            // Handle comma separator
             if self.matches(TokenKind::Comma) {
                 continue;
             }
+            
+            // Handle end of arguments
+            if is_indented {
+                // In indented mode, expect dedent before rparen
+                while self.check(TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(TokenKind::Dedent) {
+                    self.leave_layout_block(self.current_span());
+                    self.advance(); // consume Dedent
+                }
+            }
+            
+            // Expect closing parenthesis
             self.expect(TokenKind::RParen, "expected `)` to close arguments")?;
             break;
         }
+        
         Ok(args)
     }
 
@@ -1285,7 +1455,18 @@ impl Parser {
             }
             TokenKind::LBracket => self.parse_list_literal(),
             TokenKind::At => self.parse_ptr_load(),
-            _ => Err(self.error_here("unexpected token in expression")),
+            other => {
+                // Debug: dump surrounding tokens
+                let start = if self.index > 10 { self.index - 10 } else { 0 };
+                let end = std::cmp::min(self.index + 5, self.tokens.len());
+                eprintln!("=== TOKEN DUMP at index {} ===", self.index);
+                for i in start..end {
+                    let t = &self.tokens[i];
+                    let marker = if i == self.index { ">>>" } else { "   " };
+                    eprintln!("{} [{}] {:?} @ {:?}", marker, i, t.kind, t.span);
+                }
+                Err(self.error_here(&format!("unexpected token in expression: {:?}", other)))
+            }
         }
     }
 
@@ -1322,27 +1503,65 @@ impl Parser {
     fn parse_map_literal(&mut self, name_span: Span) -> ParseResult<Expression> {
         let open = self.expect(TokenKind::LParen, "expected `(` after map literal")?;
         let start = name_span.join(open.span);
+        
+        // Handle indented map entries
         self.skip_newlines();
+        let is_indented = if self.check(TokenKind::Indent) {
+            self.advance(); // consume Indent
+            self.layout_depth += 1;
+            true
+        } else {
+            false
+        };
+        
         let mut entries = Vec::new();
         if self.matches(TokenKind::RParen) {
             return Ok(Expression::Map(entries, start.join(self.previous_span())));
         }
+        
         loop {
-            self.skip_newlines();
+            // Handle indented entries
+            if is_indented {
+                self.skip_newlines();
+                // Check for dedent (end of indented entries)
+                if self.check(TokenKind::Dedent) {
+                    self.leave_layout_block(self.current_span());
+                    self.advance(); // consume Dedent
+                    break;
+                }
+            } else {
+                self.skip_newlines();
+            }
+            
             let key = self.parse_unary()?;
             self.skip_newlines();
             self.expect(TokenKind::KeywordIs, "expected `is` between map key and value")?;
             self.skip_newlines();
             let value = self.parse_expression()?;
             entries.push((key, value));
+            
             self.skip_newlines();
             if self.matches(TokenKind::Comma) {
                 self.skip_newlines();
                 continue;
             }
+            
+            // Handle end of map
+            if is_indented {
+                self.skip_newlines();
+                if self.check(TokenKind::Dedent) {
+                    self.leave_layout_block(self.current_span());
+                    self.advance(); // consume Dedent
+                }
+            }
+            
             let end = self.expect(TokenKind::RParen, "expected `)` to close map literal")?.span;
             return Ok(Expression::Map(entries, start.join(end)));
         }
+        
+        // If we exited via dedent, still expect the closing paren
+        let end = self.expect(TokenKind::RParen, "expected `)` to close map literal")?.span;
+        Ok(Expression::Map(entries, start.join(end)))
     }
 
     fn parse_template_literal(
@@ -1427,20 +1646,59 @@ impl Parser {
     fn parse_list_literal(&mut self) -> ParseResult<Expression> {
         let start = self.advance().span;
         let mut items = Vec::new();
+        
         if self.matches(TokenKind::RBracket) {
             return Ok(Expression::List(items, start));
         }
+        
+        // Handle indented list items
         self.skip_newlines();
+        let is_indented = if self.check(TokenKind::Indent) {
+            self.advance(); // consume Indent
+            self.layout_depth += 1;
+            true
+        } else {
+            false
+        };
+        
         loop {
+            // Handle indented items
+            if is_indented {
+                self.skip_newlines();
+                // Check for dedent (end of indented items)
+                if self.check(TokenKind::Dedent) {
+                    self.leave_layout_block(self.current_span());
+                    self.advance(); // consume Dedent
+                    break;
+                }
+            } else {
+                self.skip_newlines();
+            }
+            
             items.push(self.parse_expression()?);
+            
             self.skip_newlines();
             if self.matches(TokenKind::Comma) {
                 self.skip_newlines();
                 continue;
             }
+            
+            // Handle end of list
+            if is_indented {
+                self.skip_newlines();
+                if self.check(TokenKind::Dedent) {
+                    self.leave_layout_block(self.current_span());
+                    self.advance(); // consume Dedent
+                }
+            }
+            
             let end = self.expect(TokenKind::RBracket, "expected ]")?.span;
             return Ok(Expression::List(items, start.join(end)));
         }
+        
+        // If we exited via dedent, still expect the closing bracket
+        let end = self.expect(TokenKind::RBracket, "expected ]")?.span;
+        Ok(Expression::List(items, start.join(end)))
     }
 
     fn parse_match_expression(&mut self) -> ParseResult<Expression> {
@@ -1526,12 +1784,16 @@ impl Parser {
                 }
             }
             TokenKind::LBracket => {
-                let expr = self.parse_list_literal()?;
-                if let Expression::List(items, _) = expr {
-                    Ok(MatchPattern::List(items))
-                } else {
-                    unreachable!()
+                self.advance(); // consume `[`
+                let mut patterns = Vec::new();
+                while !self.check(TokenKind::RBracket) && !self.check(TokenKind::Eof) {
+                    patterns.push(self.parse_match_pattern()?);
+                    if !self.matches(TokenKind::Comma) {
+                        break;
+                    }
                 }
+                self.expect(TokenKind::RBracket, "expected `]` after list pattern")?;
+                Ok(MatchPattern::List(patterns))
             }
             TokenKind::Identifier(_) => {
                 let (name, name_span) = self.consume_identifier()?;
@@ -1621,6 +1883,7 @@ impl Parser {
             TokenKind::KeywordTrue => { self.advance(); Ok(("true".to_string(), span)) }
             TokenKind::KeywordFalse => { self.advance(); Ok(("false".to_string(), span)) }
             TokenKind::KeywordIs => { self.advance(); Ok(("is".to_string(), span)) }
+            TokenKind::KeywordIsnt => { self.advance(); Ok(("isnt".to_string(), span)) }
             TokenKind::KeywordExtern => { self.advance(); Ok(("extern".to_string(), span)) }
             TokenKind::KeywordUnsafe => { self.advance(); Ok(("unsafe".to_string(), span)) }
             TokenKind::KeywordAsm => { self.advance(); Ok(("asm".to_string(), span)) }

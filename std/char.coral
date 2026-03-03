@@ -1,0 +1,104 @@
+use std.prelude
+
+# Character classification utilities using ord/chr builtins.
+# All functions take a single-character string and return a boolean.
+
+# Check if character is a decimal digit (0-9)
+*is_digit(c)
+	code is ord(c)
+	return code >= 48 and code <= 57
+
+# Check if character is an uppercase letter (A-Z)
+*is_upper(c)
+	code is ord(c)
+	return code >= 65 and code <= 90
+
+# Check if character is a lowercase letter (a-z)
+*is_lower(c)
+	code is ord(c)
+	return code >= 97 and code <= 122
+
+# Check if character is a letter (a-z or A-Z)
+*is_alpha(c)
+	code is ord(c)
+	return (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+# Check if character is alphanumeric (letter or digit)
+*is_alnum(c)
+	return is_alpha(c) or is_digit(c)
+
+# Check if character is whitespace (space, tab, newline, carriage return)
+*is_whitespace(c)
+	code is ord(c)
+	return code is 32 or code is 9 or code is 10 or code is 13
+
+# Check if character is a space
+*is_space(c)
+	return ord(c) is 32
+
+# Check if character is a tab
+*is_tab(c)
+	return ord(c) is 9
+
+# Check if character is a newline
+*is_newline(c)
+	return ord(c) is 10
+
+# Check if character is an underscore
+*is_underscore(c)
+	return ord(c) is 95
+
+# Check if character is valid for start of identifier (letter or underscore)
+*is_ident_start(c)
+	return is_alpha(c) or is_underscore(c)
+
+# Check if character is valid inside identifier (letter, digit, or underscore)
+*is_ident_char(c)
+	return is_alnum(c) or is_underscore(c)
+
+# Check if character is a printable ASCII character (32-126)
+*is_printable(c)
+	code is ord(c)
+	return code >= 32 and code <= 126
+
+# Check if character is an ASCII character (0-127)
+*is_ascii(c)
+	code is ord(c)
+	return code >= 0 and code <= 127
+
+# Check if character is a hex digit (0-9, a-f, A-F)
+*is_hex_digit(c)
+	code is ord(c)
+	return (code >= 48 and code <= 57) or (code >= 65 and code <= 70) or (code >= 97 and code <= 102)
+
+# Convert a character to its uppercase equivalent
+*to_upper_char(c)
+	code is ord(c)
+	if code >= 97 and code <= 122
+		return chr(code - 32)
+	return c
+
+# Convert a character to its lowercase equivalent
+*to_lower_char(c)
+	code is ord(c)
+	if code >= 65 and code <= 90
+		return chr(code + 32)
+	return c
+
+# Get the digit value of a character (0-9), returns -1 for non-digits
+*digit_value(c)
+	code is ord(c)
+	if code >= 48 and code <= 57
+		return code - 48
+	return 0 - 1
+
+# Get the hex digit value of a character (0-15), returns -1 for non-hex-digits
+*hex_digit_value(c)
+	code is ord(c)
+	if code >= 48 and code <= 57
+		return code - 48
+	if code >= 65 and code <= 70
+		return code - 55
+	if code >= 97 and code <= 102
+		return code - 87
+	return 0 - 1

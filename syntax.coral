@@ -230,7 +230,7 @@ trait Comparable
         compare(other) < 0
     
     *equals(other)
-        compare(other) == 0
+        compare(other) is 0
     
     *greater_than(other)
         compare(other) > 0

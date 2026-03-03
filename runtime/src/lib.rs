@@ -27,8 +27,10 @@ pub use weak_ref::{
 };
 pub use cycle_detector::{
     collect_cycles, possible_root, cycle_stats, reset_cycle_detector,
+    auto_cycle_collection_enabled,
     coral_collect_cycles, coral_cycles_detected, coral_cycle_values_collected,
-    coral_cycle_roots_count,
+    coral_cycle_roots_count, coral_force_cycle_collection, 
+    coral_set_auto_cycle_collection, coral_get_auto_cycle_collection,
 };
 pub use symbol::{
     SymbolId, SymbolTable, global_symbols, intern, resolve,
@@ -47,7 +49,7 @@ use std::ptr;
 use std::slice;
 use std::hash::{Hash, Hasher};
 use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread_local;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,6 +72,7 @@ const FLAG_ERR: u8 = 0b0001_0000;
 const FLAG_ABSENT: u8 = 0b0010_0000;
 const PAGE_SIZE: usize = 4096;
 const VALUE_POOL_LIMIT: usize = 8192;
+const LOCAL_POOL_LIMIT: usize = 256;
 
 /// Error metadata stored when FLAG_ERR is set on a value.
 /// The error value's payload.ptr points to this struct.
@@ -111,7 +114,11 @@ static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
 static USAGE_METRICS: OnceLock<Mutex<UsageWindow>> = OnceLock::new();
 const USAGE_WINDOW_SECS: u64 = 60;
 
-type ValueHandle = *mut Value;
+// Cycle collection trigger counters
+static CYCLE_COLLECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+const CYCLE_COLLECTION_THRESHOLD: u64 = 1000; // Trigger cycle collection every 1000 releases
+
+pub type ValueHandle = *mut Value;
 
 // Wrapper to mark ValueHandle as Send when explicitly intended to cross threads.
 #[derive(Clone, Copy)]
@@ -200,6 +207,7 @@ pub fn write_usage_snapshot_to(path: &Path) {
 
 thread_local! {
     static RELEASE_QUEUE: RefCell<Option<rc_deferred::ReleaseQueue>> = RefCell::new(None);
+    static LOCAL_VALUE_POOL: RefCell<Vec<ValueHandle>> = RefCell::new(Vec::with_capacity(LOCAL_POOL_LIMIT));
 }
 
 type ClosureInvokeFn = Option<unsafe extern "C" fn(*mut c_void, *const ValueHandle, usize, *mut ValueHandle)>;
@@ -246,9 +254,9 @@ pub enum ValueTag {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union Payload {
-    number: f64,
-    ptr: *mut c_void,
-    inline: [u8; 16],
+    pub number: f64,
+    pub ptr: *mut c_void,
+    pub inline: [u8; 16],
 }
 
 impl Default for Payload {
@@ -264,8 +272,8 @@ pub struct Value {
     pub reserved: u16,
     /// Reference count - uses atomic operations for thread-safe actor sharing.
     pub refcount: AtomicU64,
-    pub retain_events: u32,
-    pub release_events: u32,
+    pub retain_events: AtomicU32,
+    pub release_events: AtomicU32,
     pub payload: Payload,
 }
 
@@ -280,8 +288,8 @@ impl Clone for Value {
             flags: self.flags,
             reserved: self.reserved,
             refcount: AtomicU64::new(self.refcount.load(Ordering::Relaxed)),
-            retain_events: self.retain_events,
-            release_events: self.release_events,
+            retain_events: AtomicU32::new(self.retain_events.load(Ordering::Relaxed)),
+            release_events: AtomicU32::new(self.release_events.load(Ordering::Relaxed)),
             payload: self.payload,
         }
     }
@@ -294,8 +302,8 @@ impl Value {
             flags: 0,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { inline: [0; 16] },
         }
     }
@@ -306,8 +314,8 @@ impl Value {
             flags: 0,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { number: value },
         }
     }
@@ -321,8 +329,8 @@ impl Value {
             flags: 0,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { inline },
         }
     }
@@ -333,8 +341,8 @@ impl Value {
             flags: 0,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { ptr },
         }
     }
@@ -345,8 +353,8 @@ impl Value {
             flags,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { ptr },
         }
     }
@@ -360,8 +368,8 @@ impl Value {
             flags: FLAG_INLINE_STRING | ((bytes.len() as u8) << 1),
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { inline },
         }
     }
@@ -375,21 +383,24 @@ impl Value {
     }
 
     /// Returns true if this value represents an error state.
+    /// NOTE: Inline strings encode their length in the flags byte via `(len << 1) | FLAG_INLINE_STRING`.
+    /// For strings of length >= 8, bits 4+ overlap with FLAG_ERR / FLAG_ABSENT.
+    /// We guard against this by excluding inline strings from the error/absent checks.
     #[inline]
     fn is_err(&self) -> bool {
-        (self.flags & FLAG_ERR) != 0
+        (self.flags & FLAG_INLINE_STRING) == 0 && (self.flags & FLAG_ERR) != 0
     }
 
     /// Returns true if this value is logically absent/None.
     #[inline]
     fn is_absent(&self) -> bool {
-        (self.flags & FLAG_ABSENT) != 0
+        (self.flags & FLAG_INLINE_STRING) == 0 && (self.flags & FLAG_ABSENT) != 0
     }
 
     /// Returns true if this value is neither an error nor absent.
     #[inline]
     fn is_ok(&self) -> bool {
-        (self.flags & (FLAG_ERR | FLAG_ABSENT)) == 0
+        (self.flags & FLAG_INLINE_STRING) != 0 || (self.flags & (FLAG_ERR | FLAG_ABSENT)) == 0
     }
 
     /// Create an error value with the given metadata.
@@ -399,8 +410,8 @@ impl Value {
             flags: FLAG_ERR,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { ptr: metadata as *mut c_void },
         }
     }
@@ -412,8 +423,8 @@ impl Value {
             flags: FLAG_ABSENT,
             reserved: 0,
             refcount: AtomicU64::new(1),
-            retain_events: 0,
-            release_events: 0,
+            retain_events: AtomicU32::new(0),
+            release_events: AtomicU32::new(0),
             payload: Payload { inline: [0; 16] },
         }
     }
@@ -431,6 +442,16 @@ impl Value {
 fn alloc_value(value: Value) -> ValueHandle {
     ensure_runtime_initialized();
     LIVE_VALUE_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Fast path: thread-local pool (no locking)
+    let local = LOCAL_VALUE_POOL.with(|pool| {
+        pool.borrow_mut().pop()
+    });
+    if let Some(handle) = local {
+        VALUE_POOL_HITS.fetch_add(1, Ordering::Relaxed);
+        unsafe { ptr::write(handle, value); }
+        return handle;
+    }
+    // Slow path: global pool (with mutex)
     let pool = value_pool();
     if let Ok(mut slots) = pool.lock() {
         if let Some(handle) = slots.0.pop() {
@@ -450,16 +471,31 @@ fn value_pool() -> &'static Mutex<ValuePool> {
 }
 
 fn recycle_value_box(handle: ValueHandle) -> bool {
+    // Fast path: thread-local pool (no locking, no duplicate scan needed
+    // since refcounting guarantees each handle is freed exactly once)
+    let recycled = LOCAL_VALUE_POOL.with(|pool| {
+        if let Ok(mut p) = pool.try_borrow_mut() {
+            if p.len() < LOCAL_POOL_LIMIT {
+                unsafe {
+                    (*handle).refcount.store(0, Ordering::Relaxed);
+                    (*handle).retain_events.store(0, Ordering::Relaxed);
+                    (*handle).release_events.store(0, Ordering::Relaxed);
+                }
+                p.push(handle);
+                return true;
+            }
+        }
+        false
+    });
+    if recycled { return true; }
+    // Overflow to global pool
     let pool = value_pool();
     if let Ok(mut slots) = pool.lock() {
-        if slots.0.iter().any(|&h| h == handle) {
-            return false;
-        }
         if slots.0.len() < VALUE_POOL_LIMIT {
             unsafe {
                 (*handle).refcount.store(0, Ordering::Relaxed);
-                (*handle).retain_events = 0;
-                (*handle).release_events = 0;
+                (*handle).retain_events.store(0, Ordering::Relaxed);
+                (*handle).release_events.store(0, Ordering::Relaxed);
             }
             slots.0.push(handle);
             return true;
@@ -534,8 +570,8 @@ struct BytesObject {
 }
 
 // Made pub(crate) for cycle_detector access
-pub(crate) struct ListObject {
-    pub(crate) items: Vec<ValueHandle>,
+pub struct ListObject {
+    pub items: Vec<ValueHandle>,
 }
 
 struct ListIter {
@@ -650,20 +686,21 @@ fn alloc_map(entries: &[MapEntry]) -> *mut c_void {
     Box::into_raw(Box::new(obj)) as *mut c_void
 }
 
-unsafe fn drop_heap_value(value: &mut Value) {
-    // First, handle error metadata cleanup (regardless of tag)
+/// Collect child handles from a value, free its heap-allocated structure,
+/// and reset the value to Unit. Does NOT release children — they are pushed
+/// to `children` for the caller to handle iteratively.
+unsafe fn drop_heap_collect_children(value: &mut Value, children: &mut Vec<ValueHandle>) {
+    // Handle error metadata cleanup
     if value.is_err() {
         let ptr = value.heap_ptr();
         if !ptr.is_null() {
             unsafe {
                 let metadata = Box::from_raw(ptr as *mut ErrorMetadata);
-                // Release the error name string
                 if !metadata.name.is_null() {
-                    coral_value_release(metadata.name);
+                    children.push(metadata.name);
                 }
             }
         }
-        // Clear the error flag and reset
         *value = Value::unit();
         return;
     }
@@ -689,14 +726,10 @@ unsafe fn drop_heap_value(value: &mut Value) {
                 unsafe {
                     if (value.flags & FLAG_LIST_ITER) != 0 {
                         let mut iter = Box::from_raw(ptr as *mut ListIter);
-                        for handle in iter.items.drain(..) {
-                            coral_value_release(handle);
-                        }
+                        children.extend(iter.items.drain(..));
                     } else {
                         let mut boxed = Box::from_raw(ptr as *mut ListObject);
-                        for handle in boxed.items.drain(..) {
-                            coral_value_release(handle);
-                        }
+                        children.extend(boxed.items.drain(..));
                     }
                 }
             }
@@ -709,16 +742,16 @@ unsafe fn drop_heap_value(value: &mut Value) {
                         let iter = Box::from_raw(ptr as *mut MapIter);
                         for bucket in iter.buckets {
                             if bucket.state == MapBucketState::Occupied {
-                                coral_value_release(bucket.key);
-                                coral_value_release(bucket.value);
+                                children.push(bucket.key);
+                                children.push(bucket.value);
                             }
                         }
                     } else {
                         let mut boxed = Box::from_raw(ptr as *mut MapObject);
                         for bucket in boxed.buckets.iter_mut() {
                             if bucket.state == MapBucketState::Occupied {
-                                coral_value_release(bucket.key);
-                                coral_value_release(bucket.value);
+                                children.push(bucket.key);
+                                children.push(bucket.value);
                             }
                         }
                     }
@@ -728,6 +761,7 @@ unsafe fn drop_heap_value(value: &mut Value) {
         Ok(ValueTag::Closure) => {
             let ptr = value.heap_ptr();
             if ptr.is_null() {
+                *value = Value::unit();
                 return;
             }
             unsafe {
@@ -742,6 +776,7 @@ unsafe fn drop_heap_value(value: &mut Value) {
         Ok(ValueTag::Actor) => {
             let ptr = value.heap_ptr();
             if ptr.is_null() {
+                *value = Value::unit();
                 return;
             }
             unsafe {
@@ -751,18 +786,17 @@ unsafe fn drop_heap_value(value: &mut Value) {
         Ok(ValueTag::Tagged) => {
             let ptr = value.heap_ptr();
             if ptr.is_null() {
+                *value = Value::unit();
                 return;
             }
             unsafe {
                 let tagged = Box::from_raw(ptr as *mut TaggedValue);
-                // Release all field values
                 for i in 0..tagged.field_count {
                     let field = *tagged.fields.add(i);
                     if !field.is_null() {
-                        coral_value_release(field);
+                        children.push(field);
                     }
                 }
-                // Free the fields array if not empty
                 if tagged.field_count > 0 && !tagged.fields.is_null() {
                     drop(Vec::from_raw_parts(
                         tagged.fields,
@@ -775,6 +809,160 @@ unsafe fn drop_heap_value(value: &mut Value) {
         _ => {}
     }
     *value = Value::unit();
+}
+
+/// Iteratively free a value and all its transitive children.
+/// Uses a worklist to avoid unbounded recursion on deeply nested structures.
+unsafe fn drop_heap_value(value: &mut Value) {
+    let mut worklist: Vec<ValueHandle> = Vec::new();
+    drop_heap_collect_children(value, &mut worklist);
+
+    while let Some(child) = worklist.pop() {
+        if child.is_null() {
+            continue;
+        }
+        let child_ref = unsafe { &*child };
+        let rc = child_ref.refcount.load(Ordering::Relaxed);
+        if rc == 0 {
+            // Already freed — skip
+            RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let prev = child_ref.refcount.fetch_sub(1, Ordering::Release);
+        if prev > 1 {
+            // Still referenced — mark as possible cycle root
+            cycle_detector::possible_root(child);
+            continue;
+        }
+        // prev == 1: this child is being freed
+        std::sync::atomic::fence(Ordering::Acquire);
+        weak_ref::notify_value_deallocated(child);
+        cycle_detector::notify_value_freed(child);
+        let child_mut = unsafe { &mut *child };
+        // Collect grandchildren before freeing (iterative, not recursive)
+        drop_heap_collect_children(child_mut, &mut worklist);
+        LIVE_VALUE_COUNT.fetch_sub(1, Ordering::Relaxed);
+        if !recycle_value_box(child) {
+            unsafe { drop(Box::from_raw(child)); }
+        }
+    }
+}
+
+/// Deallocate a value's heap data WITHOUT releasing child handles.
+/// Used by the cycle collector to safely free garbage values whose children
+/// may already be freed or are also garbage being collected.
+/// After this call the Value slot is reset to Unit.
+pub(crate) unsafe fn drop_heap_value_for_gc(handle: ValueHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let value = unsafe { &mut *handle };
+
+    // Clear error metadata — release the name handle to prevent leaks.
+    // In the GC path, error values inside cyclic containers would otherwise
+    // leak their name string since get_children() doesn't traverse error metadata.
+    if value.is_err() {
+        let ptr = value.heap_ptr();
+        if !ptr.is_null() {
+            unsafe {
+                let metadata = Box::from_raw(ptr as *mut ErrorMetadata);
+                if !metadata.name.is_null() {
+                    crate::coral_value_release(metadata.name);
+                }
+            }
+        }
+        *value = Value::unit();
+        return;
+    }
+
+    match ValueTag::try_from(value.tag) {
+        Ok(ValueTag::String) => {
+            if !value.is_inline_string() {
+                let ptr = value.heap_ptr();
+                if !ptr.is_null() {
+                    unsafe { drop(Box::from_raw(ptr as *mut StringObject)); }
+                }
+            }
+        }
+        Ok(ValueTag::Bytes) => {
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                unsafe { drop(Box::from_raw(ptr as *mut BytesObject)); }
+            }
+        }
+        Ok(ValueTag::List) => {
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                unsafe {
+                    // Drop list container without releasing child handles
+                    if (value.flags & FLAG_LIST_ITER) != 0 {
+                        drop(Box::from_raw(ptr as *mut ListIter));
+                    } else {
+                        drop(Box::from_raw(ptr as *mut ListObject));
+                    }
+                }
+            }
+        }
+        Ok(ValueTag::Map) => {
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                unsafe {
+                    // Drop map container without releasing child handles
+                    if (value.flags & FLAG_MAP_ITER) != 0 {
+                        drop(Box::from_raw(ptr as *mut MapIter));
+                    } else {
+                        drop(Box::from_raw(ptr as *mut MapObject));
+                    }
+                }
+            }
+        }
+        Ok(ValueTag::Closure) => {
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                unsafe {
+                    let closure = Box::from_raw(ptr as *mut ClosureObject);
+                    if let Some(release) = closure.release {
+                        release(closure.env);
+                    } else if !closure.env.is_null() {
+                        coral_heap_free(closure.env);
+                    }
+                }
+            }
+        }
+        Ok(ValueTag::Actor) => {
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                unsafe { drop(Box::from_raw(ptr as *mut ActorObject)); }
+            }
+        }
+        Ok(ValueTag::Tagged) => {
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                unsafe {
+                    let tagged = Box::from_raw(ptr as *mut TaggedValue);
+                    // Free the fields array without releasing field handles
+                    if tagged.field_count > 0 && !tagged.fields.is_null() {
+                        drop(Vec::from_raw_parts(
+                            tagged.fields,
+                            tagged.field_count,
+                            tagged.field_count,
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    *value = Value::unit();
+}
+
+/// Free a Value box, decrement live count. Used by cycle collector.
+pub(crate) fn dealloc_value_box(handle: ValueHandle) {
+    LIVE_VALUE_COUNT.fetch_sub(1, Ordering::Relaxed);
+    if !recycle_value_box(handle) {
+        unsafe { drop(Box::from_raw(handle)); }
+    }
 }
 
 impl TryFrom<u8> for ValueTag {
@@ -810,7 +998,7 @@ fn inline_string_len(flags: u8) -> usize {
     ((flags & !FLAG_INLINE_STRING) >> 1) as usize
 }
 
-fn string_to_bytes(value: &Value) -> Vec<u8> {
+pub(crate) fn string_to_bytes(value: &Value) -> Vec<u8> {
     match ValueTag::try_from(value.tag) {
         Ok(ValueTag::String) => {
             if value.is_inline_string() {
@@ -839,7 +1027,7 @@ fn string_to_bytes(value: &Value) -> Vec<u8> {
 }
 
 /// Convert a string Value to a Rust String.
-fn value_to_rust_string(value: &Value) -> String {
+pub(crate) fn value_to_rust_string(value: &Value) -> String {
     let bytes = string_to_bytes(value);
     String::from_utf8_lossy(&bytes).to_string()
 }
@@ -1104,7 +1292,9 @@ fn map_should_grow(len: usize, tombstones: usize, capacity: usize) -> bool {
 }
 
 fn map_rehash(map: &mut MapObject) {
-    let new_capacity = (map.buckets.len() * 2).max(8);
+    let old_capacity = map.buckets.len();
+    let new_capacity = (old_capacity * 2).max(8);
+    MAP_SLOTS_ALLOCATED.fetch_add((new_capacity - old_capacity) as u64, Ordering::Relaxed);
     let mut new_buckets: Vec<MapBucket> =
         std::iter::repeat_with(MapBucket::default).take(new_capacity).collect();
     for bucket in map.buckets.iter_mut() {
@@ -1277,10 +1467,9 @@ pub extern "C" fn coral_map_iter_next(iter: ValueHandle) -> ValueHandle {
         if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() && !bucket.value.is_null() {
             unsafe {
                 coral_value_retain(bucket.key);
-                coral_value_retain(bucket.value);
             }
-            let pair = [bucket.key, bucket.value];
-            return coral_make_list(pair.as_ptr(), 2);
+            // Return just the key — use map_entries() for key-value pairs
+            return bucket.key;
         }
     }
     coral_make_unit()
@@ -1861,8 +2050,8 @@ pub extern "C" fn coral_make_tagged(
         flags: 0,
         reserved: 0,
         refcount: AtomicU64::new(1),
-        retain_events: 0,
-        release_events: 0,
+        retain_events: AtomicU32::new(0),
+        release_events: AtomicU32::new(0),
         payload: Payload { ptr: Box::into_raw(tagged) as *mut c_void },
     };
     
@@ -3011,6 +3200,66 @@ pub extern "C" fn coral_string_parse_number(s: ValueHandle) -> ValueHandle {
     }
 }
 
+/// Convert any value to its Rust String representation (for string interpolation / coercion).
+fn value_to_display_string(v: &Value) -> String {
+    match ValueTag::try_from(v.tag) {
+        Ok(ValueTag::Number) => {
+            let n = unsafe { v.payload.number };
+            // Print integers without decimal point
+            if n.fract() == 0.0 && n.is_finite() && n.abs() < (i64::MAX as f64) {
+                format!("{}", n as i64)
+            } else {
+                format!("{n}")
+            }
+        }
+        Ok(ValueTag::Bool) => {
+            let byte = unsafe { v.payload.inline[0] } & 1;
+            if byte != 0 { "true".to_string() } else { "false".to_string() }
+        }
+        Ok(ValueTag::String) => {
+            value_to_rust_string(v)
+        }
+        Ok(ValueTag::Unit) => "()".to_string(),
+        Ok(ValueTag::List) => "[list]".to_string(),
+        Ok(ValueTag::Map) => "{map}".to_string(),
+        Ok(ValueTag::Tagged) => {
+            let ptr = v.heap_ptr();
+            if !ptr.is_null() {
+                let tagged = unsafe { &*(ptr as *const TaggedValue) };
+                let tag_name = unsafe {
+                    let slice = slice::from_raw_parts(tagged.tag_name, tagged.tag_name_len);
+                    String::from_utf8_lossy(slice).to_string()
+                };
+                if tagged.field_count == 0 {
+                    tag_name
+                } else {
+                    format!("{tag_name}(...)")
+                }
+            } else {
+                "Tagged(?)".to_string()
+            }
+        }
+        _ => "(?)".to_string(),
+    }
+}
+
+/// Convert any value to a Coral string Value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_value_to_string(v: ValueHandle) -> ValueHandle {
+    if v.is_null() {
+        let s = "()";
+        return coral_make_string(s.as_ptr(), s.len());
+    }
+    let val = unsafe { &*v };
+    // If already a string, just retain and return
+    if val.tag == ValueTag::String as u8 {
+        unsafe { coral_value_retain(v); }
+        return v;
+    }
+    let s = value_to_display_string(val);
+    coral_make_string(s.as_ptr(), s.len())
+}
+
 /// Convert a number to a string.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_number_to_string(n: ValueHandle) -> ValueHandle {
@@ -3053,6 +3302,23 @@ pub extern "C" fn coral_value_add(a: ValueHandle, b: ValueHandle) -> ValueHandle
         coral_make_number(result)
     } else if va.tag == ValueTag::String as u8 && vb.tag == ValueTag::String as u8 {
         coral_string_concat(a, b)
+    } else if va.tag == ValueTag::String as u8 {
+        // String + non-string: coerce right operand to string, then concat.
+        // This enables template string interpolation like "count: {n}".
+        let right_str = value_to_display_string(vb);
+        let left_bytes = string_to_bytes(va);
+        let mut result = Vec::with_capacity(left_bytes.len() + right_str.len());
+        result.extend_from_slice(&left_bytes);
+        result.extend_from_slice(right_str.as_bytes());
+        coral_make_string(result.as_ptr(), result.len())
+    } else if vb.tag == ValueTag::String as u8 {
+        // non-string + String: coerce left operand to string, then concat.
+        let left_str = value_to_display_string(va);
+        let right_bytes = string_to_bytes(vb);
+        let mut result = Vec::with_capacity(left_str.len() + right_bytes.len());
+        result.extend_from_slice(left_str.as_bytes());
+        result.extend_from_slice(&right_bytes);
+        coral_make_string(result.as_ptr(), result.len())
     } else if va.tag == ValueTag::Bytes as u8 && vb.tag == ValueTag::Bytes as u8 {
         coral_bytes_concat(a, b)
     } else {
@@ -3080,6 +3346,28 @@ pub extern "C" fn coral_value_equals(a: ValueHandle, b: ValueHandle) -> ValueHan
     
     let result = values_equal_handles(a, b);
     coral_make_bool(if result { 1 } else { 0 })
+}
+
+/// Not-equals: returns a Bool value that is true when a != b.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_value_not_equals(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    // Error propagation
+    if !a.is_null() {
+        let va = unsafe { &*a };
+        if va.is_err() {
+            unsafe { coral_value_retain(a); }
+            return a;
+        }
+    }
+    if !b.is_null() {
+        let vb = unsafe { &*b };
+        if vb.is_err() {
+            unsafe { coral_value_retain(b); }
+            return b;
+        }
+    }
+    let result = values_equal_handles(a, b);
+    coral_make_bool(if result { 0 } else { 1 })
 }
 
 /// Helper to propagate errors in binary operations.
@@ -3519,6 +3807,48 @@ pub extern "C" fn coral_list_length(list: ValueHandle) -> ValueHandle {
     coral_make_number(len as f64)
 }
 
+/// Raw list length as usize (used by store FFI internally).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_len(list: ValueHandle) -> usize {
+    if list.is_null() {
+        return 0;
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return 0;
+    }
+    list_from_value(list_value)
+        .map(|obj| obj.items.len())
+        .unwrap_or(0)
+}
+
+/// Index-based list get (usize index, used by store FFI internally).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_get_index(list: ValueHandle, index: usize) -> ValueHandle {
+    if list.is_null() {
+        return coral_make_unit();
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return coral_make_unit();
+    }
+    let list_obj = match list_from_value(list_value) {
+        Some(obj) => obj,
+        None => return coral_make_unit(),
+    };
+    let handle = match list_obj.items.get(index) {
+        Some(handle) => *handle,
+        None => return coral_make_unit(),
+    };
+    if handle.is_null() {
+        return coral_make_unit();
+    }
+    unsafe {
+        coral_value_retain(handle);
+    }
+    handle
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_list_get(list: ValueHandle, index: ValueHandle) -> ValueHandle {
     if list.is_null() || index.is_null() {
@@ -3597,6 +3927,606 @@ pub extern "C" fn coral_map_length(map: ValueHandle) -> ValueHandle {
     }
     let map_obj = unsafe { &*(ptr as *const MapObject) };
     coral_make_number(map_obj.len as f64)
+}
+
+// ===== Universal iterator next (dispatches list vs map) =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_value_iter_next(iter: ValueHandle) -> ValueHandle {
+    if iter.is_null() {
+        return coral_make_unit();
+    }
+    let v = unsafe { &*iter };
+    match ValueTag::try_from(v.tag) {
+        Ok(ValueTag::List) if (v.flags & FLAG_LIST_ITER) != 0 => coral_list_iter_next(iter),
+        Ok(ValueTag::Map) if (v.flags & FLAG_MAP_ITER) != 0 => coral_map_iter_next(iter),
+        _ => coral_make_unit(),
+    }
+}
+
+// ===== Process / Environment =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_process_args() -> ValueHandle {
+    let args: Vec<String> = env::args().collect();
+    let mut handles: Vec<ValueHandle> = Vec::with_capacity(args.len());
+    for a in &args {
+        handles.push(coral_make_string(a.as_ptr(), a.len()));
+    }
+    let list = coral_make_list(handles.as_ptr(), handles.len());
+    for h in &handles {
+        unsafe { coral_value_release(*h); }
+    }
+    list
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_process_exit(code: ValueHandle) -> ValueHandle {
+    let exit_code = if code.is_null() {
+        0
+    } else {
+        let v = unsafe { &*code };
+        if v.tag == ValueTag::Number as u8 {
+            (unsafe { v.payload.number }) as i32
+        } else {
+            1
+        }
+    };
+    std::process::exit(exit_code);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_env_get(name: ValueHandle) -> ValueHandle {
+    if name.is_null() { return coral_make_unit(); }
+    let v = unsafe { &*name };
+    if v.tag != ValueTag::String as u8 { return coral_make_unit(); }
+    let key = value_to_rust_string(v);
+    match env::var(&key) {
+        Ok(val) => coral_make_string(val.as_ptr(), val.len()),
+        Err(_) => coral_make_unit(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_env_set(name: ValueHandle, val: ValueHandle) -> ValueHandle {
+    if name.is_null() || val.is_null() { return coral_make_unit(); }
+    let nv = unsafe { &*name };
+    let vv = unsafe { &*val };
+    if nv.tag != ValueTag::String as u8 || vv.tag != ValueTag::String as u8 { return coral_make_unit(); }
+    let key = value_to_rust_string(nv);
+    let value = value_to_rust_string(vv);
+    unsafe { env::set_var(&key, &value); }
+    coral_make_unit()
+}
+
+// ===== File I/O extensions =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_fs_append(path: ValueHandle, data: ValueHandle) -> ValueHandle {
+    if path.is_null() || data.is_null() { return coral_make_unit(); }
+    let pv = unsafe { &*path };
+    let dv = unsafe { &*data };
+    let Some(p) = value_to_path(pv) else { return coral_make_unit(); };
+    let content = if dv.tag == ValueTag::String as u8 {
+        value_to_rust_string(dv).into_bytes()
+    } else if dv.tag == ValueTag::Bytes as u8 {
+        string_to_bytes(dv)
+    } else {
+        return coral_make_unit();
+    };
+    use std::io::Write;
+    match std::fs::OpenOptions::new().append(true).create(true).open(&p) {
+        Ok(mut f) => {
+            match f.write_all(&content) {
+                Ok(_) => coral_make_bool(1),
+                Err(_) => coral_make_bool(0),
+            }
+        }
+        Err(_) => coral_make_bool(0),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_fs_read_dir(path: ValueHandle) -> ValueHandle {
+    if path.is_null() { return coral_make_list(ptr::null(), 0); }
+    let pv = unsafe { &*path };
+    let Some(p) = value_to_path(pv) else { return coral_make_list(ptr::null(), 0); };
+    let entries: Vec<ValueHandle> = match fs::read_dir(&p) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                coral_make_string(name.as_ptr(), name.len())
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let list = coral_make_list(entries.as_ptr(), entries.len());
+    for h in &entries {
+        unsafe { coral_value_release(*h); }
+    }
+    list
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_fs_mkdir(path: ValueHandle) -> ValueHandle {
+    if path.is_null() { return coral_make_bool(0); }
+    let pv = unsafe { &*path };
+    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
+    match fs::create_dir_all(&p) {
+        Ok(_) => coral_make_bool(1),
+        Err(_) => coral_make_bool(0),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_fs_delete(path: ValueHandle) -> ValueHandle {
+    if path.is_null() { return coral_make_bool(0); }
+    let pv = unsafe { &*path };
+    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
+    let result = if p.is_dir() {
+        fs::remove_dir_all(&p)
+    } else {
+        fs::remove_file(&p)
+    };
+    match result {
+        Ok(_) => coral_make_bool(1),
+        Err(_) => coral_make_bool(0),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_fs_is_dir(path: ValueHandle) -> ValueHandle {
+    if path.is_null() { return coral_make_bool(0); }
+    let pv = unsafe { &*path };
+    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
+    coral_make_bool(if p.is_dir() { 1 } else { 0 })
+}
+
+// ===== stdin =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_stdin_read_line() -> ValueHandle {
+    let mut buf = String::new();
+    match std::io::stdin().read_line(&mut buf) {
+        Ok(_) => {
+            // Trim trailing newline
+            if buf.ends_with('\n') { buf.pop(); }
+            if buf.ends_with('\r') { buf.pop(); }
+            coral_make_string(buf.as_ptr(), buf.len())
+        }
+        Err(_) => coral_make_unit(),
+    }
+}
+
+// ===== List extensions =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_contains(list: ValueHandle, needle: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_bool(0); }
+    let v = unsafe { &*list };
+    let Some(lo) = list_from_value(v) else { return coral_make_bool(0); };
+    for &item in &lo.items {
+        if values_equal_handles(item, needle) {
+            return coral_make_bool(1);
+        }
+    }
+    coral_make_bool(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_index_of(list: ValueHandle, needle: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_number(-1.0); }
+    let v = unsafe { &*list };
+    let Some(lo) = list_from_value(v) else { return coral_make_number(-1.0); };
+    for (i, &item) in lo.items.iter().enumerate() {
+        if values_equal_handles(item, needle) {
+            return coral_make_number(i as f64);
+        }
+    }
+    coral_make_number(-1.0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_reverse(list: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_list(ptr::null(), 0); }
+    let v = unsafe { &*list };
+    let Some(lo) = list_from_value(v) else { return coral_make_list(ptr::null(), 0); };
+    let items: Vec<ValueHandle> = lo.items.iter().rev().copied().collect();
+    for &h in &items {
+        if !h.is_null() { unsafe { coral_value_retain(h); } }
+    }
+    let result = coral_make_list(items.as_ptr(), items.len());
+    for &h in &items {
+        if !h.is_null() { unsafe { coral_value_release(h); } }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_slice(list: ValueHandle, start: ValueHandle, end: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_list(ptr::null(), 0); }
+    let v = unsafe { &*list };
+    let Some(lo) = list_from_value(v) else { return coral_make_list(ptr::null(), 0); };
+    let len = lo.items.len();
+    let s = if start.is_null() { 0 } else {
+        let sv = unsafe { &*start };
+        if sv.tag == ValueTag::Number as u8 { unsafe { sv.payload.number }.max(0.0) as usize } else { 0 }
+    };
+    let e = if end.is_null() { len } else {
+        let ev = unsafe { &*end };
+        if ev.tag == ValueTag::Number as u8 { (unsafe { ev.payload.number } as usize).min(len) } else { len }
+    };
+    if s >= e || s >= len {
+        return coral_make_list(ptr::null(), 0);
+    }
+    let slice = &lo.items[s..e.min(len)];
+    for &h in slice {
+        if !h.is_null() { unsafe { coral_value_retain(h); } }
+    }
+    let result = coral_make_list(slice.as_ptr(), slice.len());
+    for &h in slice {
+        if !h.is_null() { unsafe { coral_value_release(h); } }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_sort(list: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_list(ptr::null(), 0); }
+    let v = unsafe { &*list };
+    let Some(lo) = list_from_value(v) else { return coral_make_list(ptr::null(), 0); };
+    let mut items: Vec<ValueHandle> = lo.items.clone();
+    // Sort by numeric value, with non-numbers sorted to end
+    items.sort_by(|a, b| {
+        let va = if a.is_null() { f64::INFINITY } else {
+            let av = unsafe { &**a };
+            if av.tag == ValueTag::Number as u8 { unsafe { av.payload.number } } else { f64::INFINITY }
+        };
+        let vb = if b.is_null() { f64::INFINITY } else {
+            let bv = unsafe { &**b };
+            if bv.tag == ValueTag::Number as u8 { unsafe { bv.payload.number } }
+            else if bv.tag == ValueTag::String as u8 {
+                // If both are strings, compare lexicographically
+                f64::INFINITY
+            }
+            else { f64::INFINITY }
+        };
+        // If both are strings, compare as strings
+        let a_is_str = !a.is_null() && unsafe { &**a }.tag == ValueTag::String as u8;
+        let b_is_str = !b.is_null() && unsafe { &**b }.tag == ValueTag::String as u8;
+        if a_is_str && b_is_str {
+            let sa = value_to_rust_string(unsafe { &**a });
+            let sb = value_to_rust_string(unsafe { &**b });
+            return sa.cmp(&sb);
+        }
+        va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for &h in &items {
+        if !h.is_null() { unsafe { coral_value_retain(h); } }
+    }
+    let result = coral_make_list(items.as_ptr(), items.len());
+    for &h in &items {
+        if !h.is_null() { unsafe { coral_value_release(h); } }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_join(list: ValueHandle, sep: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_string(ptr::null(), 0); }
+    let v = unsafe { &*list };
+    let Some(lo) = list_from_value(v) else { return coral_make_string(ptr::null(), 0); };
+    let separator = if sep.is_null() { String::new() } else {
+        let sv = unsafe { &*sep };
+        if sv.tag == ValueTag::String as u8 { value_to_rust_string(sv) } else { String::new() }
+    };
+    let mut parts: Vec<String> = Vec::with_capacity(lo.items.len());
+    for &item in &lo.items {
+        if item.is_null() {
+            parts.push("none".to_string());
+        } else {
+            let iv = unsafe { &*item };
+            parts.push(value_to_display_string(iv));
+        }
+    }
+    let joined = parts.join(&separator);
+    coral_make_string(joined.as_ptr(), joined.len())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_concat(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    let mut items: Vec<ValueHandle> = Vec::new();
+    if !a.is_null() {
+        let av = unsafe { &*a };
+        if let Some(la) = list_from_value(av) {
+            for &h in &la.items {
+                if !h.is_null() { unsafe { coral_value_retain(h); } }
+                items.push(h);
+            }
+        }
+    }
+    if !b.is_null() {
+        let bv = unsafe { &*b };
+        if let Some(lb) = list_from_value(bv) {
+            for &h in &lb.items {
+                if !h.is_null() { unsafe { coral_value_retain(h); } }
+                items.push(h);
+            }
+        }
+    }
+    let result = coral_make_list(items.as_ptr(), items.len());
+    for &h in &items {
+        if !h.is_null() { unsafe { coral_value_release(h); } }
+    }
+    result
+}
+
+// ===== Map extensions =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_map_remove(map: ValueHandle, key: ValueHandle) -> ValueHandle {
+    if map.is_null() || key.is_null() { return map; }
+    let mv = unsafe { &mut *map };
+    if mv.tag != ValueTag::Map as u8 { return map; }
+    let ptr = mv.heap_ptr();
+    if ptr.is_null() { return map; }
+    let map_obj = unsafe { &mut *(ptr as *mut MapObject) };
+    let hash = hash_value(key);
+    let capacity = map_obj.buckets.len();
+    if capacity == 0 { return map; }
+    let mut idx = (hash as usize) & (capacity - 1);
+    for _ in 0..capacity {
+        let bucket = &mut map_obj.buckets[idx];
+        match bucket.state {
+            MapBucketState::Empty => return map,
+            MapBucketState::Occupied => {
+                if bucket.hash == hash && values_equal_handles(bucket.key, key) {
+                    if !bucket.key.is_null() { unsafe { coral_value_release(bucket.key); } }
+                    if !bucket.value.is_null() { unsafe { coral_value_release(bucket.value); } }
+                    bucket.state = MapBucketState::Tombstone;
+                    bucket.key = ptr::null_mut();
+                    bucket.value = ptr::null_mut();
+                    map_obj.len -= 1;
+                    map_obj.tombstones += 1;
+                    return map;
+                }
+            }
+            MapBucketState::Tombstone => {}
+        }
+        idx = (idx + 1) & (capacity - 1);
+    }
+    map
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_map_values(map: ValueHandle) -> ValueHandle {
+    if map.is_null() { return coral_make_list(ptr::null(), 0); }
+    let mv = unsafe { &*map };
+    let Some(mo) = map_from_value(mv) else { return coral_make_list(ptr::null(), 0); };
+    let mut values: Vec<ValueHandle> = Vec::with_capacity(mo.len);
+    for bucket in &mo.buckets {
+        if bucket.state == MapBucketState::Occupied && !bucket.value.is_null() {
+            unsafe { coral_value_retain(bucket.value); }
+            values.push(bucket.value);
+        }
+    }
+    let result = coral_make_list(values.as_ptr(), values.len());
+    for &h in &values {
+        unsafe { coral_value_release(h); }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_map_entries(map: ValueHandle) -> ValueHandle {
+    if map.is_null() { return coral_make_list(ptr::null(), 0); }
+    let mv = unsafe { &*map };
+    let Some(mo) = map_from_value(mv) else { return coral_make_list(ptr::null(), 0); };
+    let mut entries: Vec<ValueHandle> = Vec::with_capacity(mo.len);
+    for bucket in &mo.buckets {
+        if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() && !bucket.value.is_null() {
+            unsafe {
+                coral_value_retain(bucket.key);
+                coral_value_retain(bucket.value);
+            }
+            let pair = [bucket.key, bucket.value];
+            let entry = coral_make_list(pair.as_ptr(), 2);
+            unsafe {
+                coral_value_release(bucket.key);
+                coral_value_release(bucket.value);
+            }
+            entries.push(entry);
+        }
+    }
+    let result = coral_make_list(entries.as_ptr(), entries.len());
+    for &h in &entries {
+        unsafe { coral_value_release(h); }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_map_has_key(map: ValueHandle, key: ValueHandle) -> ValueHandle {
+    if map.is_null() || key.is_null() { return coral_make_bool(0); }
+    let result = coral_map_get(map, key);
+    let has = !result.is_null() && unsafe { &*result }.tag != ValueTag::Unit as u8;
+    if !result.is_null() { unsafe { coral_value_release(result); } }
+    coral_make_bool(if has { 1 } else { 0 })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_map_merge(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    // Start with a copy of a, then overlay b
+    let mut result = if a.is_null() {
+        coral_make_map(ptr::null(), 0)
+    } else {
+        let av = unsafe { &*a };
+        if let Some(mo) = map_from_value(av) {
+            let mut new_map = coral_make_map(ptr::null(), 0);
+            for bucket in &mo.buckets {
+                if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() {
+                    new_map = coral_map_set(new_map, bucket.key, bucket.value);
+                }
+            }
+            new_map
+        } else {
+            coral_make_map(ptr::null(), 0)
+        }
+    };
+    if !b.is_null() {
+        let bv = unsafe { &*b };
+        if let Some(mo) = map_from_value(bv) {
+            for bucket in &mo.buckets {
+                if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() {
+                    result = coral_map_set(result, bucket.key, bucket.value);
+                }
+            }
+        }
+    }
+    result
+}
+
+// ===== Bytes extensions =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_bytes_get(value: ValueHandle, index: ValueHandle) -> ValueHandle {
+    if value.is_null() || index.is_null() { return coral_make_number(0.0); }
+    let v = unsafe { &*value };
+    let iv = unsafe { &*index };
+    if v.tag != ValueTag::Bytes as u8 { return coral_make_number(0.0); }
+    if iv.tag != ValueTag::Number as u8 { return coral_make_number(0.0); }
+    let idx = unsafe { iv.payload.number } as usize;
+    let bytes = string_to_bytes(v);
+    if idx < bytes.len() {
+        coral_make_number(bytes[idx] as f64)
+    } else {
+        coral_make_number(0.0)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_bytes_from_string(s: ValueHandle) -> ValueHandle {
+    if s.is_null() { return coral_make_bytes(ptr::null(), 0); }
+    let v = unsafe { &*s };
+    if v.tag != ValueTag::String as u8 { return coral_make_bytes(ptr::null(), 0); }
+    let bytes = string_to_bytes(v);
+    coral_make_bytes(bytes.as_ptr(), bytes.len())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_bytes_to_string(b: ValueHandle) -> ValueHandle {
+    if b.is_null() { return coral_make_string(ptr::null(), 0); }
+    let v = unsafe { &*b };
+    if v.tag != ValueTag::Bytes as u8 { return coral_make_string(ptr::null(), 0); }
+    let bytes = string_to_bytes(v);
+    // Attempt UTF-8 conversion; use replacement characters if invalid
+    let s = String::from_utf8_lossy(&bytes);
+    coral_make_string(s.as_ptr(), s.len())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_bytes_slice_val(value: ValueHandle, start: ValueHandle, end: ValueHandle) -> ValueHandle {
+    if value.is_null() { return coral_make_bytes(ptr::null(), 0); }
+    let v = unsafe { &*value };
+    if v.tag != ValueTag::Bytes as u8 { return coral_make_bytes(ptr::null(), 0); }
+    let bytes = string_to_bytes(v);
+    let len = bytes.len();
+    let s = if start.is_null() { 0 } else {
+        let sv = unsafe { &*start };
+        if sv.tag == ValueTag::Number as u8 { unsafe { sv.payload.number }.max(0.0) as usize } else { 0 }
+    };
+    let e = if end.is_null() { len } else {
+        let ev = unsafe { &*end };
+        if ev.tag == ValueTag::Number as u8 { (unsafe { ev.payload.number } as usize).min(len) } else { len }
+    };
+    if s >= e || s >= len {
+        return coral_make_bytes(ptr::null(), 0);
+    }
+    coral_make_bytes(bytes[s..e.min(len)].as_ptr(), e.min(len) - s)
+}
+
+// ===== String ↔ Number =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_from_number(n: ValueHandle) -> ValueHandle {
+    coral_number_to_string(n)
+}
+
+// ===== Type checking =====
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_type_of(value: ValueHandle) -> ValueHandle {
+    if value.is_null() { return coral_make_string("none".as_ptr(), 4); }
+    let v = unsafe { &*value };
+    let name = match ValueTag::try_from(v.tag) {
+        Ok(ValueTag::Number) => "number",
+        Ok(ValueTag::Bool) => "bool",
+        Ok(ValueTag::String) => "string",
+        Ok(ValueTag::Bytes) => "bytes",
+        Ok(ValueTag::List) => "list",
+        Ok(ValueTag::Map) => "map",
+        Ok(ValueTag::Closure) => "function",
+        Ok(ValueTag::Unit) => "none",
+        Ok(ValueTag::Tagged) => "tagged",
+        Ok(ValueTag::Actor) => "actor",
+        _ => "unknown",
+    };
+    coral_make_string(name.as_ptr(), name.len())
+}
+
+// ===== Character operations =====
+
+/// Get the Unicode code point of the first character in a string.
+/// Returns a number (0-1114111) or -1 if empty/not a string.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_ord(s: ValueHandle) -> ValueHandle {
+    if s.is_null() { return coral_make_number(-1.0); }
+    let v = unsafe { &*s };
+    if v.tag != ValueTag::String as u8 { return coral_make_number(-1.0); }
+    let rust_str = value_to_rust_string(v);
+    match rust_str.chars().next() {
+        Some(c) => coral_make_number(c as u32 as f64),
+        None => coral_make_number(-1.0),
+    }
+}
+
+/// Create a single-character string from a Unicode code point number.
+/// Returns a 1-char string, or empty string if invalid.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_chr(code: ValueHandle) -> ValueHandle {
+    if code.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    let v = unsafe { &*code };
+    if v.tag != ValueTag::Number as u8 { return coral_make_string(std::ptr::null(), 0); }
+    let n = unsafe { v.payload.number } as u32;
+    match char::from_u32(n) {
+        Some(c) => {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            coral_make_string(s.as_ptr(), s.len())
+        }
+        None => coral_make_string(std::ptr::null(), 0),
+    }
+}
+
+/// Compare two strings lexicographically.
+/// Returns -1 (a < b), 0 (a == b), or 1 (a > b).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_compare(a: ValueHandle, b: ValueHandle) -> ValueHandle {
+    if a.is_null() || b.is_null() { return coral_make_number(0.0); }
+    let va = unsafe { &*a };
+    let vb = unsafe { &*b };
+    if va.tag != ValueTag::String as u8 || vb.tag != ValueTag::String as u8 {
+        return coral_make_number(0.0);
+    }
+    let sa = value_to_rust_string(va);
+    let sb = value_to_rust_string(vb);
+    let result = match sa.cmp(&sb) {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
+    };
+    coral_make_number(result)
 }
 
 #[unsafe(no_mangle)]
@@ -3680,17 +4610,19 @@ pub unsafe extern "C" fn coral_value_retain(value: ValueHandle) {
         return;
     }
     let value = unsafe { &*value };
+    // Relaxed is sufficient for retain: no data needs to be visible to other
+    // threads at this point. The matching Release in coral_value_release
+    // ensures proper visibility when the refcount drops.
     let rc = value.refcount.load(Ordering::Relaxed);
     debug_assert!(rc > 0, "retain on freed value");
     if rc == u64::MAX {
+        // Saturation guard: practically unreachable (2^64 retains).
+        // Best-effort check — the TOCTOU race here is benign since
+        // hitting u64::MAX requires concurrent threads to each hold
+        // ~u64::MAX/N references simultaneously.
         RETAIN_SATURATED.fetch_add(1, Ordering::Relaxed);
-        // retain_events is not atomic, but only updated on same thread for debugging
-        // In multi-threaded contexts, this becomes unreliable (acceptable for debug stats)
         return;
     }
-    // Use fetch_add for atomic increment - Relaxed is sufficient for retain
-    // since we don't need to synchronize with any particular memory operations.
-    // The Release in coral_value_release will ensure proper visibility.
     value.refcount.fetch_add(1, Ordering::Relaxed);
     RETAIN_COUNT.fetch_add(1, Ordering::Relaxed);
 }
@@ -3701,44 +4633,69 @@ pub unsafe extern "C" fn coral_value_release(value: ValueHandle) {
         return;
     }
     let value_ref = unsafe { &*value };
-    let rc = value_ref.refcount.load(Ordering::Relaxed);
-    debug_assert!(rc > 0, "release on freed value");
-    if rc == 0 {
-        RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
-        debug_assert!(false, "release underflow on value tag {}", value_ref.tag);
-        return;
-    }
-    RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
-    // Use fetch_sub for atomic decrement with Release ordering
-    // The Release ensures all writes before this are visible to other threads
-    let prev = value_ref.refcount.fetch_sub(1, Ordering::Release);
-    if prev == 1 {
-        // Acquire fence to ensure we see all writes before freeing
-        std::sync::atomic::fence(Ordering::Acquire);
-        
-        // Notify weak reference system before deallocation
-        weak_ref::notify_value_deallocated(value);
-        
-        let value_ref_mut = unsafe { &mut *value };
-        RELEASE_QUEUE.with(|queue| {
-            // Use try_borrow_mut to avoid panic on reentrant releases
-            // (e.g., when drop_heap_value releases contained values)
-            if let Ok(mut guard) = queue.try_borrow_mut() {
-                if let Some(q) = &mut *guard {
-                    if let Some(nn) = ptr::NonNull::new(value as *mut c_void) {
-                        q.push(nn);
-                        return;
+    // Use compare_exchange loop to safely decrement the refcount,
+    // avoiding the TOCTOU race between a Relaxed load and a subsequent
+    // fetch_sub (which would wrap on underflow).
+    loop {
+        let rc = value_ref.refcount.load(Ordering::Relaxed);
+        if rc == 0 {
+            RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
+            debug_assert!(false, "release underflow on value tag {}", value_ref.tag);
+            return;
+        }
+        // Release ordering: ensures all writes made while holding this
+        // reference are visible to the thread that observes the final drop.
+        match value_ref.refcount.compare_exchange_weak(
+            rc, rc - 1, Ordering::Release, Ordering::Relaxed
+        ) {
+            Ok(prev) => {
+                RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
+                if prev > 1 {
+                    cycle_detector::possible_root(value);
+                    if cycle_detector::auto_cycle_collection_enabled() {
+                        let count = CYCLE_COLLECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        if count % CYCLE_COLLECTION_THRESHOLD == 0 {
+                            cycle_detector::collect_cycles();
+                        }
                     }
+                    return;
+                }
+                // prev == 1: this was the last reference
+                break;
+            }
+            Err(_) => continue, // CAS failed, retry
+        }
+    }
+    // Acquire fence: ensures we see all writes from threads that released
+    // their references before we free the value's memory.
+    std::sync::atomic::fence(Ordering::Acquire);
+
+    // Notify weak reference system before deallocation
+    weak_ref::notify_value_deallocated(value);
+
+    // Remove from cycle detector tracking before freeing (prevents use-after-free
+    // in concurrent cycle collection scans)
+    cycle_detector::notify_value_freed(value);
+
+    let value_ref_mut = unsafe { &mut *value };
+    RELEASE_QUEUE.with(|queue| {
+        // Use try_borrow_mut to avoid panic on reentrant releases
+        // (e.g., when drop_heap_value releases contained values)
+        if let Ok(mut guard) = queue.try_borrow_mut() {
+            if let Some(q) = &mut *guard {
+                if let Some(nn) = ptr::NonNull::new(value as *mut c_void) {
+                    q.push(nn);
+                    return;
                 }
             }
-            // Either no queue or reentrant call - free immediately
-            unsafe { drop_heap_value(value_ref_mut); }
-            LIVE_VALUE_COUNT.fetch_sub(1, Ordering::Relaxed);
-            if !recycle_value_box(value) {
-                unsafe { drop(Box::from_raw(value)); }
-            }
-        });
-    }
+        }
+        // Either no queue or reentrant call - free immediately
+        unsafe { drop_heap_value(value_ref_mut); }
+        LIVE_VALUE_COUNT.fetch_sub(1, Ordering::Relaxed);
+        if !recycle_value_box(value) {
+            unsafe { drop(Box::from_raw(value)); }
+        }
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -3918,8 +4875,8 @@ pub extern "C" fn coral_value_metrics(value: ValueHandle, out: *mut CoralHandleM
     unsafe {
         *out = CoralHandleMetrics {
             refcount: value_ref.refcount.load(Ordering::Relaxed),
-            retains: value_ref.retain_events as u64,
-            releases: value_ref.release_events as u64,
+            retains: value_ref.retain_events.load(Ordering::Relaxed) as u64,
+            releases: value_ref.release_events.load(Ordering::Relaxed) as u64,
         };
     }
 }
@@ -4819,5 +5776,98 @@ mod tests {
             coral_value_release(even);
             coral_value_release(sum);
         }
+    }
+
+    /// Snapshot live value count before an operation, run it, then assert
+    /// no net leaks (live count returns to baseline).
+    fn assert_no_leak<F: FnOnce()>(f: F) {
+        let before = LIVE_VALUE_COUNT.load(Ordering::SeqCst);
+        f();
+        let after = LIVE_VALUE_COUNT.load(Ordering::SeqCst);
+        assert_eq!(before, after, "leak detected: {} values before, {} after (delta {})",
+            before, after, after as i64 - before as i64);
+    }
+
+    #[test]
+    fn leak_detect_numbers() {
+        assert_no_leak(|| {
+            let a = coral_make_number(1.0);
+            let b = coral_make_number(2.0);
+            unsafe {
+                coral_value_release(a);
+                coral_value_release(b);
+            }
+        });
+    }
+
+    #[test]
+    fn leak_detect_strings() {
+        assert_no_leak(|| {
+            // Use 20 chars to force heap allocation (>14 = not inline)
+            let text = "this is a long text!";
+            let s = coral_make_string(text.as_ptr(), text.len());
+            assert_eq!(coral_value_tag(s), ValueTag::String as u8);
+            unsafe { coral_value_release(s); }
+        });
+    }
+
+    #[test]
+    fn leak_detect_inline_string() {
+        assert_no_leak(|| {
+            // Inline string (≤14 bytes) — exercises flag collision guard
+            // (len=11 sets bit 4 which overlaps FLAG_ERR)
+            let text = "hello world";
+            let s = coral_make_string(text.as_ptr(), text.len());
+            assert_eq!(coral_value_tag(s), ValueTag::String as u8);
+            unsafe { coral_value_release(s); }
+        });
+    }
+
+    #[test]
+    fn leak_detect_list_with_children() {
+        assert_no_leak(|| {
+            let a = coral_make_number(1.0);
+            let b = coral_make_number(2.0);
+            let items = [a, b];
+            let list = coral_make_list(items.as_ptr(), 2);
+            // List retains children; releasing list should release children too
+            unsafe {
+                coral_value_release(a);
+                coral_value_release(b);
+                coral_value_release(list);
+            }
+        });
+    }
+
+    #[test]
+    fn leak_detect_nested_list() {
+        assert_no_leak(|| {
+            let inner_item = coral_make_number(42.0);
+            let inner = coral_make_list(&inner_item as *const _, 1);
+            let outer = coral_make_list(&inner as *const _, 1);
+            unsafe {
+                coral_value_release(inner_item);
+                coral_value_release(inner);
+                coral_value_release(outer);
+            }
+        });
+    }
+
+    #[test]
+    fn leak_detect_map() {
+        assert_no_leak(|| {
+            let key = coral_make_string("key".as_ptr(), 3);
+            let val = coral_make_number(99.0);
+            let mut map = coral_make_map(ptr::null(), 0);
+            // coral_map_set retains the map (returns a new owning reference).
+            // We must release both the original make_map ref and the map_set ref.
+            map = coral_map_set(map, key, val);
+            unsafe {
+                coral_value_release(key);   // drop our creation ref (map still holds one)
+                coral_value_release(val);   // drop our creation ref (map still holds one)
+                coral_value_release(map);   // drop map_set return ref (rc 2→1)
+                coral_value_release(map);   // drop make_map ref (rc 1→0, frees map+children)
+            }
+        });
     }
 }

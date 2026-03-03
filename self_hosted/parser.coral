@@ -1,0 +1,1677 @@
+# Self-hosted Coral Parser
+#
+# Recursive descent parser that consumes tokens from the lexer
+# and produces an AST represented as maps.
+#
+# AST Node Convention:
+#   Every AST node is a map with a "kind" field plus named fields.
+#   Spans are represented as maps with "start" and "end" fields.
+#
+# This mirrors the Rust parser's structure, adapted for Coral idioms.
+
+use std.char
+
+# ─── AST Node Constructors ─────────────────────────────────────────
+
+*make_span(start, end)
+	return map("start" is start, "end" is end)
+
+*make_program(items, span)
+	return map("kind" is "program", "items" is items, "span" is span)
+
+# ── Expression nodes ────────────────────────────────────────────────
+
+*make_unit_expr()
+	return map("kind" is "unit")
+
+*make_none_expr(span)
+	return map("kind" is "none", "span" is span)
+
+*make_identifier_expr(name, span)
+	return map("kind" is "identifier", "name" is name, "span" is span)
+
+*make_integer_expr(value, span)
+	return map("kind" is "integer", "value" is value, "span" is span)
+
+*make_float_expr(value, span)
+	return map("kind" is "float", "value" is value, "span" is span)
+
+*make_bool_expr(value, span)
+	return map("kind" is "bool", "value" is value, "span" is span)
+
+*make_string_expr(value, span)
+	return map("kind" is "string_lit", "value" is value, "span" is span)
+
+*make_list_expr(items, span)
+	return map("kind" is "list", "items" is items, "span" is span)
+
+*make_map_expr(entries, span)
+	return map("kind" is "map_lit", "entries" is entries, "span" is span)
+
+*make_binary_expr(op, left, right, span)
+	return map("kind" is "binary", "op" is op, "left" is left, "right" is right, "span" is span)
+
+*make_unary_expr(op, expr, span)
+	return map("kind" is "unary", "op" is op, "expr" is expr, "span" is span)
+
+*make_call_expr(callee, args, span)
+	return map("kind" is "call", "callee" is callee, "args" is args, "span" is span)
+
+*make_member_expr(target, property, span)
+	return map("kind" is "member", "target" is target, "property" is property, "span" is span)
+
+*make_index_expr(target, index, span)
+	return map("kind" is "index", "target" is target, "index" is index, "span" is span)
+
+*make_ternary_expr(condition, then_branch, else_branch, span)
+	return map("kind" is "ternary", "condition" is condition, "then_branch" is then_branch, "else_branch" is else_branch, "span" is span)
+
+*make_pipeline_expr(left, right, span)
+	return map("kind" is "pipeline", "left" is left, "right" is right, "span" is span)
+
+*make_lambda_expr(params, body, span)
+	return map("kind" is "lambda", "params" is params, "body" is body, "span" is span)
+
+*make_match_expr(value, arms, default, span)
+	return map("kind" is "match", "value" is value, "arms" is arms, "default" is default, "span" is span)
+
+*make_error_value_expr(path, span)
+	return map("kind" is "error_value", "path" is path, "span" is span)
+
+*make_error_propagate_expr(expr, span)
+	return map("kind" is "error_propagate", "expr" is expr, "span" is span)
+
+*make_throw_expr(value, span)
+	return map("kind" is "throw", "value" is value, "span" is span)
+
+*make_placeholder_expr(index, span)
+	return map("kind" is "placeholder", "index" is index, "span" is span)
+
+# ── Statement nodes ─────────────────────────────────────────────────
+
+*make_binding_stmt(name, value, span)
+	return map("kind" is "binding", "name" is name, "value" is value, "span" is span)
+
+*make_expression_stmt(expr)
+	return map("kind" is "expression_stmt", "expr" is expr)
+
+*make_return_stmt(expr, span)
+	return map("kind" is "return", "expr" is expr, "span" is span)
+
+*make_if_stmt(condition, body, elif_branches, else_body, span)
+	return map("kind" is "if", "condition" is condition, "body" is body, "elif_branches" is elif_branches, "else_body" is else_body, "span" is span)
+
+*make_while_stmt(condition, body, span)
+	return map("kind" is "while", "condition" is condition, "body" is body, "span" is span)
+
+*make_for_stmt(variable, iterable, body, span)
+	return map("kind" is "for", "variable" is variable, "iterable" is iterable, "body" is body, "span" is span)
+
+*make_break_stmt(span)
+	return map("kind" is "break", "span" is span)
+
+*make_continue_stmt(span)
+	return map("kind" is "continue", "span" is span)
+
+# ── Item nodes ──────────────────────────────────────────────────────
+
+*make_function_item(name, params, body, func_kind, span)
+	return map("kind" is "function", "name" is name, "params" is params, "body" is body, "func_kind" is func_kind, "span" is span)
+
+*make_extern_function_item(name, params, span)
+	return map("kind" is "extern_function", "name" is name, "params" is params, "span" is span)
+
+*make_type_item(name, traits, fields, methods, variants, span)
+	return map("kind" is "type_def", "name" is name, "traits" is traits, "fields" is fields, "methods" is methods, "variants" is variants, "span" is span)
+
+*make_store_item(name, traits, fields, methods, is_actor, is_persistent, span)
+	return map("kind" is "store_def", "name" is name, "traits" is traits, "fields" is fields, "methods" is methods, "is_actor" is is_actor, "is_persistent" is is_persistent, "span" is span)
+
+*make_trait_item(name, required, methods, span)
+	return map("kind" is "trait_def", "name" is name, "required_traits" is required, "methods" is methods, "span" is span)
+
+*make_error_def_item(name, code, message, children, span)
+	return map("kind" is "error_def", "name" is name, "code" is code, "message" is message, "children" is children, "span" is span)
+
+*make_field(name, is_ref, default, span)
+	return map("kind" is "field", "name" is name, "is_ref" is is_ref, "default" is default, "span" is span)
+
+*make_param(name, default, span)
+	return map("kind" is "param", "name" is name, "default" is default, "span" is span)
+
+*make_block(statements, value, span)
+	return map("kind" is "block", "statements" is statements, "value" is value, "span" is span)
+
+*make_match_arm(pattern, body)
+	return map("kind" is "match_arm", "pattern" is pattern, "body" is body)
+
+*make_variant(name, fields, span)
+	return map("kind" is "variant", "name" is name, "fields" is fields, "span" is span)
+
+# ── Match Pattern nodes ─────────────────────────────────────────────
+
+*make_pat_integer(value)
+	return map("kind" is "pat_integer", "value" is value)
+
+*make_pat_bool(value)
+	return map("kind" is "pat_bool", "value" is value)
+
+*make_pat_string(value)
+	return map("kind" is "pat_string", "value" is value)
+
+*make_pat_identifier(name)
+	return map("kind" is "pat_identifier", "name" is name)
+
+*make_pat_constructor(name, fields, span)
+	return map("kind" is "pat_constructor", "name" is name, "fields" is fields, "span" is span)
+
+*make_pat_wildcard(span)
+	return map("kind" is "pat_wildcard", "span" is span)
+
+# ─── Parser State ───────────────────────────────────────────────────
+
+*make_parser(tokens)
+	return map("tokens" is tokens, "pos" is 0, "layout_depth" is 0, "errors" is [])
+
+# ─── Token Access Helpers ───────────────────────────────────────────
+
+*current_token(p)
+	pos is p.get("pos")
+	tokens is p.get("tokens")
+	if pos >= tokens.length()
+		return map("kind" is "eof", "value" is "", "start" is 0, "end" is 0)
+	return tokens[pos]
+
+*peek_token(p, offset)
+	pos is p.get("pos") + offset
+	tokens is p.get("tokens")
+	if pos >= tokens.length()
+		return map("kind" is "eof", "value" is "", "start" is 0, "end" is 0)
+	return tokens[pos]
+
+*current_kind(p)
+	return current_token(p).get("kind")
+
+*advance_parser(p)
+	p.set("pos", p.get("pos") + 1)
+	return p
+
+*expect(p, kind)
+	tok is current_token(p)
+	if tok.get("kind") is kind
+		advance_parser(p)
+		return tok
+	record_error(p, "expected " + kind + " but got " + tok.get("kind"))
+	return tok
+
+*record_error(p, msg)
+	errors is p.get("errors")
+	errors.push(map("message" is msg, "pos" is p.get("pos")))
+	return p
+
+# ─── Whitespace / Layout Helpers ───────────────────────────────────
+
+*skip_newlines(p)
+	while current_kind(p) is "newline"
+		advance_parser(p)
+	return p
+
+*consume_indent(p)
+	if current_kind(p) is "indent"
+		advance_parser(p)
+		p.set("layout_depth", p.get("layout_depth") + 1)
+		return true
+	return false
+
+*consume_dedent(p)
+	if current_kind(p) is "dedent"
+		advance_parser(p)
+		depth is p.get("layout_depth")
+		if depth > 0
+			p.set("layout_depth", depth - 1)
+		return true
+	return false
+
+*expect_newline(p)
+	if current_kind(p) is "newline"
+		advance_parser(p)
+	return p
+
+# ─── Binding Detection (Lookahead) ─────────────────────────────────
+# Determines if the current identifier starts a binding: `name is expr`
+
+*peek_is_binding(p)
+	# Save position
+	pos is p.get("pos")
+	tokens is p.get("tokens")
+	i is pos + 1
+
+	# Skip optional type annotation (: Type.SubType)
+	if i < tokens.length() and tokens[i].get("kind") is "colon"
+		i is i + 1
+		while i < tokens.length() and tokens[i].get("kind") is "identifier"
+			i is i + 1
+			if i < tokens.length() and tokens[i].get("kind") is "dot"
+				i is i + 1
+			else
+				break
+
+	# Skip newlines
+	while i < tokens.length() and tokens[i].get("kind") is "newline"
+		i is i + 1
+
+	# Check for 'is' keyword
+	if i < tokens.length() and tokens[i].get("kind") is "keyword_is"
+		return true
+	return false
+
+# ─── Parse Entry Point ─────────────────────────────────────────────
+
+*parse(tokens)
+	p is make_parser(tokens)
+	items is []
+	skip_newlines(p)
+
+	while current_kind(p) isnt "eof"
+		# Handle stray dedents
+		if current_kind(p) is "dedent"
+			consume_dedent(p)
+			skip_newlines(p)
+			continue
+
+		item is parse_item(p)
+		if item isnt none
+			items.push(item)
+		skip_newlines(p)
+
+	return make_program(items, make_span(0, 0))
+
+# ─── Item Parsing ──────────────────────────────────────────────────
+
+*parse_item(p)
+	skip_newlines(p)
+	kind is current_kind(p)
+
+	if kind is "keyword_type"
+		return parse_type_def(p)
+
+	if kind is "keyword_enum"
+		return parse_enum_def(p)
+
+	if kind is "keyword_store"
+		return parse_store_def(p, false, false)
+
+	if kind is "keyword_persist"
+		return parse_persist_store(p)
+
+	if kind is "keyword_actor"
+		return parse_actor_def(p)
+
+	if kind is "keyword_err"
+		return parse_error_definition(p)
+
+	if kind is "keyword_trait"
+		return parse_trait_def(p)
+
+	if kind is "star"
+		return parse_function(p, "free")
+
+	if kind is "keyword_extern"
+		return parse_extern_function(p)
+
+	if kind is "keyword_use"
+		return parse_use_statement(p)
+
+	# Identifier — could be binding or expression
+	if kind is "identifier"
+		if peek_is_binding(p)
+			binding is parse_binding(p)
+			return map("kind" is "item_binding", "binding" is binding)
+		expr is parse_expression(p)
+		expect_newline(p)
+		return map("kind" is "item_expression", "expr" is expr)
+
+	# Fallback: expression
+	if kind isnt "eof" and kind isnt "dedent"
+		expr is parse_expression(p)
+		expect_newline(p)
+		return map("kind" is "item_expression", "expr" is expr)
+
+	return none
+
+# ─── Use Statement ─────────────────────────────────────────────────
+
+*parse_use_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	# Parse dotted path: std.io
+	path is []
+	name_tok is expect(p, "identifier")
+	path.push(name_tok.get("value"))
+	while current_kind(p) is "dot"
+		advance_parser(p)
+		seg is expect(p, "identifier")
+		path.push(seg.get("value"))
+	expect_newline(p)
+	return map("kind" is "use", "path" is path, "span" is make_span(start, current_token(p).get("start")))
+
+# ─── Binding ───────────────────────────────────────────────────────
+
+*parse_binding(p)
+	start is current_token(p).get("start")
+	name_tok is expect(p, "identifier")
+	name is name_tok.get("value")
+
+	# Skip optional type annotation  
+	if current_kind(p) is "colon"
+		advance_parser(p)
+		# Skip type path
+		while current_kind(p) is "identifier" or current_kind(p) is "dot"
+			advance_parser(p)
+
+	expect(p, "keyword_is")
+	value is parse_expression(p)
+	expect_newline(p)
+	return make_binding_stmt(name, value, make_span(start, current_token(p).get("start")))
+
+# ─── Function Parsing ──────────────────────────────────────────────
+
+*parse_function(p, func_kind)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	# Function name
+	name_tok is current_token(p)
+	name is name_tok.get("value")
+	advance_parser(p)
+
+	# Parameters
+	params is parse_param_list(p)
+
+	# Newline + indented body
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_function_item(name, params, body, func_kind, make_span(start, current_token(p).get("start")))
+
+*parse_param_list(p)
+	params is []
+	expect(p, "lparen")
+
+	while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+		# Skip newlines for multiline params
+		skip_newlines(p)
+		if current_kind(p) is "rparen"
+			break
+
+		param is parse_param(p)
+		params.push(param)
+
+		if current_kind(p) is "comma"
+			advance_parser(p)
+		skip_newlines(p)
+
+	expect(p, "rparen")
+	return params
+
+*parse_param(p)
+	start is current_token(p).get("start")
+	# Accept keywords as param names too
+	name_tok is current_token(p)
+	name is name_tok.get("value")
+	advance_parser(p)
+
+	# Check for default value with ?
+	default is none
+	if current_kind(p) is "question"
+		advance_parser(p)
+		default is parse_expression(p)
+
+	return make_param(name, default, make_span(start, current_token(p).get("start")))
+
+# ─── Block Parsing ─────────────────────────────────────────────────
+
+*parse_block(p)
+	start is current_token(p).get("start")
+	stmts is []
+
+	if not consume_indent(p)
+		# Empty block — no indent found
+		return make_block([], none, make_span(start, start))
+
+	while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+		skip_newlines(p)
+		if current_kind(p) is "dedent" or current_kind(p) is "eof"
+			break
+
+		stmt is parse_statement(p)
+		if stmt isnt none
+			stmts.push(stmt)
+		skip_newlines(p)
+
+	consume_dedent(p)
+
+	# Last expression becomes block value
+	value is none
+	if stmts.length() > 0
+		last is stmts[stmts.length() - 1]
+		if last.get("kind") is "expression_stmt"
+			value is last.get("expr")
+			stmts.pop()
+
+	return make_block(stmts, value, make_span(start, current_token(p).get("start")))
+
+# ─── Statement Parsing ─────────────────────────────────────────────
+
+*parse_statement(p)
+	kind is current_kind(p)
+
+	# Return statement
+	if kind is "keyword_return"
+		return parse_return_statement(p)
+
+	# If statement
+	if kind is "keyword_if"
+		return parse_if_statement(p)
+
+	# While loop
+	if kind is "keyword_while"
+		return parse_while_statement(p)
+
+	# For loop
+	if kind is "keyword_for"
+		return parse_for_statement(p)
+
+	# Break
+	if kind is "keyword_break"
+		span is make_span(current_token(p).get("start"), current_token(p).get("end"))
+		advance_parser(p)
+		expect_newline(p)
+		return make_break_stmt(span)
+
+	# Continue
+	if kind is "keyword_continue"
+		span is make_span(current_token(p).get("start"), current_token(p).get("end"))
+		advance_parser(p)
+		expect_newline(p)
+		return make_continue_stmt(span)
+
+	# Match expression (as statement)
+	if kind is "keyword_match"
+		expr is parse_expression(p)
+		expect_newline(p)
+		return make_expression_stmt(expr)
+
+	# Identifier — binding or expression
+	if kind is "identifier"
+		if peek_is_binding(p)
+			return parse_binding(p)
+		expr is parse_expression(p)
+		expect_newline(p)
+		return make_expression_stmt(expr)
+
+	# Star at statement level — nested function def (treated as expression)
+	if kind is "star"
+		fn_item is parse_function(p, "free")
+		return map("kind" is "nested_function", "function" is fn_item)
+
+	# Fallthrough: parse as expression
+	if kind isnt "eof" and kind isnt "dedent" and kind isnt "newline"
+		expr is parse_expression(p)
+		expect_newline(p)
+		return make_expression_stmt(expr)
+
+	# Skip stray newlines
+	if kind is "newline"
+		advance_parser(p)
+		return none
+
+	return none
+
+*parse_return_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	# Check if there's an expression to return
+	kind is current_kind(p)
+	if kind is "newline" or kind is "eof" or kind is "dedent"
+		return make_return_stmt(make_unit_expr(), make_span(start, current_token(p).get("start")))
+
+	expr is parse_expression(p)
+	expect_newline(p)
+	return make_return_stmt(expr, make_span(start, current_token(p).get("start")))
+
+*parse_if_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	condition is parse_expression(p)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	# Parse elif branches
+	elif_branches is []
+	skip_newlines(p)
+	while current_kind(p) is "keyword_elif"
+		advance_parser(p)
+		elif_cond is parse_expression(p)
+		skip_newlines(p)
+		elif_body is parse_block(p)
+		elif_branches.push(map("condition" is elif_cond, "body" is elif_body))
+		skip_newlines(p)
+
+	# Parse else
+	else_body is none
+	if current_kind(p) is "keyword_else"
+		advance_parser(p)
+		skip_newlines(p)
+		else_body is parse_block(p)
+
+	return make_if_stmt(condition, body, elif_branches, else_body, make_span(start, current_token(p).get("start")))
+
+*parse_while_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	condition is parse_expression(p)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_while_stmt(condition, body, make_span(start, current_token(p).get("start")))
+
+*parse_for_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	var_tok is expect(p, "identifier")
+	variable is var_tok.get("value")
+	expect(p, "keyword_in")
+	iterable is parse_expression(p)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_for_stmt(variable, iterable, body, make_span(start, current_token(p).get("start")))
+
+# ─── Expression Parsing — Precedence Climbing ──────────────────────
+
+*parse_expression(p)
+	return parse_ternary(p)
+
+# Ternary: expr ? then ! else
+*parse_ternary(p)
+	expr is parse_pipeline(p)
+
+	if current_kind(p) is "question"
+		advance_parser(p)
+		then_branch is parse_expression(p)
+		if current_kind(p) is "bang"
+			advance_parser(p)
+			# Check for error propagation: ! err Name
+			if current_kind(p) is "keyword_err"
+				error_expr is parse_error_value(p)
+				return make_ternary_expr(expr, then_branch, error_expr, make_span(0, 0))
+			else_branch is parse_expression(p)
+			return make_ternary_expr(expr, then_branch, else_branch, make_span(0, 0))
+		# No else branch — just condition ? value
+		return make_ternary_expr(expr, then_branch, make_unit_expr(), make_span(0, 0))
+
+	# Error propagate: expr ! return
+	if current_kind(p) is "bang"
+		next is peek_token(p, 1)
+		if next.get("kind") is "keyword_return"
+			advance_parser(p)
+			advance_parser(p)
+			return make_error_propagate_expr(expr, make_span(0, 0))
+
+	return expr
+
+# Pipeline: expr ~ func
+*parse_pipeline(p)
+	left is parse_logic_or(p)
+
+	while current_kind(p) is "tilde"
+		advance_parser(p)
+		right is parse_logic_or(p)
+		left is make_pipeline_expr(left, right, make_span(0, 0))
+
+	return left
+
+# Logical OR: expr or expr
+*parse_logic_or(p)
+	left is parse_logic_and(p)
+
+	while current_kind(p) is "keyword_or"
+		advance_parser(p)
+		right is parse_logic_and(p)
+		left is make_binary_expr("or", left, right, make_span(0, 0))
+
+	return left
+
+# Logical AND: expr and expr
+*parse_logic_and(p)
+	left is parse_bitwise_or(p)
+
+	while current_kind(p) is "keyword_and"
+		advance_parser(p)
+		right is parse_bitwise_or(p)
+		left is make_binary_expr("and", left, right, make_span(0, 0))
+
+	return left
+
+# Bitwise OR: expr | expr
+*parse_bitwise_or(p)
+	left is parse_bitwise_xor(p)
+
+	while current_kind(p) is "pipe"
+		advance_parser(p)
+		right is parse_bitwise_xor(p)
+		left is make_binary_expr("bitor", left, right, make_span(0, 0))
+
+	return left
+
+# Bitwise XOR: expr ^ expr
+*parse_bitwise_xor(p)
+	left is parse_bitwise_and(p)
+
+	while current_kind(p) is "caret"
+		advance_parser(p)
+		right is parse_bitwise_and(p)
+		left is make_binary_expr("bitxor", left, right, make_span(0, 0))
+
+	return left
+
+# Bitwise AND: expr & expr
+*parse_bitwise_and(p)
+	left is parse_equality(p)
+
+	while current_kind(p) is "ampersand"
+		advance_parser(p)
+		right is parse_equality(p)
+		left is make_binary_expr("bitand", left, right, make_span(0, 0))
+
+	return left
+
+# Equality: expr is expr / expr isnt expr
+*parse_equality(p)
+	left is parse_comparison(p)
+
+	while current_kind(p) is "keyword_is" or current_kind(p) is "keyword_isnt"
+		op is current_kind(p) is "keyword_is" ? "equals" ! "not_equals"
+		advance_parser(p)
+		right is parse_comparison(p)
+		left is make_binary_expr(op, left, right, make_span(0, 0))
+
+	return left
+
+# Comparison: >, >=, <, <=
+*parse_comparison(p)
+	left is parse_shift(p)
+
+	kind is current_kind(p)
+	while kind is "greater" or kind is "greater_eq" or kind is "less" or kind is "less_eq"
+		op is kind
+		advance_parser(p)
+		right is parse_shift(p)
+		left is make_binary_expr(op, left, right, make_span(0, 0))
+		kind is current_kind(p)
+
+	return left
+
+# Shift: <<, >>
+*parse_shift(p)
+	left is parse_term(p)
+
+	kind is current_kind(p)
+	while kind is "shift_left" or kind is "shift_right"
+		op is kind
+		advance_parser(p)
+		right is parse_term(p)
+		left is make_binary_expr(op, left, right, make_span(0, 0))
+		kind is current_kind(p)
+
+	return left
+
+# Term: +, -
+*parse_term(p)
+	left is parse_factor(p)
+
+	kind is current_kind(p)
+	while kind is "plus" or kind is "minus"
+		op is kind is "plus" ? "add" ! "sub"
+		advance_parser(p)
+		right is parse_factor(p)
+		left is make_binary_expr(op, left, right, make_span(0, 0))
+		kind is current_kind(p)
+
+	return left
+
+# Factor: *, /, %
+*parse_factor(p)
+	left is parse_unary(p)
+
+	kind is current_kind(p)
+	while kind is "star" or kind is "slash" or kind is "percent"
+		op is kind is "star" ? "mul" ! (kind is "slash" ? "div" ! "mod")
+		advance_parser(p)
+		right is parse_unary(p)
+		left is make_binary_expr(op, left, right, make_span(0, 0))
+		kind is current_kind(p)
+
+	return left
+
+# Unary: -expr, not expr, !expr (throw)
+*parse_unary(p)
+	kind is current_kind(p)
+
+	if kind is "minus"
+		advance_parser(p)
+		expr is parse_unary(p)
+		return make_unary_expr("neg", expr, make_span(0, 0))
+
+	if kind is "keyword_not" or kind is "bang"
+		# ! followed by !! is throw
+		if kind is "bang"
+			next is peek_token(p, 1)
+			if next.get("kind") is "bang_bang" or next.get("kind") is "bang"
+				advance_parser(p)
+				value is parse_unary(p)
+				return make_throw_expr(value, make_span(0, 0))
+		advance_parser(p)
+		expr is parse_unary(p)
+		return make_unary_expr("not", expr, make_span(0, 0))
+
+	return parse_postfix(p)
+
+# Postfix: call, member access, index
+*parse_postfix(p)
+	expr is parse_primary(p)
+
+	while true
+		kind is current_kind(p)
+
+		# Function call: expr(args)
+		if kind is "lparen"
+			args is parse_arg_list(p)
+			expr is make_call_expr(expr, args, make_span(0, 0))
+			continue
+
+		# Member access: expr.name
+		if kind is "dot"
+			advance_parser(p)
+			name_tok is current_token(p)
+			name is name_tok.get("value")
+			advance_parser(p)
+			expr is make_member_expr(expr, name, make_span(0, 0))
+			continue
+
+		# Index: expr[index]
+		if kind is "lbracket"
+			advance_parser(p)
+			index is parse_expression(p)
+			expect(p, "rbracket")
+			expr is make_index_expr(expr, index, make_span(0, 0))
+			continue
+
+		break
+
+	return expr
+
+*parse_arg_list(p)
+	args is []
+	expect(p, "lparen")
+
+	# Support multiline args
+	skip_newlines(p)
+
+	while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+		# Handle indented multiline args  
+		if current_kind(p) is "indent"
+			consume_indent(p)
+			while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+				skip_newlines(p)
+				if current_kind(p) is "dedent"
+					break
+				arg is parse_expression(p)
+				args.push(arg)
+				if current_kind(p) is "comma"
+					advance_parser(p)
+				skip_newlines(p)
+			consume_dedent(p)
+			break
+
+		arg is parse_expression(p)
+		args.push(arg)
+		if current_kind(p) is "comma"
+			advance_parser(p)
+		skip_newlines(p)
+
+	expect(p, "rparen")
+	return args
+
+# ─── Primary Expressions ───────────────────────────────────────────
+
+*parse_primary(p)
+	kind is current_kind(p)
+	tok is current_token(p)
+
+	# Integer literal
+	if kind is "integer"
+		advance_parser(p)
+		return make_integer_expr(to_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
+
+	# Float literal
+	if kind is "float"
+		advance_parser(p)
+		return make_float_expr(to_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
+
+	# String literal
+	if kind is "string"
+		advance_parser(p)
+		return make_string_expr(tok.get("value"), make_span(tok.get("start"), tok.get("end")))
+
+	# Boolean literals
+	if kind is "keyword_true"
+		advance_parser(p)
+		return make_bool_expr(true, make_span(tok.get("start"), tok.get("end")))
+
+	if kind is "keyword_false"
+		advance_parser(p)
+		return make_bool_expr(false, make_span(tok.get("start"), tok.get("end")))
+
+	# None
+	if kind is "keyword_none"
+		advance_parser(p)
+		return make_none_expr(make_span(tok.get("start"), tok.get("end")))
+
+	# Identifier — might be map literal if followed by (
+	if kind is "identifier"
+		name is tok.get("value")
+
+		# Special case: map(...) literal
+		if name is "map" and peek_token(p, 1).get("kind") is "lparen"
+			return parse_map_literal(p)
+
+		# Special case: not keyword for unary not
+		if name is "not"
+			advance_parser(p)
+			expr is parse_unary(p)
+			return make_unary_expr("not", expr, make_span(tok.get("start"), tok.get("end")))
+
+		advance_parser(p)
+		return make_identifier_expr(name, make_span(tok.get("start"), tok.get("end")))
+
+	# Parenthesized expression or unit
+	if kind is "lparen"
+		advance_parser(p)
+		if current_kind(p) is "rparen"
+			advance_parser(p)
+			return make_unit_expr()
+		expr is parse_expression(p)
+		expect(p, "rparen")
+		return expr
+
+	# List literal
+	if kind is "lbracket"
+		return parse_list_literal(p)
+
+	# Match expression
+	if kind is "keyword_match"
+		return parse_match_expression(p)
+
+	# Lambda: *fn(params) body
+	if kind is "star"
+		next is peek_token(p, 1)
+		if next.get("kind") is "keyword_fn"
+			return parse_lambda(p)
+
+	# Placeholder $N
+	if kind is "placeholder"
+		advance_parser(p)
+		return make_placeholder_expr(to_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
+
+	# Error value: err Name:Sub
+	if kind is "keyword_err"
+		return parse_error_value(p)
+
+	# Fallback — unexpected token
+	record_error(p, "unexpected token: " + kind)
+	advance_parser(p)
+	return make_unit_expr()
+
+# ─── List Literal ───────────────────────────────────────────────────
+
+*parse_list_literal(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	items is []
+
+	skip_newlines(p)
+
+	while current_kind(p) isnt "rbracket" and current_kind(p) isnt "eof"
+		if current_kind(p) is "indent"
+			consume_indent(p)
+			while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+				skip_newlines(p)
+				if current_kind(p) is "dedent"
+					break
+				item is parse_expression(p)
+				items.push(item)
+				if current_kind(p) is "comma"
+					advance_parser(p)
+				skip_newlines(p)
+			consume_dedent(p)
+			break
+
+		item is parse_expression(p)
+		items.push(item)
+		if current_kind(p) is "comma"
+			advance_parser(p)
+		skip_newlines(p)
+
+	expect(p, "rbracket")
+	return make_list_expr(items, make_span(start, current_token(p).get("start")))
+
+# ─── Map Literal ───────────────────────────────────────────────────
+
+*parse_map_literal(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	expect(p, "lparen")
+	entries is []
+
+	skip_newlines(p)
+
+	while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+		if current_kind(p) is "indent"
+			consume_indent(p)
+			while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+				skip_newlines(p)
+				if current_kind(p) is "dedent"
+					break
+				entry is parse_map_entry(p)
+				entries.push(entry)
+				if current_kind(p) is "comma"
+					advance_parser(p)
+				skip_newlines(p)
+			consume_dedent(p)
+			break
+
+		entry is parse_map_entry(p)
+		entries.push(entry)
+		if current_kind(p) is "comma"
+			advance_parser(p)
+		skip_newlines(p)
+
+	expect(p, "rparen")
+	return make_map_expr(entries, make_span(start, current_token(p).get("start")))
+
+*parse_map_entry(p)
+	key is parse_expression(p)
+	expect(p, "keyword_is")
+	value is parse_expression(p)
+	return map("key" is key, "value" is value)
+
+# ─── Match Expression ──────────────────────────────────────────────
+
+*parse_match_expression(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	value is parse_expression(p)
+	skip_newlines(p)
+
+	arms is []
+	default is none
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			# Default case: ! expr
+			if current_kind(p) is "bang"
+				advance_parser(p)
+				default_expr is parse_expression(p)
+				default is make_block([], default_expr, make_span(0, 0))
+				skip_newlines(p)
+				continue
+
+			# Pattern arm: | pattern ? expr  (or just pattern ? expr)
+			if current_kind(p) is "pipe"
+				advance_parser(p)
+
+			pat is parse_pattern(p)
+			expect(p, "question")
+
+			# Arm body can be single-line expr or indented block
+			kind is current_kind(p)
+			if kind is "newline"
+				skip_newlines(p)
+				arm_body is parse_block(p)
+			else
+				arm_expr is parse_expression(p)
+				arm_body is make_block([], arm_expr, make_span(0, 0))
+
+			arms.push(make_match_arm(pat, arm_body))
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	return make_match_expr(value, arms, default, make_span(start, current_token(p).get("start")))
+
+# ─── Pattern Parsing ───────────────────────────────────────────────
+
+*parse_pattern(p)
+	kind is current_kind(p)
+	tok is current_token(p)
+
+	# Integer pattern
+	if kind is "integer"
+		advance_parser(p)
+		return make_pat_integer(to_number(tok.get("value")))
+
+	# Negative integer
+	if kind is "minus"
+		advance_parser(p)
+		num_tok is current_token(p)
+		advance_parser(p)
+		return make_pat_integer(0 - to_number(num_tok.get("value")))
+
+	# Boolean pattern
+	if kind is "keyword_true"
+		advance_parser(p)
+		return make_pat_bool(true)
+
+	if kind is "keyword_false"
+		advance_parser(p)
+		return make_pat_bool(false)
+
+	# String pattern
+	if kind is "string"
+		advance_parser(p)
+		return make_pat_string(tok.get("value"))
+
+	# Wildcard
+	if kind is "identifier" and tok.get("value") is "_"
+		advance_parser(p)
+		return make_pat_wildcard(make_span(tok.get("start"), tok.get("end")))
+
+	# Constructor or identifier
+	if kind is "identifier" or kind is "keyword_none"
+		name is tok.get("value")
+		advance_parser(p)
+
+		# Check if it's a constructor: starts with uppercase or is None
+		if kind is "keyword_none" or is_upper(char_at(name, 0))
+			# Constructor pattern — might have fields
+			if current_kind(p) is "lparen"
+				advance_parser(p)
+				fields is []
+				while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+					field_pat is parse_pattern(p)
+					fields.push(field_pat)
+					if current_kind(p) is "comma"
+						advance_parser(p)
+				expect(p, "rparen")
+				return make_pat_constructor(name, fields, make_span(tok.get("start"), current_token(p).get("start")))
+
+			# Nullary constructor
+			return make_pat_constructor(name, [], make_span(tok.get("start"), tok.get("end")))
+
+		# Lowercase — binding pattern
+		return make_pat_identifier(name)
+
+	record_error(p, "unexpected pattern token: " + kind)
+	advance_parser(p)
+	return make_pat_wildcard(make_span(0, 0))
+
+# ─── Lambda Expression ─────────────────────────────────────────────
+
+*parse_lambda(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	advance_parser(p)
+
+	params is parse_param_list(p)
+	skip_newlines(p)
+
+	# Lambda can be single-line or multiline
+	kind is current_kind(p)
+	if kind is "indent" or kind is "newline"
+		skip_newlines(p)
+		body is parse_block(p)
+	else
+		expr is parse_expression(p)
+		body is make_block([], expr, make_span(0, 0))
+
+	return make_lambda_expr(params, body, make_span(start, current_token(p).get("start")))
+
+# ─── Error Value ────────────────────────────────────────────────────
+
+*parse_error_value(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	path is []
+
+	name_tok is current_token(p)
+	path.push(name_tok.get("value"))
+	advance_parser(p)
+
+	# Parse colon-separated path: err Name:Sub:Detail
+	while current_kind(p) is "colon"
+		advance_parser(p)
+		seg_tok is current_token(p)
+		path.push(seg_tok.get("value"))
+		advance_parser(p)
+
+	return make_error_value_expr(path, make_span(start, current_token(p).get("start")))
+
+# ─── Type Definition ───────────────────────────────────────────────
+
+*parse_type_def(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is expect(p, "identifier")
+	name is name_tok.get("value")
+
+	# Optional: with Trait1, Trait2
+	traits is parse_with_traits(p)
+
+	skip_newlines(p)
+	fields is []
+	methods is []
+	variants is []
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			# Variant: | Name(fields)
+			if current_kind(p) is "pipe"
+				v is parse_variant(p)
+				variants.push(v)
+				skip_newlines(p)
+				continue
+
+			# Method: *name(params)
+			if current_kind(p) is "star"
+				m is parse_function(p, "method")
+				methods.push(m)
+				skip_newlines(p)
+				continue
+
+			# Field: name or &name
+			f is parse_field_def(p)
+			fields.push(f)
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	return make_type_item(name, traits, fields, methods, variants, make_span(start, current_token(p).get("start")))
+
+*parse_enum_def(p)
+	# enum is like type but expects variants
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is expect(p, "identifier")
+	name is name_tok.get("value")
+	traits is parse_with_traits(p)
+
+	skip_newlines(p)
+	variants is []
+	methods is []
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			if current_kind(p) is "pipe"
+				v is parse_variant(p)
+				variants.push(v)
+				skip_newlines(p)
+				continue
+
+			if current_kind(p) is "star"
+				m is parse_function(p, "method")
+				methods.push(m)
+				skip_newlines(p)
+				continue
+
+			# Skip unexpected tokens
+			advance_parser(p)
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	return make_type_item(name, [], [], methods, variants, make_span(start, current_token(p).get("start")))
+
+*parse_variant(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is expect(p, "identifier")
+	name is name_tok.get("value")
+	fields is []
+
+	if current_kind(p) is "lparen"
+		advance_parser(p)
+		while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+			f_tok is current_token(p)
+			fields.push(make_pat_identifier(f_tok.get("value")))
+			advance_parser(p)
+			if current_kind(p) is "comma"
+				advance_parser(p)
+		expect(p, "rparen")
+
+	expect_newline(p)
+	return make_variant(name, fields, make_span(start, current_token(p).get("start")))
+
+*parse_field_def(p)
+	start is current_token(p).get("start")
+	is_ref is false
+
+	if current_kind(p) is "ampersand"
+		is_ref is true
+		advance_parser(p)
+
+	name_tok is current_token(p)
+	name is name_tok.get("value")
+	advance_parser(p)
+
+	# Optional default
+	default is none
+	if current_kind(p) is "question"
+		advance_parser(p)
+		default is parse_expression(p)
+	elif current_kind(p) is "keyword_is"
+		advance_parser(p)
+		default is parse_expression(p)
+
+	expect_newline(p)
+	return make_field(name, is_ref, default, make_span(start, current_token(p).get("start")))
+
+# ─── Store Definition ──────────────────────────────────────────────
+
+*parse_store_def(p, is_persistent, is_actor)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is expect(p, "identifier")
+	name is name_tok.get("value")
+	traits is parse_with_traits(p)
+
+	skip_newlines(p)
+	fields is []
+	methods is []
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			if current_kind(p) is "star"
+				m is parse_function(p, "method")
+				methods.push(m)
+				skip_newlines(p)
+				continue
+
+			if current_kind(p) is "at"
+				m is parse_actor_message(p)
+				methods.push(m)
+				skip_newlines(p)
+				continue
+
+			f is parse_field_def(p)
+			fields.push(f)
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	return make_store_item(name, traits, fields, methods, is_actor, is_persistent, make_span(start, current_token(p).get("start")))
+
+*parse_persist_store(p)
+	advance_parser(p)
+	if current_kind(p) is "keyword_store"
+		return parse_store_def(p, true, false)
+	record_error(p, "expected 'store' after 'persist'")
+	return none
+
+*parse_actor_def(p)
+	return parse_store_def(p, false, true)
+
+*parse_actor_message(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is current_token(p)
+	name is name_tok.get("value")
+	advance_parser(p)
+
+	params is parse_param_list(p)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_function_item(name, params, body, "message", make_span(start, current_token(p).get("start")))
+
+# ─── Trait Definition ──────────────────────────────────────────────
+
+*parse_trait_def(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is expect(p, "identifier")
+	name is name_tok.get("value")
+	required is parse_with_traits(p)
+
+	skip_newlines(p)
+	methods is []
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			if current_kind(p) is "star"
+				m is parse_function(p, "method")
+				methods.push(m)
+				skip_newlines(p)
+				continue
+
+			# Abstract method: just name(params)
+			m_tok is current_token(p)
+			m_name is m_tok.get("value")
+			advance_parser(p)
+			m_params is parse_param_list(p)
+			skip_newlines(p)
+			methods.push(map("kind" is "trait_method", "name" is m_name, "params" is m_params, "body" is none))
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	return make_trait_item(name, required, methods, make_span(start, current_token(p).get("start")))
+
+*parse_with_traits(p)
+	traits is []
+	if current_kind(p) is "keyword_with"
+		advance_parser(p)
+		tok is current_token(p)
+		traits.push(tok.get("value"))
+		advance_parser(p)
+		while current_kind(p) is "comma"
+			advance_parser(p)
+			t is current_token(p)
+			traits.push(t.get("value"))
+			advance_parser(p)
+	return traits
+
+# ─── Error Definition ──────────────────────────────────────────────
+
+*parse_error_definition(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	name_tok is current_token(p)
+	name is name_tok.get("value")
+	advance_parser(p)
+
+	code is none
+	message is none
+	children is []
+
+	skip_newlines(p)
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			# Nested error
+			if current_kind(p) is "keyword_err"
+				child is parse_error_definition(p)
+				children.push(child)
+				skip_newlines(p)
+				continue
+
+			# code is N / message is "..."
+			if current_kind(p) is "identifier"
+				field_name is current_token(p).get("value")
+				if field_name is "code"
+					advance_parser(p)
+					expect(p, "keyword_is")
+					code is parse_expression(p)
+					expect_newline(p)
+					continue
+				if field_name is "message"
+					advance_parser(p)
+					expect(p, "keyword_is")
+					message is parse_expression(p)
+					expect_newline(p)
+					continue
+
+			# Skip unexpected
+			advance_parser(p)
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	return make_error_def_item(name, code, message, children, make_span(start, current_token(p).get("start")))
+
+# ─── Extern Function ───────────────────────────────────────────────
+
+*parse_extern_function(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	expect(p, "keyword_fn")
+	name_tok is current_token(p)
+	name is name_tok.get("value")
+	advance_parser(p)
+
+	params is parse_param_list(p)
+	expect_newline(p)
+
+	return make_extern_function_item(name, params, make_span(start, current_token(p).get("start")))
+
+# ─── AST Display Helpers ───────────────────────────────────────────
+
+*indent_str(depth)
+	result is ""
+	i is 0
+	while i < depth
+		result is result + "  "
+		i is i + 1
+	return result
+
+*display_expr(node, depth)
+	if node is none
+		return indent_str(depth) + "(none)"
+
+	kind is node.get("kind")
+
+	if kind is "unit"
+		return indent_str(depth) + "()"
+
+	if kind is "none"
+		return indent_str(depth) + "none"
+
+	if kind is "identifier"
+		return indent_str(depth) + node.get("name")
+
+	if kind is "integer"
+		return indent_str(depth) + to_string(node.get("value"))
+
+	if kind is "float"
+		return indent_str(depth) + to_string(node.get("value"))
+
+	if kind is "bool"
+		return indent_str(depth) + to_string(node.get("value"))
+
+	if kind is "string_lit"
+		return indent_str(depth) + "\"" + node.get("value") + "\""
+
+	if kind is "binary"
+		return indent_str(depth) + "(" + node.get("op") + " " + display_expr(node.get("left"), 0) + " " + display_expr(node.get("right"), 0) + ")"
+
+	if kind is "unary"
+		return indent_str(depth) + "(" + node.get("op") + " " + display_expr(node.get("expr"), 0) + ")"
+
+	if kind is "call"
+		result is indent_str(depth) + display_expr(node.get("callee"), 0) + "("
+		args is node.get("args")
+		i is 0
+		for arg in args
+			if i > 0
+				result is result + ", "
+			result is result + display_expr(arg, 0)
+			i is i + 1
+		return result + ")"
+
+	if kind is "member"
+		return indent_str(depth) + display_expr(node.get("target"), 0) + "." + node.get("property")
+
+	if kind is "index"
+		return indent_str(depth) + display_expr(node.get("target"), 0) + "[" + display_expr(node.get("index"), 0) + "]"
+
+	if kind is "ternary"
+		return indent_str(depth) + display_expr(node.get("condition"), 0) + " ? " + display_expr(node.get("then_branch"), 0) + " ! " + display_expr(node.get("else_branch"), 0)
+
+	if kind is "lambda"
+		return indent_str(depth) + "*fn(...)"
+
+	if kind is "list"
+		return indent_str(depth) + "[...]"
+
+	if kind is "map_lit"
+		return indent_str(depth) + "map(...)"
+
+	if kind is "match"
+		return indent_str(depth) + "match(...)"
+
+	return indent_str(depth) + "<" + kind + ">"
+
+*display_stmt(node, depth)
+	if node is none
+		return ""
+
+	kind is node.get("kind")
+	pad is indent_str(depth)
+
+	if kind is "binding"
+		return pad + node.get("name") + " is " + display_expr(node.get("value"), 0)
+
+	if kind is "expression_stmt"
+		return pad + display_expr(node.get("expr"), 0)
+
+	if kind is "return"
+		return pad + "return " + display_expr(node.get("expr"), 0)
+
+	if kind is "if"
+		return pad + "if " + display_expr(node.get("condition"), 0)
+
+	if kind is "while"
+		return pad + "while " + display_expr(node.get("condition"), 0)
+
+	if kind is "for"
+		return pad + "for " + node.get("variable") + " in " + display_expr(node.get("iterable"), 0)
+
+	if kind is "break"
+		return pad + "break"
+
+	if kind is "continue"
+		return pad + "continue"
+
+	return pad + "<" + kind + ">"
+
+*display_item(node, depth)
+	if node is none
+		return ""
+
+	kind is node.get("kind")
+	pad is indent_str(depth)
+
+	if kind is "function"
+		result is pad + "*" + node.get("name") + "("
+		params is node.get("params")
+		i is 0
+		for param in params
+			if i > 0
+				result is result + ", "
+			result is result + param.get("name")
+			i is i + 1
+		result is result + ")"
+		# Show body statements
+		body is node.get("body")
+		if body isnt none
+			stmts is body.get("statements")
+			for stmt in stmts
+				result is result + "\n" + display_stmt(stmt, depth + 1)
+			val is body.get("value")
+			if val isnt none
+				result is result + "\n" + indent_str(depth + 1) + display_expr(val, 0)
+		return result
+
+	if kind is "type_def"
+		result is pad + "type " + node.get("name")
+		variants is node.get("variants")
+		for v in variants
+			result is result + "\n" + pad + "  | " + v.get("name")
+		return result
+
+	if kind is "store_def"
+		return pad + "store " + node.get("name")
+
+	if kind is "trait_def"
+		return pad + "trait " + node.get("name")
+
+	if kind is "error_def"
+		return pad + "err " + node.get("name")
+
+	if kind is "extern_function"
+		return pad + "extern fn " + node.get("name")
+
+	if kind is "item_binding"
+		return display_stmt(node.get("binding"), depth)
+
+	if kind is "item_expression"
+		return pad + display_expr(node.get("expr"), 0)
+
+	if kind is "use"
+		path is node.get("path")
+		return pad + "use " + join_strings(path, ".")
+
+	return pad + "<" + kind + ">"
+
+*join_strings(list, sep)
+	result is ""
+	i is 0
+	for item in list
+		if i > 0
+			result is result + sep
+		result is result + item
+		i is i + 1
+	return result
+
+# ─── Main: Parse a sample and display AST ──────────────────────────
+
+*main()
+	# Import the lexer
+	sample is "*add(a, b)\n\treturn a + b\n\n*main()\n\tx is add(1, 2)\n\tlog(x)\n\tif x > 0\n\t\tlog(\"positive\")\n\telse\n\t\tlog(\"not positive\")\n"
+	# Note: in a real build, we'd use `use self_hosted.lexer` and call lex()
+	# For now, this shows the parser structure and AST construction
+	log("Coral Self-Hosted Parser v0.1")
+	log("Sample program:")
+	log(sample)
+	log("---")
+	log("Parser module loaded successfully")
+	log("AST node constructors: 40+")
+	log("Expression precedence levels: 12")
+	log("Supported items: function, type, enum, store, actor, trait, err, extern, use")

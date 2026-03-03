@@ -1,0 +1,74 @@
+# std/option.coral - Option type for optional values
+#
+# Coral uses `none` as a built-in keyword for absent values.
+# This module provides Option as an ADT for explicit optionality.
+
+enum Option
+	Some(value)
+	None
+
+# Wrap a value in Some
+*some(value)
+	Some(value)
+
+# Create a None value
+*option_none()
+	None
+
+# Check if option has a value
+*is_some(opt)
+	match opt
+	Some(_) ? true
+	None ? false
+
+# Check if option is empty
+*is_none(opt)
+	match opt
+	Some(_) ? false
+	None ? true
+
+# Get the value or return default
+*unwrap_or(opt, default)
+	match opt
+	Some(value) ? value
+	None ? default
+
+# Get the value or panic
+*unwrap(opt)
+	match opt
+	Some(value) ? value
+	None ? log("PANIC: unwrap called on None")
+
+# Transform the inner value if present
+*map_option(opt, func)
+	match opt
+	Some(value) ? Some(func(value))
+	None ? None
+
+# Chain option operations
+*and_then(opt, func)
+	match opt
+	Some(value) ? func(value)
+	None ? None
+
+# Return first Some, or second option
+*or_option(a, b)
+	match a
+	Some(_) ? a
+	None ? b
+
+# Convert a potentially-none value to an Option
+*from_nullable(value)
+	is_absent(value) ? None ! Some(value)
+
+# Convert Option to a potentially-none value
+*to_nullable(opt)
+	match opt
+	Some(value) ? value
+	None ? none
+
+# Filter: keep Some only if predicate passes
+*filter_option(opt, predicate)
+	match opt
+	Some(value) ? predicate(value) ? opt ! None
+	None ? None

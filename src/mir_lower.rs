@@ -76,6 +76,13 @@ fn lower_function(function: &Function) -> MirFunction {
                     blocks: vec![BasicBlock { name: bb_name, instrs, term }],
                 };
             }
+            // Control-flow statements are not yet lowered to MIR; skip them.
+            Statement::If { .. }
+            | Statement::While { .. }
+            | Statement::For { .. }
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::FieldAssign { .. } => {}
         }
     }
 
@@ -130,6 +137,7 @@ fn lower_expression(expr: &Expression, ng: &mut NameGen) -> (Vec<Instr>, Operand
                 BinaryOp::And => BinOp::And,
                 BinaryOp::Or => BinOp::Or,
                 BinaryOp::Equals => BinOp::Eq,
+                BinaryOp::NotEquals => BinOp::NotEq,
                 BinaryOp::Greater | BinaryOp::GreaterEq | BinaryOp::Less | BinaryOp::LessEq => BinOp::Eq,
                 _ => BinOp::Eq,
             };

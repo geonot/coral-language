@@ -10,5 +10,9 @@ crate-type = ["rlib", "cdylib"]
 name = "rc_stress"
 path = "src/bin/rc_stress.rs"
 
+[[bin]]
+name = "cycle_bench"
+path = "src/bin/cycle_bench.rs"
+
 [dependencies]
 libc = "0.2"

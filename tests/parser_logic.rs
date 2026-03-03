@@ -24,6 +24,7 @@ fn parses_binding_type_annotation() {
         .type_annotation
         .expect("missing annotation");
     assert_eq!(annotation.segments, vec!["Number".to_string()]);
+    assert_eq!(annotation.type_args, vec![]);
 }
 
 #[test]
@@ -41,6 +42,7 @@ fn parses_function_parameter_annotation() {
         .as_ref()
         .expect("missing parameter annotation");
     assert_eq!(annotation.segments, vec!["Number".to_string()]);
+    assert_eq!(annotation.type_args, vec![]);
 }
 
 #[test]

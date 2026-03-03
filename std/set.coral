@@ -14,7 +14,7 @@ use std.prelude
 
 # Check if element exists in set
 *has(s, elem)
-    s.get(elem).equals(none).not()
+    has_key(s, elem)
 
 # Get number of elements
 *size(s)
@@ -22,7 +22,7 @@ use std.prelude
 
 # Check if set is empty
 *is_empty(s)
-    s.size == 0
+    s.size is 0
 
 # Get all elements as a list
 *elements(s)

@@ -47,33 +47,7 @@ _Updated: 2026-01-06_
 | STANDARD_LIBRARY_SPEC | ✅ Current | 2026-01-06 |
 | stores_guide | ⚠️ Needs update | 2026-01-06 |
 
-## Archived Documentation
 
-Old documentation has been moved to `docs_archive/`. These files are kept for historical reference but are no longer maintained:
+## Documentation Policy
 
-- `about.md`
-- `actor_runtime_status.md`
-- `alpha_overview.md`
-- `alpha_roadmap.md`
-- `alpha_runtime_and_language_plan.md`
-- `closures.md`
-- `compiler_gap_analysis.md`
-- `comprehensive_review_and_alpha_plan.md`
-- `coral_runtime_bootstrap.md`
-- `core_spec.md`
-- `feature_completion_plan.md`
-- `higher_order_plan.md`
-- `language_features_brainstorm.md`
-- `libc_io_plan.md`
-- `low_level_syntax.md`
-- `mir_design.md`
-- `overview.md`
-- `performance_plan.md`
-- `production_quality_improvements.md`
-- `roadmap.md`
-- `runtime_memory_plan.md`
-- `runtime_metrics.md`
-- `runtime_module_actor_plan.md`
-- `status.md`
-- `type_system_plan.md`
-- `value_error_model.md`
+All authoritative documentation is maintained in this folder. Obsolete and superseded documents have been removed for clarity. Please refer only to the files listed above for current project status, specifications, and guides.

@@ -1,0 +1,488 @@
+# Self-hosted Coral Lexer
+#
+# This lexer tokenizes Coral source code, producing a list of tokens.
+# Each token is a map with "kind", "value", "start", and "end" fields.
+# Token kinds match the Rust lexer's TokenKind variants.
+#
+# This is the first component of the self-hosted Coral compiler.
+
+use std.char
+
+# ─── Token Kind Constants ───────────────────────────────────────────
+# Using string constants for token kinds since Coral doesn't need
+# an enum for this — pattern matching on strings works well.
+
+# ─── Character Helpers ──────────────────────────────────────────────
+
+*is_operator_char(c)
+	return contains("*&|^~@?!:,.+-/%<>()[]", c)
+
+# ─── Token Constructor ─────────────────────────────────────────────
+
+*make_token(kind, value, start, end)
+	return map("kind" is kind, "value" is value, "start" is start, "end" is end)
+
+# ─── Lexer State ────────────────────────────────────────────────────
+# The lexer is implemented as a set of functions that operate on
+# a shared state map. The state contains:
+#   source    - the source string
+#   pos       - current position  
+#   len       - source length
+#   tokens    - accumulated token list
+#   indent_stack - stack of indentation widths
+#   line_start   - whether we're at the start of a line
+
+*make_lexer(source)
+	return map("source" is source, "pos" is 0, "len" is source.length(), "tokens" is [], "indent_stack" is [0], "line_start" is true)
+
+# ─── Peek / Advance ────────────────────────────────────────────────
+
+*current_char(state)
+	pos is state.get("pos")
+	if pos >= state.get("len")
+		return ""
+	return char_at(state.get("source"), pos)
+
+*peek_char(state, offset)
+	p is state.get("pos") + offset
+	if p >= state.get("len")
+		return ""
+	return char_at(state.get("source"), p)
+
+*advance(state)
+	state.set("pos", state.get("pos") + 1)
+	return state
+
+# ─── Skip Whitespace (mid-line only) ───────────────────────────────
+
+*skip_inline_whitespace(state)
+	c is current_char(state)
+	while (c is " " or c is "\t") and state.get("pos") < state.get("len")
+		advance(state)
+		c is current_char(state)
+	return state
+
+# ─── Indentation Handling ──────────────────────────────────────────
+
+*measure_indent(state)
+	width is 0
+	pos is state.get("pos")
+	src is state.get("source")
+	length is state.get("len")
+	while pos < length
+		c is char_at(src, pos)
+		if c is "\t"
+			width is width + 4
+			pos is pos + 1
+		elif c is " "
+			width is width + 1
+			pos is pos + 1
+		else
+			break
+	state.set("pos", pos)
+	return width
+
+*handle_indent(state)
+	# Skip blank lines
+	c is current_char(state)
+	if c is "\n" or c is "\r" or c is ""
+		return state
+
+	indent_width is measure_indent(state)
+	stack is state.get("indent_stack")
+	current is stack[stack.length() - 1]
+
+	if indent_width > current
+		stack.push(indent_width)
+		tokens is state.get("tokens")
+		tokens.push(make_token("indent", "", state.get("pos"), state.get("pos")))
+	elif indent_width < current
+		# Pop dedent levels
+		tokens is state.get("tokens")
+		while stack.length() > 1 and stack[stack.length() - 1] > indent_width
+			stack.pop()
+			tokens.push(make_token("dedent", "", state.get("pos"), state.get("pos")))
+
+	state.set("line_start", false)
+	return state
+
+# ─── Number Lexing ─────────────────────────────────────────────────
+
+*lex_number(state)
+	start is state.get("pos")
+	src is state.get("source")
+	length is state.get("len")
+	pos is start
+	has_dot is false
+
+	# Check for hex/binary/octal prefix
+	if char_at(src, pos) is "0" and pos + 1 < length
+		next is char_at(src, pos + 1)
+		if next is "x" or next is "X"
+			# Hex literal
+			pos is pos + 2
+			while pos < length and (is_hex_digit(char_at(src, pos)) or char_at(src, pos) is "_")
+				pos is pos + 1
+			state.set("pos", pos)
+			text is slice(src, start, pos)
+			return make_token("integer", text, start, pos)
+		elif next is "b" or next is "B"
+			# Binary literal
+			pos is pos + 2
+			while pos < length
+				bc is char_at(src, pos)
+				if bc is "0" or bc is "1" or bc is "_"
+					pos is pos + 1
+				else
+					break
+			state.set("pos", pos)
+			text is slice(src, start, pos)
+			return make_token("integer", text, start, pos)
+		elif next is "o" or next is "O"
+			# Octal literal
+			pos is pos + 2
+			while pos < length
+				oc is char_at(src, pos)
+				code is ord(oc)
+				if (code >= 48 and code <= 55) or oc is "_"
+					pos is pos + 1
+				else
+					break
+			state.set("pos", pos)
+			text is slice(src, start, pos)
+			return make_token("integer", text, start, pos)
+
+	# Decimal integer or float
+	while pos < length and (is_digit(char_at(src, pos)) or char_at(src, pos) is "_")
+		pos is pos + 1
+
+	# Check for decimal point (but not method call like 42.method())
+	if pos < length and char_at(src, pos) is "."
+		if pos + 1 < length and is_digit(char_at(src, pos + 1))
+			has_dot is true
+			pos is pos + 1
+			while pos < length and (is_digit(char_at(src, pos)) or char_at(src, pos) is "_")
+				pos is pos + 1
+
+	state.set("pos", pos)
+	text is slice(src, start, pos)
+	if has_dot
+		return make_token("float", text, start, pos)
+	return make_token("integer", text, start, pos)
+
+# ─── String Lexing ─────────────────────────────────────────────────
+
+*lex_string(state, quote)
+	start is state.get("pos")
+	advance(state)
+	src is state.get("source")
+	length is state.get("len")
+	result is ""
+
+	while state.get("pos") < length
+		c is current_char(state)
+		if c is quote
+			advance(state)
+			return make_token("string", result, start, state.get("pos"))
+		elif c is "\\"
+			advance(state)
+			escaped is current_char(state)
+			if escaped is "n"
+				result is result + "\n"
+			elif escaped is "t"
+				result is result + "\t"
+			elif escaped is "r"
+				result is result + "\r"
+			elif escaped is "\\"
+				result is result + "\\"
+			elif escaped is quote
+				result is result + quote
+			else
+				result is result + escaped
+			advance(state)
+		else
+			result is result + c
+			advance(state)
+
+	# Unterminated string
+	return make_token("string", result, start, state.get("pos"))
+
+# ─── Identifier / Keyword Lexing ───────────────────────────────────
+
+*lex_identifier(state)
+	start is state.get("pos")
+	src is state.get("source")
+	length is state.get("len")
+	pos is start
+
+	while pos < length and is_ident_char(char_at(src, pos))
+		pos is pos + 1
+
+	state.set("pos", pos)
+	text is slice(src, start, pos)
+
+	# Check for keywords
+	kind is match_keyword(text)
+	return make_token(kind, text, start, pos)
+
+*match_keyword(text)
+	if text is "type"
+		return "keyword_type"
+	if text is "store"
+		return "keyword_store"
+	if text is "persist"
+		return "keyword_persist"
+	if text is "actor"
+		return "keyword_actor"
+	if text is "match"
+		return "keyword_match"
+	if text is "fn"
+		return "keyword_fn"
+	if text is "and"
+		return "keyword_and"
+	if text is "or"
+		return "keyword_or"
+	if text is "true"
+		return "keyword_true"
+	if text is "false"
+		return "keyword_false"
+	if text is "is"
+		return "keyword_is"
+	if text is "isnt"
+		return "keyword_isnt"
+	if text is "extern"
+		return "keyword_extern"
+	if text is "unsafe"
+		return "keyword_unsafe"
+	if text is "asm"
+		return "keyword_asm"
+	if text is "ptr"
+		return "keyword_ptr"
+	if text is "enum"
+		return "keyword_enum"
+	if text is "err"
+		return "keyword_err"
+	if text is "return"
+		return "keyword_return"
+	if text is "trait"
+		return "keyword_trait"
+	if text is "with"
+		return "keyword_with"
+	if text is "none"
+		return "keyword_none"
+	if text is "if"
+		return "keyword_if"
+	if text is "elif"
+		return "keyword_elif"
+	if text is "else"
+		return "keyword_else"
+	if text is "while"
+		return "keyword_while"
+	if text is "for"
+		return "keyword_for"
+	if text is "in"
+		return "keyword_in"
+	if text is "break"
+		return "keyword_break"
+	if text is "continue"
+		return "keyword_continue"
+	if text is "use"
+		return "keyword_use"
+	return "identifier"
+
+# ─── Comment Handling ───────────────────────────────────────────────
+
+*skip_comment(state)
+	src is state.get("source")
+	length is state.get("len")
+	while state.get("pos") < length and char_at(src, state.get("pos")) isnt "\n"
+		advance(state)
+	return state
+
+# ─── Operator Lexing ───────────────────────────────────────────────
+
+*lex_operator(state)
+	start is state.get("pos")
+	c is current_char(state)
+	advance(state)
+
+	# Check for two-character operators
+	if c is ">"
+		if current_char(state) is ">"
+			advance(state)
+			return make_token("shift_right", ">>", start, state.get("pos"))
+		if current_char(state) is "="
+			advance(state)
+			return make_token("greater_eq", ">=", start, state.get("pos"))
+		return make_token("greater", ">", start, state.get("pos"))
+
+	if c is "<"
+		if current_char(state) is "<"
+			advance(state)
+			return make_token("shift_left", "<<", start, state.get("pos"))
+		if current_char(state) is "="
+			advance(state)
+			return make_token("less_eq", "<=", start, state.get("pos"))
+		return make_token("less", "<", start, state.get("pos"))
+
+	if c is "!"
+		if current_char(state) is "!"
+			advance(state)
+			return make_token("bang_bang", "!!", start, state.get("pos"))
+		return make_token("bang", "!", start, state.get("pos"))
+
+	# Single-character operators
+	c is "*" ? return make_token("star", "*", start, state.get("pos"))
+	c is "&" ? return make_token("ampersand", "&", start, state.get("pos"))
+	c is "|" ? return make_token("pipe", "|", start, state.get("pos"))
+	c is "^" ? return make_token("caret", "^", start, state.get("pos"))
+	c is "~" ? return make_token("tilde", "~", start, state.get("pos"))
+	c is "@" ? return make_token("at", "@", start, state.get("pos"))
+	c is "?" ? return make_token("question", "?", start, state.get("pos"))
+	c is ":" ? return make_token("colon", ":", start, state.get("pos"))
+	c is "," ? return make_token("comma", ",", start, state.get("pos"))
+	c is "." ? return make_token("dot", ".", start, state.get("pos"))
+	c is "+" ? return make_token("plus", "+", start, state.get("pos"))
+	c is "-" ? return make_token("minus", "-", start, state.get("pos"))
+	c is "/" ? return make_token("slash", "/", start, state.get("pos"))
+	c is "%" ? return make_token("percent", "%", start, state.get("pos"))
+	c is "(" ? return make_token("lparen", "(", start, state.get("pos"))
+	c is ")" ? return make_token("rparen", ")", start, state.get("pos"))
+	c is "[" ? return make_token("lbracket", "[", start, state.get("pos"))
+	c is "]" ? return make_token("rbracket", "]", start, state.get("pos"))
+    
+	return make_token("unknown", c, start, state.get("pos"))
+
+# ─── Placeholder Lexing ────────────────────────────────────────────
+
+*lex_placeholder(state)
+	start is state.get("pos")
+	advance(state)
+	src is state.get("source")
+	length is state.get("len")
+
+	if state.get("pos") < length and is_digit(current_char(state))
+		num_start is state.get("pos")
+		while state.get("pos") < length and is_digit(current_char(state))
+			advance(state)
+		text is slice(src, num_start, state.get("pos"))
+		return make_token("placeholder", text, start, state.get("pos"))
+
+	return make_token("placeholder", "0", start, state.get("pos"))
+
+# ─── Main Lexer Entry Point ────────────────────────────────────────
+
+*lex(source)
+	state is make_lexer(source)
+	tokens is state.get("tokens")
+
+	while state.get("pos") < state.get("len")
+		# Handle line-start indentation
+		if state.get("line_start")
+			# Check for blank line first
+			c is current_char(state)
+			if c is "\n"
+				advance(state)
+				continue
+			if c is "\r"
+				advance(state)
+				continue
+			handle_indent(state)
+			continue
+
+		c is current_char(state)
+
+		# Newline
+		if c is "\n"
+			tokens.push(make_token("newline", "", state.get("pos"), state.get("pos") + 1))
+			advance(state)
+			state.set("line_start", true)
+			continue
+
+		# Carriage return
+		if c is "\r"
+			advance(state)
+			continue
+
+		# Comment
+		if c is "#"
+			skip_comment(state)
+			continue
+
+		# Mid-line whitespace
+		if c is " " or c is "\t"
+			advance(state)
+			continue
+
+		# Numbers
+		if is_digit(c)
+			tokens.push(lex_number(state))
+			continue
+
+		# Identifiers and keywords
+		if is_ident_start(c)
+			tokens.push(lex_identifier(state))
+			continue
+
+		# String literals
+		if c is "\""
+			tokens.push(lex_string(state, "\""))
+			continue
+		if c is "'"
+			tokens.push(lex_string(state, "'"))
+			continue
+
+		# Placeholder
+		if c is "$"
+			tokens.push(lex_placeholder(state))
+			continue
+
+		# = is an error in Coral
+		if c is "="
+			advance(state)
+			tokens.push(make_token("error", "use 'is' for binding", state.get("pos") - 1, state.get("pos")))
+			continue
+
+		# Operators and symbols
+		if is_operator_char(c)
+			tokens.push(lex_operator(state))
+			continue
+
+		# Unknown character
+		advance(state)
+
+	# Emit trailing newline if needed
+	if tokens.length() > 0
+		last is tokens[tokens.length() - 1]
+		if last.get("kind") isnt "newline"
+			tokens.push(make_token("newline", "", state.get("pos"), state.get("pos")))
+
+	# Emit remaining dedents
+	stack is state.get("indent_stack")
+	while stack.length() > 1
+		stack.pop()
+		tokens.push(make_token("dedent", "", state.get("pos"), state.get("pos")))
+
+	# EOF
+	tokens.push(make_token("eof", "", state.get("pos"), state.get("pos")))
+
+	return tokens
+
+# ─── Token Display ──────────────────────────────────────────────────
+
+*token_to_string(tok)
+	kind is tok.get("kind")
+	value is tok.get("value")
+	if kind is "identifier" or kind is "string" or kind is "integer" or kind is "float"
+		return kind + "(" + value + ")"
+	if starts_with(kind, "keyword_")
+		return slice(kind, 8, kind.length())
+	return kind
+
+# ─── Main: Lex a sample and display tokens ─────────────────────────
+
+*main()
+	sample is "*main()\n\tlog(\"hello\")\n\tx is 42 + 3\n\tif x > 10\n\t\tlog(\"big\")\n"
+	tokens is lex(sample)
+	for tok in tokens
+		log(token_to_string(tok))

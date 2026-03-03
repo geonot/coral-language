@@ -4,46 +4,95 @@ use std.prelude
 
 # Read entire file contents as string
 *read(path)
-    fs_read(path)
+	fs_read(path)
 
 # Write string to file (creates or overwrites)
 *write(path, data)
-    fs_write(path, data)
+	fs_write(path, data)
 
 # Check if path exists
 *exists(path)
-    fs_exists(path)
+	fs_exists(path)
+
+# Append to file (creates if not exists)
+*append(path, data)
+	fs_append(path, data)
+
+# List directory contents (returns list of filenames)
+*list_dir(path)
+	fs_read_dir(path)
+
+# Create directory (and parents)
+*make_dir(path)
+	fs_mkdir(path)
+
+# Delete file or directory
+*delete_path(path)
+	fs_delete(path)
+
+# Check if path is a directory
+*is_directory(path)
+	fs_is_dir(path)
 
 # Read file as list of lines
 *read_lines(path)
-    content is fs_read(path)
-    split(content, "\n")
+	content is fs_read(path)
+	split(content, "\n")
 
 # ===== Path operations (pure string manipulation) =====
 
 # Get file extension (without dot)
 *extension(path)
-    parts is split(path, ".")
-    parts.length > 1 ? parts.get(parts.length - 1) ! ""
+	parts is split(path, ".")
+	parts.length > 1 ? parts.get(parts.length - 1) ! ""
 
 # Get filename from path
 *filename(path)
-    parts is split(path, "/")
-    parts.get(parts.length - 1)
+	parts is split(path, "/")
+	parts.get(parts.length - 1)
+
+# Get directory part of path
+*dirname(path)
+	parts is split(path, "/")
+	if parts.length > 1
+		# Join all but last
+		result is ""
+		i is 0
+		while i < parts.length - 1
+			if i > 0
+				result is result + "/"
+			result is result + parts.get(i)
+			i is i + 1
+		result
+	else
+		"."
+
+# Join path components
+*path_join(base, child)
+	if ends_with(base, "/")
+		base + child
+	else
+		base + "/" + child
 
 # Check if path ends with suffix
 *path_ends_with(path, suffix)
-    ends_with(path, suffix)
+	ends_with(path, suffix)
 
 # Check if path starts with prefix
 *path_starts_with(path, prefix)
-    starts_with(path, prefix)
+	starts_with(path, prefix)
 
 # ===== Console I/O =====
 
 # Log a message
 *println(msg)
-    log(msg)
+	log(msg)
 
+# Read a line from stdin
+*input()
+	stdin_read_line()
 
-
+# Read a line from stdin with a prompt
+*input_with_prompt(prompt)
+	log(prompt)
+	stdin_read_line()

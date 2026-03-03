@@ -33,6 +33,7 @@ pub enum TokenKind {
     KeywordTrue,
     KeywordFalse,
     KeywordIs,
+    KeywordIsnt,
     KeywordExtern,
     KeywordUnsafe,
     KeywordAsm,
@@ -43,6 +44,14 @@ pub enum TokenKind {
     KeywordTrait,
     KeywordWith,
     KeywordNone,
+    KeywordIf,
+    KeywordElif,
+    KeywordElse,
+    KeywordWhile,
+    KeywordFor,
+    KeywordIn,
+    KeywordBreak,
+    KeywordContinue,
     Placeholder(u32),
     Star,
     Ampersand,
@@ -66,7 +75,6 @@ pub enum TokenKind {
     GreaterEq,
     Less,
     LessEq,
-    Equals,
     LParen,
     RParen,
     LBracket,
@@ -237,26 +245,120 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
             '0'..='9' => {
                 let start = pos;
                 pos += ch_len;
+
+                // Check for radix prefix: 0x, 0b, 0o
+                if ch == '0' && pos < len {
+                    let next = source[pos..].chars().next().unwrap();
+                    match next {
+                        'x' | 'X' => {
+                            pos += 1; // consume 'x'
+                            let digit_start = pos;
+                            while pos < len {
+                                let c = source[pos..].chars().next().unwrap();
+                                if c.is_ascii_hexdigit() || c == '_' {
+                                    pos += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let digits: String = source[digit_start..pos].chars().filter(|c| *c != '_').collect();
+                            if digits.is_empty() {
+                                return Err(Diagnostic::new("hex literal requires at least one digit", Span::new(start, pos)));
+                            }
+                            let value = i64::from_str_radix(&digits, 16).map_err(|_| {
+                                Diagnostic::new("invalid hex literal", Span::new(start, pos))
+                            })?;
+                            tokens.push(Token::new(TokenKind::Integer(value), Span::new(start, pos)));
+                            continue;
+                        }
+                        'b' | 'B' => {
+                            // Disambiguate: 0b"..." is bytes literal starting with 0, 0b1010 is binary
+                            if pos + 1 < len {
+                                let after_b = source[pos + 1..].chars().next().unwrap();
+                                if after_b == '0' || after_b == '1' || after_b == '_' {
+                                    pos += 1; // consume 'b'
+                                    let digit_start = pos;
+                                    while pos < len {
+                                        let c = source[pos..].chars().next().unwrap();
+                                        if c == '0' || c == '1' || c == '_' {
+                                            pos += 1;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    let digits: String = source[digit_start..pos].chars().filter(|c| *c != '_').collect();
+                                    if digits.is_empty() {
+                                        return Err(Diagnostic::new("binary literal requires at least one digit", Span::new(start, pos)));
+                                    }
+                                    let value = i64::from_str_radix(&digits, 2).map_err(|_| {
+                                        Diagnostic::new("invalid binary literal", Span::new(start, pos))
+                                    })?;
+                                    tokens.push(Token::new(TokenKind::Integer(value), Span::new(start, pos)));
+                                    continue;
+                                }
+                            }
+                            // Not a binary literal — fall through to normal number parsing
+                        }
+                        'o' | 'O' => {
+                            pos += 1; // consume 'o'
+                            let digit_start = pos;
+                            while pos < len {
+                                let c = source[pos..].chars().next().unwrap();
+                                if ('0'..='7').contains(&c) || c == '_' {
+                                    pos += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let digits: String = source[digit_start..pos].chars().filter(|c| *c != '_').collect();
+                            if digits.is_empty() {
+                                return Err(Diagnostic::new("octal literal requires at least one digit", Span::new(start, pos)));
+                            }
+                            let value = i64::from_str_radix(&digits, 8).map_err(|_| {
+                                Diagnostic::new("invalid octal literal", Span::new(start, pos))
+                            })?;
+                            tokens.push(Token::new(TokenKind::Integer(value), Span::new(start, pos)));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Regular decimal number (with underscore separator support)
                 let mut has_dot = false;
                 while pos < len {
                     let c = source[pos..].chars().next().unwrap();
-                    if c.is_ascii_digit() {
+                    if c.is_ascii_digit() || c == '_' {
                         pos += 1;
                     } else if c == '.' && !has_dot {
-                        has_dot = true;
-                        pos += 1;
+                        // Peek ahead: if the character after '.' is a digit, it's a float.
+                        // Otherwise, it might be a method call like `42.method()`.
+                        if pos + 1 < len {
+                            let after_dot = source[pos + 1..].chars().next().unwrap();
+                            if after_dot.is_ascii_digit() {
+                                has_dot = true;
+                                pos += 1;
+                            } else {
+                                break;
+                            }
+                        } else {
+                        // Dot at end of input — treat as method access dot, not decimal point.
+                        // `123.` at EOF is an integer `123` followed by a dot token.
+                        break;
+                    }
                     } else {
                         break;
                     }
                 }
-                let slice = &source[start..pos];
+                let raw = &source[start..pos];
+                let cleaned: String = raw.chars().filter(|c| *c != '_').collect();
                 if has_dot {
-                    let value = slice.parse::<f64>().map_err(|_| {
+                    let value = cleaned.parse::<f64>().map_err(|_| {
                         Diagnostic::new("invalid float literal", Span::new(start, pos))
                     })?;
                     tokens.push(Token::new(TokenKind::Float(value), Span::new(start, pos)));
                 } else {
-                    let value = slice.parse::<i64>().map_err(|_| {
+                    let value = cleaned.parse::<i64>().map_err(|_| {
                         Diagnostic::new("invalid integer literal", Span::new(start, pos))
                     })?;
                     tokens.push(Token::new(TokenKind::Integer(value), Span::new(start, pos)));
@@ -299,9 +401,15 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                     'n' => b'\n',
                                     'r' => b'\r',
                                     't' => b'\t',
+                                    '0' => b'\0',
                                     '\\' => b'\\',
                                     '"' => b'"',
-                                    other => other as u8,
+                                    other => {
+                                        return Err(Diagnostic::new(
+                                            format!("unknown escape sequence `\\{other}`"),
+                                            Span::new(pos - 1, pos + other.len_utf8()),
+                                        ).with_help("Valid escapes are: \\n, \\r, \\t, \\0, \\\\\\\", \\\"."));
+                                    }
                                 };
                                 bytes.push(byte);
                                 pos += esc.len_utf8();
@@ -334,6 +442,7 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                     "true" => TokenKind::KeywordTrue,
                     "false" => TokenKind::KeywordFalse,
                     "is" => TokenKind::KeywordIs,
+                    "isnt" => TokenKind::KeywordIsnt,
                     "extern" => TokenKind::KeywordExtern,
                     "unsafe" => TokenKind::KeywordUnsafe,
                     "asm" => TokenKind::KeywordAsm,
@@ -344,6 +453,14 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                     "trait" => TokenKind::KeywordTrait,
                     "with" => TokenKind::KeywordWith,
                     "none" => TokenKind::KeywordNone,
+                    "if" => TokenKind::KeywordIf,
+                    "elif" => TokenKind::KeywordElif,
+                    "else" => TokenKind::KeywordElse,
+                    "while" => TokenKind::KeywordWhile,
+                    "for" => TokenKind::KeywordFor,
+                    "in" => TokenKind::KeywordIn,
+                    "break" => TokenKind::KeywordBreak,
+                    "continue" => TokenKind::KeywordContinue,
                     _ => TokenKind::Identifier(slice.to_string()),
                 };
                 tokens.push(Token::new(kind, Span::new(start, pos)));
@@ -369,15 +486,22 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                             ));
                         }
                         let esc = source[pos..].chars().next().unwrap();
-                        value.push(match esc {
+                        let ch = match esc {
                             'n' => '\n',
                             'r' => '\r',
                             't' => '\t',
+                            '0' => '\0',
                             '\\' => '\\',
                             '\'' => '\'',
                             '"' => '"',
-                            other => other,
-                        });
+                            other => {
+                                return Err(Diagnostic::new(
+                                    format!("unknown escape sequence `\\{other}`"),
+                                    Span::new(pos - 1, pos + other.len_utf8()),
+                                ).with_help("Valid escapes are: \\n, \\r, \\t, \\0, \\\\, \\', \\\"."));
+                            }
+                        };
+                        value.push(ch);
                         pos += esc.len_utf8();
                     } else {
                         value.push(c);
@@ -434,9 +558,15 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                 literal.push('\t');
                                 pos += 1;
                             }
+                            '0' => {
+                                literal.push('\0');
+                                pos += 1;
+                            }
                             other => {
-                                literal.push(other);
-                                pos += other.len_utf8();
+                                return Err(Diagnostic::new(
+                                    format!("unknown escape sequence `\\{other}`"),
+                                    Span::new(pos - 1, pos + other.len_utf8()),
+                                ).with_help("Valid escapes are: \\n, \\r, \\t, \\0, \\\\, \\{, \\}, \\', \\\"."));
                             }
                         }
                         continue;
@@ -641,11 +771,16 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                 if pos < len {
                     if let Some('=') = source[pos..].chars().next() {
                         pos += 1;
-                        tokens.push(Token::new(TokenKind::Equals, Span::new(start, pos)));
-                        continue;
+                        return Err(Diagnostic::new(
+                            "unexpected `==`; use `.equals()` for equality comparison or `is` for binding",
+                            Span::new(start, pos),
+                        ));
                     }
                 }
-                tokens.push(Token::new(TokenKind::Equals, Span::new(start, pos)));
+                return Err(Diagnostic::new(
+                    "unexpected `=`; use `is` for binding",
+                    Span::new(start, pos),
+                ));
             }
             other => {
                 return Err(

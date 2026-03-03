@@ -68,6 +68,8 @@ pub struct CodeGenerator<'ctx> {
     reference_fields: HashSet<(String, String)>,
     /// Maps enum constructor name to (enum_name, field_count) for ADT construction
     enum_constructors: HashMap<String, (String, usize)>,
+    /// Set of store constructor function names (e.g., "make_Counter")
+    store_constructors: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -115,6 +117,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             store_methods: HashMap::new(),
             reference_fields: HashSet::new(),
             enum_constructors: HashMap::new(),
+            store_constructors: HashSet::new(),
         }
     }
 
@@ -184,7 +187,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             let constructor_name = format!("make_{}", store.name);
             let ctor_type = self.runtime.value_ptr_type.fn_type(&[], false);
             let ctor_fn = self.module.add_function(&constructor_name, ctor_type, None);
-            self.functions.insert(constructor_name, ctor_fn);
+            self.functions.insert(constructor_name.clone(), ctor_fn);
+            self.store_constructors.insert(constructor_name);
             
             if store.is_actor {
                 // Declare message handler functions for each @method
@@ -236,6 +240,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                     (type_def.name.clone(), variant.fields.len())
                 );
             }
+            // Declare type methods (mirrors store method pattern)
+            for method in &type_def.methods {
+                if method.kind == FunctionKind::Method {
+                    let mangled = format!("{}_{}", type_def.name, method.name);
+                    let mut param_types: Vec<BasicMetadataTypeEnum> = 
+                        vec![self.runtime.value_ptr_type.into()]; // self
+                    for _ in 0..method.params.len() {
+                        param_types.push(self.runtime.value_ptr_type.into());
+                    }
+                    let fn_type = self.runtime.value_ptr_type.fn_type(&param_types, false);
+                    let llvm_fn = self.module.add_function(&mangled, fn_type, None);
+                    self.functions.insert(mangled.clone(), llvm_fn);
+                    self.store_methods.insert(method.name.clone(), (type_def.name.clone(), method.params.len()));
+                }
+            }
         }
         
         self.build_global_initializer(&model.globals)?;
@@ -264,6 +283,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if let Some(llvm_fn) = self.functions.get(&mangled) {
                             self.build_store_method_body(method, *llvm_fn)?;
                         }
+                    }
+                }
+            }
+        }
+        // Build type method bodies (same mechanism as store methods)
+        for type_def in &model.type_defs {
+            for method in &type_def.methods {
+                if method.kind == FunctionKind::Method {
+                    let mangled = format!("{}_{}", type_def.name, method.name);
+                    if let Some(llvm_fn) = self.functions.get(&mangled) {
+                        self.build_store_method_body(method, *llvm_fn)?;
                     }
                 }
             }
@@ -392,7 +422,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.ensure_globals_initialized();
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: llvm_fn,
+            loop_stack: Vec::new(),
         };
 
         // Parameters are Value* pointers - use them directly without wrapping
@@ -402,7 +434,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             // Parameter is already a Value* pointer
             let value_ptr = param.into_pointer_value();
-            ctx.variables.insert(param_ast.name.clone(), value_ptr);
+            self.store_variable(&mut ctx, &param_ast.name, value_ptr);
         }
 
         let block_value = self.emit_block(&mut ctx, &function.body)?;
@@ -423,20 +455,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.ensure_globals_initialized();
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: llvm_fn,
+            loop_stack: Vec::new(),
         };
 
         // First param is the state pointer (ValuePtr), inject as `self`
         let state_ptr = llvm_fn.get_nth_param(0).unwrap().into_pointer_value();
         // Store state directly as `self` - it's already a ValuePtr to the state Map
-        ctx.variables.insert("self".to_string(), state_ptr);
+        self.store_variable(&mut ctx, "self", state_ptr);
 
         // Remaining params are user params (starting at index 1) - now Value* pointers
         for (i, param_ast) in function.params.iter().enumerate() {
             let param = llvm_fn.get_nth_param((i + 1) as u32).unwrap();
             // Parameter is already a Value* pointer
             let value_ptr = param.into_pointer_value();
-            ctx.variables.insert(param_ast.name.clone(), value_ptr);
+            self.store_variable(&mut ctx, &param_ast.name, value_ptr);
         }
 
         let block_value = self.emit_block(&mut ctx, &function.body)?;
@@ -474,9 +508,224 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Statement::Return(expr, _) => {
                     let value = self.emit_expression(ctx, expr)?;
-                    let numeric = self.value_to_number(value);
-                    self.builder.build_return(Some(&numeric)).unwrap();
-                    return Ok(self.wrap_number(self.f64_type.const_float(0.0)));
+                    // Return Value* pointer directly — functions return Value*, not f64
+                    self.builder.build_return(Some(&value)).unwrap();
+                    // Return a null sentinel without emitting any LLVM instruction.
+                    // const_null() is a compile-time constant, so no instruction is added
+                    // after the `ret` terminator. This means get_terminator() correctly
+                    // identifies this block as terminated, and PHI/branch logic skips it.
+                    return Ok(self.runtime.value_ptr_type.const_null());
+                }
+                Statement::If { condition, body, elif_branches, else_body, .. } => {
+                    let function = ctx.function;
+                    let cond_value = self.emit_expression(ctx, condition)?;
+                    let cond_bool = self.value_to_bool(cond_value);
+
+                    let then_bb = self.context.append_basic_block(function, "if_then");
+                    let merge_bb = self.context.append_basic_block(function, "if_merge");
+
+                    // Track (value, source_block) pairs for PHI node
+                    let mut phi_incoming: Vec<(PointerValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+                    // Determine initial else target
+                    let first_else_bb = if elif_branches.is_empty() && else_body.is_none() {
+                        merge_bb
+                    } else {
+                        self.context.append_basic_block(function, "if_else")
+                    };
+                    self.builder.build_conditional_branch(cond_bool, then_bb, first_else_bb).unwrap();
+
+                    // Emit then body
+                    self.builder.position_at_end(then_bb);
+                    let then_value = self.emit_block(ctx, body)?;
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        let then_end_bb = self.builder.get_insert_block().unwrap();
+                        phi_incoming.push((then_value, then_end_bb));
+                        self.builder.build_unconditional_branch(merge_bb).unwrap();
+                    }
+
+                    // Emit elif/else chain
+                    if !elif_branches.is_empty() || else_body.is_some() {
+                        let mut current_else_bb = first_else_bb;
+                        for (i, (elif_cond, elif_body)) in elif_branches.iter().enumerate() {
+                            self.builder.position_at_end(current_else_bb);
+                            let elif_cond_val = self.emit_expression(ctx, elif_cond)?;
+                            let elif_cond_bool = self.value_to_bool(elif_cond_val);
+
+                            let elif_then_bb = self.context.append_basic_block(function, &format!("elif_then_{i}"));
+                            let next_else_bb = if i + 1 < elif_branches.len() || else_body.is_some() {
+                                self.context.append_basic_block(function, &format!("elif_else_{i}"))
+                            } else {
+                                merge_bb
+                            };
+                            self.builder.build_conditional_branch(elif_cond_bool, elif_then_bb, next_else_bb).unwrap();
+
+                            self.builder.position_at_end(elif_then_bb);
+                            let elif_value = self.emit_block(ctx, elif_body)?;
+                            if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                                let elif_end_bb = self.builder.get_insert_block().unwrap();
+                                phi_incoming.push((elif_value, elif_end_bb));
+                                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                            }
+                            current_else_bb = next_else_bb;
+                        }
+                        if let Some(else_block) = else_body {
+                            self.builder.position_at_end(current_else_bb);
+                            let else_value = self.emit_block(ctx, else_block)?;
+                            if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                                let else_end_bb = self.builder.get_insert_block().unwrap();
+                                phi_incoming.push((else_value, else_end_bb));
+                                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                            }
+                        }
+                    }
+
+                    // If no else body, the implicit fall-through produces unit
+                    if else_body.is_none() && (elif_branches.is_empty() || elif_branches.last().is_some()) {
+                        // The merge_bb is the fall-through from the last condition check
+                        // when there's no else block. We need to add a unit value for that path.
+                        // Actually, we need a dedicated block for this since merge_bb is the target.
+                        // The fall-through already branches to merge_bb via the conditional branch.
+                        // We handle this by checking if merge_bb has predecessors without phi entries.
+                    }
+
+                    self.builder.position_at_end(merge_bb);
+
+                    // Build PHI node if we have incoming values from branches
+                    if !phi_incoming.is_empty() && else_body.is_some() {
+                        let phi = self
+                            .builder
+                            .build_phi(self.runtime.value_ptr_type, "if_phi")
+                            .unwrap();
+                        for (val, bb) in &phi_incoming {
+                            phi.add_incoming(&[(val as &dyn BasicValue<'ctx>, *bb)]);
+                        }
+                        // Store the if-expression result as __if_result for potential use
+                        let if_result = phi.as_basic_value().into_pointer_value();
+                        self.store_variable(ctx, "__if_result", if_result);
+                    }
+                }
+                Statement::While { condition, body, .. } => {
+                    let function = ctx.function;
+                    let loop_header = self.context.append_basic_block(function, "while_cond");
+                    let loop_body = self.context.append_basic_block(function, "while_body");
+                    let loop_exit = self.context.append_basic_block(function, "while_exit");
+
+                    self.builder.build_unconditional_branch(loop_header).unwrap();
+
+                    // Condition check
+                    self.builder.position_at_end(loop_header);
+                    let cond_value = self.emit_expression(ctx, condition)?;
+                    let cond_bool = self.value_to_bool(cond_value);
+                    self.builder.build_conditional_branch(cond_bool, loop_body, loop_exit).unwrap();
+
+                    // Body
+                    self.builder.position_at_end(loop_body);
+                    ctx.loop_stack.push((loop_header, loop_exit));
+                    self.emit_block(ctx, body)?;
+                    ctx.loop_stack.pop();
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+
+                    self.builder.position_at_end(loop_exit);
+                }
+                Statement::For { variable, iterable, body, .. } => {
+                    let function = ctx.function;
+                    let iter_value = self.emit_expression(ctx, iterable)?;
+                    // Create iterator from the iterable (works for lists and maps)
+                    let iter = self.call_runtime_ptr(
+                        self.runtime.value_iter,
+                        &[iter_value.into()],
+                        "for_iter",
+                    );
+
+                    let loop_header = self.context.append_basic_block(function, "for_cond");
+                    let loop_body = self.context.append_basic_block(function, "for_body");
+                    let loop_exit = self.context.append_basic_block(function, "for_exit");
+
+                    self.builder.build_unconditional_branch(loop_header).unwrap();
+
+                    // Get next element and check if iteration is done (Unit tag == 7)
+                    self.builder.position_at_end(loop_header);
+                    let elem = self.call_runtime_ptr(
+                        self.runtime.value_iter_next,
+                        &[iter.into()],
+                        "for_next",
+                    );
+                    // Read the tag byte at offset 0 of the Value struct
+                    let tag_ptr = self.builder.build_pointer_cast(
+                        elem,
+                        self.i8_type.ptr_type(AddressSpace::default()),
+                        "tag_ptr",
+                    ).unwrap();
+                    let tag_val = self.builder.build_load(self.i8_type, tag_ptr, "tag_val")
+                        .unwrap().into_int_value();
+                    let unit_tag = self.i8_type.const_int(7, false); // Unit = 7
+                    let is_done = self.builder.build_int_compare(
+                        IntPredicate::EQ, tag_val, unit_tag, "for_done",
+                    ).unwrap();
+                    self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+                    // Body: bind loop variable
+                    self.builder.position_at_end(loop_body);
+                    self.store_variable(ctx, variable, elem);
+                    ctx.loop_stack.push((loop_header, loop_exit));
+                    self.emit_block(ctx, body)?;
+                    ctx.loop_stack.pop();
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+
+                    // Release the iterator after the loop
+                    self.builder.position_at_end(loop_exit);
+                    self.call_runtime_void(self.runtime.value_release, &[iter.into()], "release_iter");
+                }
+                Statement::FieldAssign { target, field, value, .. } => {
+                    // self.field is value → coral_map_set(self, "field", value)
+                    let target_value = self.emit_expression(ctx, &target)?;
+                    let key_value = self.emit_string_literal(&field);
+                    let new_value = self.emit_expression(ctx, &value)?;
+                    
+                    // Handle reference field retain/release for proper refcounting
+                    if let Expression::Identifier(name, _) = &target {
+                        if name == "self" {
+                            let is_ref = self.reference_fields.iter().any(|(_, f)| f == field.as_str());
+                            if is_ref {
+                                // Release old value before setting new one
+                                let old_value = self.call_runtime_ptr(
+                                    self.runtime.map_get,
+                                    &[target_value.into(), key_value.into()],
+                                    "old_field_value",
+                                );
+                                self.call_runtime_void(self.runtime.value_release, &[old_value.into()], "release_old");
+                                self.call_runtime_void(self.runtime.value_retain, &[new_value.into()], "retain_new");
+                            }
+                        }
+                    }
+                    
+                    self.call_runtime_ptr(
+                        self.runtime.map_set,
+                        &[target_value.into(), key_value.into(), new_value.into()],
+                        "map_set_field",
+                    );
+                }
+                Statement::Break(_) => {
+                    if let Some(&(_, loop_exit)) = ctx.loop_stack.last() {
+                        self.builder.build_unconditional_branch(loop_exit).unwrap();
+                    }
+                    // After break, no more code in this block is reachable
+                    let function = ctx.function;
+                    let unreachable_bb = self.context.append_basic_block(function, "after_break");
+                    self.builder.position_at_end(unreachable_bb);
+                }
+                Statement::Continue(_) => {
+                    if let Some(&(loop_header, _)) = ctx.loop_stack.last() {
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+                    let function = ctx.function;
+                    let unreachable_bb = self.context.append_basic_block(function, "after_continue");
+                    self.builder.position_at_end(unreachable_bb);
                 }
             }
         }
@@ -619,7 +868,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             ));
                         }
                         self.emit_enum_constructor(ctx, name, args)
-                    } else if ctx.variables.contains_key(name) {
+                    } else if ctx.variables.contains_key(name) || ctx.variable_allocas.contains_key(name) {
                         // Local variable - might be a closure stored in a binding.
                         let callee_value = self.emit_expression(ctx, callee)?;
                         self.emit_closure_call(ctx, callee_value, args)
@@ -636,6 +885,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::Member { target, property, span } =>
                 self.emit_member_expression(ctx, target, property, *span),
+            Expression::Index { target, index, span: _ } => {
+                let target_val = self.emit_expression(ctx, target)?;
+                let index_val = self.emit_expression(ctx, index)?;
+                // For alpha: desugar `x[i]` to coral_list_get (handles numeric indices
+                // on lists). Map subscript `m[key]` also works since coral_list_get
+                // will return unit for non-list targets — a proper coral_subscript
+                // dispatcher can be added later.
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_get,
+                    &[target_val.into(), index_val.into()],
+                    "subscript",
+                ))
+            }
             Expression::Ternary {
                 condition,
                 then_branch,
@@ -1080,6 +1342,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "value_equals",
                 ))
             }
+            // x.not_equals(y) - value inequality comparison
+            "not_equals" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("not_equals expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_not_equals,
+                    &[target_value.into(), arg_value.into()],
+                    "value_not_equals",
+                ))
+            }
             // x.not() - boolean negation
             "not" => {
                 if !args.is_empty() {
@@ -1264,6 +1539,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "list_get",
                 ))
             }
+            "length" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("length does not take arguments", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_length,
+                    &[target_value.into()],
+                    "value_length",
+                ))
+            }
             _ => {
                 // Check if this is a store method call
                 if let Some((store_name, param_count)) = self.store_methods.get(property).cloned() {
@@ -1370,6 +1656,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let args = &[lhs.into(), rhs.into()];
             return Ok(self.call_runtime_ptr(self.runtime.value_equals, args, "value_equals"));
         }
+        if matches!(op, BinaryOp::NotEquals) {
+            let args = &[lhs.into(), rhs.into()];
+            return Ok(self.call_runtime_ptr(self.runtime.value_not_equals, args, "value_not_equals"));
+        }
 
         if matches!(op, BinaryOp::BitAnd) {
             let args = &[lhs.into(), rhs.into()];
@@ -1420,7 +1710,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_float_compare(FloatPredicate::OLE, lhs_num, rhs_num, "le")
                     .unwrap(),
             ),
-            Equals | And | Or => unreachable!(),
+            Equals | NotEquals | And | Or => unreachable!(),
         })
     }
 
@@ -1479,6 +1769,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(rhs_bb);
         let right_value = self.emit_expression(ctx, right)?;
         let right_bool = self.value_to_bool(right_value);
+        // Capture the actual current block — nested and/or may have created sub-blocks
+        let rhs_end_bb = self.builder.get_insert_block().unwrap();
         self.builder
             .build_unconditional_branch(cont_bb)
             .unwrap();
@@ -1490,7 +1782,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap();
         phi.add_incoming(&[
             (&short_value as &dyn BasicValue<'ctx>, short_bb),
-            (&right_bool as &dyn BasicValue<'ctx>, rhs_bb),
+            (&right_bool as &dyn BasicValue<'ctx>, rhs_end_bb),
         ]);
         let bool_value = phi.as_basic_value().into_int_value();
         Ok(self.wrap_bool(bool_value))
@@ -1660,8 +1952,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.call_runtime_void(self.runtime.value_release, &[literal.into()], "match_str_drop");
                 Ok(as_bool)
             }
-            MatchPattern::List(items) => {
-                let list_lit = self.emit_list_literal(ctx, items)?;
+            MatchPattern::List(patterns) => {
+                // Convert patterns to expressions for equality comparison
+                let items: Vec<Expression> = patterns.iter().map(|p| match p {
+                    MatchPattern::Integer(n) => Expression::Integer(*n, Span::new(0, 0)),
+                    MatchPattern::Bool(b) => Expression::Bool(*b, Span::new(0, 0)),
+                    MatchPattern::String(s) => Expression::String(s.clone(), Span::new(0, 0)),
+                    MatchPattern::Identifier(name) => Expression::Identifier(name.clone(), Span::new(0, 0)),
+                    _ => Expression::Identifier("_".to_string(), Span::new(0, 0)),
+                }).collect();
+                let list_lit = self.emit_list_literal(ctx, &items)?;
                 let eq = self.call_runtime_ptr(
                     self.runtime.value_equals,
                     &[match_value.into(), list_lit.into()],
@@ -1767,7 +2067,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         match pattern {
             MatchPattern::Identifier(name) => {
                 self.call_runtime_void(self.runtime.value_retain, &[value.into()], "retain_match_binding");
-                ctx.variables.insert(name.clone(), value);
+                self.store_variable(ctx, name, value);
             }
             MatchPattern::Constructor { fields, .. } => {
                 // Extract field values and recursively bind them
@@ -1796,6 +2096,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         ctx: &FunctionContext<'ctx>,
         name: &str,
     ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        // Check alloca-based variables first (these can be mutated in loops)
+        if let Some(alloca) = ctx.variable_allocas.get(name) {
+            let loaded = self
+                .builder
+                .build_load(
+                    self.runtime.value_ptr_type,
+                    *alloca,
+                    &format!("load_{name}"),
+                )
+                .unwrap()
+                .into_pointer_value();
+            return Ok(loaded);
+        }
         if let Some(ptr) = ctx.variables.get(name) {
             return Ok(*ptr);
         }
@@ -1819,6 +2132,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return self.emit_enum_constructor_nullary(name);
             }
         }
+        // Check if this is a named function used as a value (function reference).
+        // Wrap it in a closure so it can be passed around and invoked via coral_closure_invoke.
+        if let Some(target_fn) = self.functions.get(name).copied() {
+            return self.emit_function_as_closure(ctx, name, target_fn);
+        }
         Err(Diagnostic::new(
             format!("unknown variable `{name}`"),
             Span::new(0, 0),
@@ -1831,7 +2149,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         value: PointerValue<'ctx>,
     ) {
-        ctx.variables.insert(name.to_string(), value);
+        // If there's already an alloca for this variable, store to it (mutation/rebinding)
+        if let Some(alloca) = ctx.variable_allocas.get(name) {
+            self.builder.build_store(*alloca, value).unwrap();
+            return;
+        }
+        // Create an alloca for the variable in the function's entry block.
+        // This ensures proper SSA behavior for variables that may be rebound in loops.
+        let entry_bb = ctx.function.get_first_basic_block().unwrap();
+        let current_bb = self.builder.get_insert_block().unwrap();
+        
+        // Position at the start of the entry block for the alloca
+        if let Some(first_instr) = entry_bb.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        let alloca = self
+            .builder
+            .build_alloca(self.runtime.value_ptr_type, &format!("{name}_ptr"))
+            .unwrap();
+        
+        // Restore position and store the value
+        self.builder.position_at_end(current_bb);
+        self.builder.build_store(alloca, value).unwrap();
+        ctx.variable_allocas.insert(name.to_string(), alloca);
     }
 
     fn wrap_number(&mut self, value: FloatValue<'ctx>) -> PointerValue<'ctx> {
@@ -2110,6 +2452,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.contains_placeholder(k) || self.contains_placeholder(v)
             }),
             Expression::Member { target, .. } => self.contains_placeholder(target),
+            Expression::Index { target, index, .. } => {
+                self.contains_placeholder(target) || self.contains_placeholder(index)
+            }
             Expression::Ternary { condition, then_branch, else_branch, .. } => {
                 self.contains_placeholder(condition)
                     || self.contains_placeholder(then_branch)
@@ -2120,6 +2465,42 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Statement::Binding(b) => self.contains_placeholder(&b.value),
                     Statement::Expression(e) => self.contains_placeholder(e),
                     Statement::Return(e, _) => self.contains_placeholder(e),
+                    Statement::If { condition, body, elif_branches, else_body, .. } => {
+                        self.contains_placeholder(condition)
+                            || body.statements.iter().any(|s2| match s2 {
+                                Statement::Expression(e) => self.contains_placeholder(e),
+                                _ => false,
+                            })
+                            || elif_branches.iter().any(|(cond, blk)| {
+                                self.contains_placeholder(cond)
+                                    || blk.statements.iter().any(|s2| match s2 {
+                                        Statement::Expression(e) => self.contains_placeholder(e),
+                                        _ => false,
+                                    })
+                            })
+                            || else_body.as_ref().map_or(false, |blk| {
+                                blk.statements.iter().any(|s2| match s2 {
+                                    Statement::Expression(e) => self.contains_placeholder(e),
+                                    _ => false,
+                                })
+                            })
+                    }
+                    Statement::While { condition, body, .. } => {
+                        self.contains_placeholder(condition)
+                            || body.statements.iter().any(|s2| match s2 {
+                                Statement::Expression(e) => self.contains_placeholder(e),
+                                _ => false,
+                            })
+                    }
+                    Statement::For { iterable, body, .. } => {
+                        self.contains_placeholder(iterable)
+                            || body.statements.iter().any(|s2| match s2 {
+                                Statement::Expression(e) => self.contains_placeholder(e),
+                                _ => false,
+                            })
+                    }
+                    Statement::Break(_) | Statement::Continue(_) => false,
+                    Statement::FieldAssign { value, .. } => self.contains_placeholder(value),
                 }) || body.value.as_ref().map_or(false, |v| self.contains_placeholder(v))
             }
             _ => false,
@@ -2159,6 +2540,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Member { target, property, span } => Expression::Member {
                 target: Box::new(self.replace_placeholder_with(target, replacement)),
                 property: property.clone(),
+                span: *span,
+            },
+            Expression::Index { target, index, span } => Expression::Index {
+                target: Box::new(self.replace_placeholder_with(target, replacement)),
+                index: Box::new(self.replace_placeholder_with(index, replacement)),
                 span: *span,
             },
             Expression::Ternary { condition, then_branch, else_branch, span } => Expression::Ternary {
@@ -2207,8 +2593,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let capture_names = self.determine_lambda_captures(params, body, ctx);
         let mut capture_values = Vec::new();
         for name in &capture_names {
-            if let Some(value) = ctx.variables.get(name) {
-                capture_values.push(*value);
+            if let Ok(value) = self.load_variable(ctx, name) {
+                capture_values.push(value);
             }
         }
 
@@ -2261,6 +2647,88 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap_or_else(|| release_ptr_type.const_null());
         let args = &[invoke_ptr.into(), release_ptr.into(), env_ptr.into()];
         Ok(self.call_runtime_ptr(self.runtime.make_closure, args, "make_closure"))
+    }
+
+    /// Wrap a named function in a closure so it can be used as a first-class value.
+    /// Generates a thunk function matching the closure invoke signature that
+    /// extracts args from the args array and delegates to the original function.
+    fn emit_function_as_closure(
+        &mut self,
+        _ctx: &FunctionContext<'ctx>,
+        name: &str,
+        target_fn: FunctionValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        let param_count = target_fn.count_params();
+        let saved_block = self.builder.get_insert_block();
+
+        // Generate a thunk: void thunk(i8* env, Value** args, i64 nargs, Value** out)
+        let thunk_name = format!("__fn_thunk_{name}");
+        let thunk_fn = self.module.add_function(
+            &thunk_name,
+            self.runtime.closure_invoke_type,
+            None,
+        );
+        let entry = self.context.append_basic_block(thunk_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        let args_param = thunk_fn.get_nth_param(1).unwrap().into_pointer_value();
+        let out_param = thunk_fn.get_nth_param(3).unwrap().into_pointer_value();
+
+        // Extract each argument from the args array
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for i in 0..param_count {
+            let index = self.usize_type.const_int(i as u64, false);
+            let arg_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.runtime.value_ptr_type,
+                        args_param,
+                        &[index],
+                        &format!("arg_ptr_{i}"),
+                    )
+                    .unwrap()
+            };
+            let arg_val = self
+                .builder
+                .build_load(
+                    self.runtime.value_ptr_type,
+                    arg_ptr,
+                    &format!("arg_{i}"),
+                )
+                .unwrap()
+                .into_pointer_value();
+            call_args.push(arg_val.into());
+        }
+
+        // Call the original function
+        let result = self
+            .builder
+            .build_call(target_fn, &call_args, "thunk_call")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        // Store result and return
+        self.builder.build_store(out_param, result).unwrap();
+        self.builder.build_return(None).unwrap();
+
+        // Restore builder position
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+
+        // Create the closure with nil env and nil release
+        let invoke_ptr = thunk_fn.as_global_value().as_pointer_value();
+        let release_ptr_type = self
+            .runtime
+            .closure_release_type
+            .ptr_type(inkwell::AddressSpace::default());
+        let null_release = release_ptr_type.const_null();
+        let null_env = self.runtime.value_ptr_type.const_null();
+        let closure_args = &[invoke_ptr.into(), null_release.into(), null_env.into()];
+        Ok(self.call_runtime_ptr(self.runtime.make_closure, closure_args, "fn_as_closure"))
     }
 
     /// Emit code to construct an enum (ADT) variant value.
@@ -2966,9 +3434,445 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "math_atan2_call",
                 )))
             }
+            // Process/environment
+            "process_args" | "args" => {
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.process_args,
+                    &[],
+                    "process_args_call",
+                )))
+            }
+            "process_exit" | "exit" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("exit expects one argument (exit code)", span));
+                }
+                let code = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.process_exit,
+                    &[code.into()],
+                    "process_exit_call",
+                )))
+            }
+            "env_get" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("env_get expects one argument", span));
+                }
+                let name_val = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.env_get,
+                    &[name_val.into()],
+                    "env_get_call",
+                )))
+            }
+            "env_set" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("env_set expects two arguments (name, value)", span));
+                }
+                let name_val = self.emit_expression(ctx, &args[0])?;
+                let val = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.env_set,
+                    &[name_val.into(), val.into()],
+                    "env_set_call",
+                )))
+            }
+            // File I/O extensions
+            "fs_append" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("fs_append expects path and data", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                let data = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_append,
+                    &[path.into(), data.into()],
+                    "fs_append_call",
+                )))
+            }
+            "fs_read_dir" | "read_dir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_read_dir expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_read_dir,
+                    &[path.into()],
+                    "fs_read_dir_call",
+                )))
+            }
+            "fs_mkdir" | "mkdir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_mkdir expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_mkdir,
+                    &[path.into()],
+                    "fs_mkdir_call",
+                )))
+            }
+            "fs_delete" | "delete" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_delete expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_delete,
+                    &[path.into()],
+                    "fs_delete_call",
+                )))
+            }
+            "fs_is_dir" | "is_dir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_is_dir expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_is_dir,
+                    &[path.into()],
+                    "fs_is_dir_call",
+                )))
+            }
+            "stdin_read_line" | "read_line" => {
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.stdin_read_line,
+                    &[],
+                    "stdin_read_line_call",
+                )))
+            }
+            // List extensions
+            "list_contains" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_contains expects list and value", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_contains,
+                    &[list.into(), needle.into()],
+                    "list_contains_call",
+                )))
+            }
+            "list_index_of" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_index_of expects list and value", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_index_of,
+                    &[list.into(), needle.into()],
+                    "list_index_of_call",
+                )))
+            }
+            "list_reverse" | "reverse" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list_reverse expects one argument", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_reverse,
+                    &[list.into()],
+                    "list_reverse_call",
+                )))
+            }
+            "list_slice" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("list_slice expects list, start, end", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let start = self.emit_expression(ctx, &args[1])?;
+                let end = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_slice,
+                    &[list.into(), start.into(), end.into()],
+                    "list_slice_call",
+                )))
+            }
+            "list_sort" | "sort" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list_sort expects one argument", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_sort,
+                    &[list.into()],
+                    "list_sort_call",
+                )))
+            }
+            "list_join" | "join" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_join expects list and separator", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let sep = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_join,
+                    &[list.into(), sep.into()],
+                    "list_join_call",
+                )))
+            }
+            "list_concat" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_concat expects two lists", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_concat,
+                    &[a.into(), b.into()],
+                    "list_concat_call",
+                )))
+            }
+            // Map extensions
+            "map_remove" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("map_remove expects map and key", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                let key = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_remove,
+                    &[map.into(), key.into()],
+                    "map_remove_call",
+                )))
+            }
+            "map_values" | "values" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("map_values expects one argument", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_values,
+                    &[map.into()],
+                    "map_values_call",
+                )))
+            }
+            "map_entries" | "entries" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("map_entries expects one argument", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_entries,
+                    &[map.into()],
+                    "map_entries_call",
+                )))
+            }
+            "map_has_key" | "has_key" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("map_has_key expects map and key", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                let key = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_has_key,
+                    &[map.into(), key.into()],
+                    "map_has_key_call",
+                )))
+            }
+            "map_merge" | "merge" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("map_merge expects two maps", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_merge,
+                    &[a.into(), b.into()],
+                    "map_merge_call",
+                )))
+            }
+            // Bytes extensions
+            "bytes_get" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("bytes_get expects bytes and index", span));
+                }
+                let b = self.emit_expression(ctx, &args[0])?;
+                let idx = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_get,
+                    &[b.into(), idx.into()],
+                    "bytes_get_call",
+                )))
+            }
+            "bytes_from_string" | "to_bytes" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("bytes_from_string expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_from_string,
+                    &[s.into()],
+                    "bytes_from_string_call",
+                )))
+            }
+            "bytes_to_string" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("bytes_to_string expects one argument", span));
+                }
+                let b = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_to_string,
+                    &[b.into()],
+                    "bytes_to_string_call",
+                )))
+            }
+            "bytes_slice" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("bytes_slice expects bytes, start, end", span));
+                }
+                let b = self.emit_expression(ctx, &args[0])?;
+                let start = self.emit_expression(ctx, &args[1])?;
+                let end = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_slice_val,
+                    &[b.into(), start.into(), end.into()],
+                    "bytes_slice_call",
+                )))
+            }
+            // Type reflection
+            "type_of" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("type_of expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.type_of,
+                    &[v.into()],
+                    "type_of_call",
+                )))
+            }
+            // Character operations
+            "ord" | "string_ord" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("ord expects one string argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_ord,
+                    &[s.into()],
+                    "ord_call",
+                )))
+            }
+            "chr" | "string_chr" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("chr expects one number argument", span));
+                }
+                let code = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_chr,
+                    &[code.into()],
+                    "chr_call",
+                )))
+            }
+            "string_compare" | "strcmp" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_compare expects two string arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_compare,
+                    &[a.into(), b.into()],
+                    "strcmp_call",
+                )))
+            }
+            // Error checking builtins
+            "is_err" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("is_err expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let is_err = self.builder
+                    .build_call(self.runtime.is_err, &[v.into()], "is_err_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_err_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_err,
+                    self.context.i8_type().const_zero(),
+                    "is_err_bool",
+                ).unwrap();
+                Ok(Some(self.wrap_bool(is_err_bool)))
+            }
+            "is_ok" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("is_ok expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let is_ok = self.builder
+                    .build_call(self.runtime.is_ok, &[v.into()], "is_ok_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_ok_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_ok,
+                    self.context.i8_type().const_zero(),
+                    "is_ok_bool",
+                ).unwrap();
+                Ok(Some(self.wrap_bool(is_ok_bool)))
+            }
+            "is_absent" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("is_absent expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let is_absent = self.builder
+                    .build_call(self.runtime.is_absent, &[v.into()], "is_absent_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_absent_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_absent,
+                    self.context.i8_type().const_zero(),
+                    "is_absent_bool",
+                ).unwrap();
+                Ok(Some(self.wrap_bool(is_absent_bool)))
+            }
+            "error_name" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("error_name expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.error_name,
+                    &[v.into()],
+                    "error_name_call",
+                )))
+            }
+            "error_code" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("error_code expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let code_i32 = self.builder
+                    .build_call(self.runtime.error_code, &[v.into()], "error_code_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                // Convert i32 to f64 for wrap_number
+                let code_f64 = self.builder.build_signed_int_to_float(
+                    code_i32,
+                    self.context.f64_type(),
+                    "code_f64",
+                ).unwrap();
+                Ok(Some(self.wrap_number(code_f64)))
+            }
             _ => {
-                // Check if it's an actor constructor
-                if name.starts_with("make_") && self.functions.contains_key(name) {
+                // Check if it's a store/actor constructor (not arbitrary make_* functions)
+                if self.store_constructors.contains(name) {
                     let ctor_fn = self.functions[name];
                     let call = self.builder.build_call(ctor_fn, &[], "actor_ctor").unwrap();
                     let handle = call.try_as_basic_value().left()
@@ -2988,7 +3892,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         body: &Block,
         ctx: &FunctionContext<'ctx>,
     ) -> Vec<String> {
-        let available: HashSet<String> = ctx.variables.keys().cloned().collect();
+        let mut available: HashSet<String> = ctx.variables.keys().cloned().collect();
+        available.extend(ctx.variable_allocas.keys().cloned());
         let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         let mut captures = Vec::new();
         let mut seen = HashSet::new();
@@ -3031,6 +3936,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                     captures,
                     seen,
                 ),
+                Statement::If { condition, body, elif_branches, else_body, .. } => {
+                    self.collect_captures_expr(condition, available, &mut locals, captures, seen);
+                    self.collect_captures_block(body, available, &mut locals, captures, seen);
+                    for (cond, blk) in elif_branches {
+                        self.collect_captures_expr(cond, available, &mut locals, captures, seen);
+                        self.collect_captures_block(blk, available, &mut locals, captures, seen);
+                    }
+                    if let Some(else_blk) = else_body {
+                        self.collect_captures_block(else_blk, available, &mut locals, captures, seen);
+                    }
+                }
+                Statement::While { condition, body, .. } => {
+                    self.collect_captures_expr(condition, available, &mut locals, captures, seen);
+                    self.collect_captures_block(body, available, &mut locals, captures, seen);
+                }
+                Statement::For { variable, iterable, body, .. } => {
+                    self.collect_captures_expr(iterable, available, &mut locals, captures, seen);
+                    locals.insert(variable.clone());
+                    self.collect_captures_block(body, available, &mut locals, captures, seen);
+                }
+                Statement::Break(_) | Statement::Continue(_) => {}
+                Statement::FieldAssign { target, value, .. } => {
+                    self.collect_captures_expr(target, available, &mut locals, captures, seen);
+                    self.collect_captures_expr(value, available, &mut locals, captures, seen);
+                }
             }
         }
         if let Some(value) = &block.value {
@@ -3078,6 +4008,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::Member { target, .. } =>
                 self.collect_captures_expr(target, available, locals, captures, seen),
+            Expression::Index { target, index, .. } => {
+                self.collect_captures_expr(target, available, locals, captures, seen);
+                self.collect_captures_expr(index, available, locals, captures, seen);
+            }
             Expression::Ternary {
                 condition,
                 then_branch,
@@ -3148,7 +4082,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut lambda_ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: invoke_fn,
+            loop_stack: Vec::new(),
         };
 
         if let Some(struct_type) = env_struct {
@@ -3180,7 +4116,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         .unwrap()
                         .into_pointer_value();
-                    lambda_ctx.variables.insert(name.clone(), value);
+                    lambda_ctx.variable_allocas.insert(name.clone(), {
+                        let alloca = self.builder.build_alloca(self.runtime.value_ptr_type, &format!("{name}_ptr")).unwrap();
+                        self.builder.build_store(alloca, value).unwrap();
+                        alloca
+                    });
                 }
             }
         }
@@ -3206,7 +4146,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .unwrap()
                 .into_pointer_value();
-            lambda_ctx.variables.insert(param.name.clone(), arg_value);
+            self.store_variable(&mut lambda_ctx, &param.name, arg_value);
         }
 
     let result = self.emit_block(&mut lambda_ctx, body)?;
@@ -3420,7 +4360,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: init_fn,
+            loop_stack: Vec::new(),
         };
 
         for binding in globals {
@@ -3446,11 +4388,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.ensure_globals_initialized();
 
         // 1. Create state Map with field defaults
-        let state_map = self.call_runtime_ptr(self.runtime.make_map, &[], "actor_state");
+        let null_entries = self.runtime.map_entry_type
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let zero_len = self.usize_type.const_zero();
+        let state_map = self.call_runtime_ptr(self.runtime.make_map, &[null_entries.into(), zero_len.into()], "actor_state");
         // Emit a dummy context for field evaluation
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: ctor_fn,
+            loop_stack: Vec::new(),
         };
         for field in &store.fields {
             let key = self.emit_string_literal(&field.name);
@@ -3574,111 +4522,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
-        // For small handler counts (<=4), use sequential comparison
-        // For larger counts, use hash-based switch
+        // Sequential dispatch: compare message name against each handler.
+        // (Hash-based dispatch removed due to compile-time/runtime hash mismatch
+        //  and value_hash return-type incompatibility with call_runtime_ptr.)
         let done_bb = self.context.append_basic_block(invoke_fn, "msg_done");
 
-        if handlers.len() <= 4 {
-            // Sequential dispatch for small handler sets
-            let mut current_bb = handler_entry;
-            for method in &handlers {
-                let match_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_match", method.name));
-                let next_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_next", method.name));
+        let mut current_bb = handler_entry;
+        for method in &handlers {
+            let match_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_match", method.name));
+            let next_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_next", method.name));
 
-                self.builder.position_at_end(current_bb);
-                let method_name = self.emit_string_literal(&method.name);
-                let eq = self.call_runtime_ptr(
-                    self.runtime.value_equals,
-                    &[name_field.into(), method_name.into()],
-                    "msg_name_eq",
-                );
-                let is_match = self.value_to_bool(eq);
-                self.builder
-                    .build_conditional_branch(is_match, match_bb, next_bb)
-                    .unwrap();
-
-                self.builder.position_at_end(match_bb);
-                let mangled = format!("{}_{}", store.name, method.name);
-                if let Some(target_fn) = self.functions.get(&mangled).copied() {
-                    let mut args: Vec<BasicMetadataValueEnum> = vec![state.into()];
-                    if !method.params.is_empty() {
-                        args.push(self.value_to_number(data_field).into());
-                    }
-                    let _ = self.builder.build_call(target_fn, &args, "call_msg_fn");
-                }
-                self.builder.build_unconditional_branch(done_bb).unwrap();
-                current_bb = next_bb;
-            }
             self.builder.position_at_end(current_bb);
-            self.builder.build_unconditional_branch(done_bb).unwrap();
-        } else {
-            // Hash-based dispatch for larger handler sets
-            // Compute hash of message name and use switch statement
-            let hash = self.call_runtime_ptr(
-                self.runtime.value_hash,
-                &[name_field.into()],
-                "msg_name_hash",
+            let method_name = self.emit_string_literal(&method.name);
+            let eq = self.call_runtime_ptr(
+                self.runtime.value_equals,
+                &[name_field.into(), method_name.into()],
+                "msg_name_eq",
             );
-            // value_hash returns a Value (tagged number), extract the raw f64 and convert to int
-            let hash_num = self.value_to_number(hash);
-            let hash_int = self.builder.build_float_to_unsigned_int(
-                hash_num,
-                self.usize_type,
-                "hash_int",
-            ).unwrap();
+            let is_match = self.value_to_bool(eq);
+            self.builder
+                .build_conditional_branch(is_match, match_bb, next_bb)
+                .unwrap();
 
-            // Build dispatch table: map hash values to handler blocks
-            let default_bb = self.context.append_basic_block(invoke_fn, "msg_default");
-            
-            // Collect (hash, block) pairs for the switch
-            let mut cases: Vec<(inkwell::values::IntValue, BasicBlock)> = Vec::new();
-            
-            for method in &handlers {
-                let method_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}", method.name));
-                
-                // Compute compile-time hash of handler name
-                use std::hash::{Hash, Hasher};
-                use std::collections::hash_map::DefaultHasher;
-                let mut hasher = DefaultHasher::new();
-                method.name.hash(&mut hasher);
-                let name_hash = hasher.finish();
-                
-                cases.push((self.usize_type.const_int(name_hash, false), method_bb));
-                
-                // Build handler block
-                self.builder.position_at_end(method_bb);
-                // Still verify the name matches (hash collision protection)
-                let method_name = self.emit_string_literal(&method.name);
-                let eq = self.call_runtime_ptr(
-                    self.runtime.value_equals,
-                    &[name_field.into(), method_name.into()],
-                    "verify_name",
-                );
-                let is_match = self.value_to_bool(eq);
-                let call_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_call", method.name));
-                self.builder.build_conditional_branch(is_match, call_bb, default_bb).unwrap();
-                
-                self.builder.position_at_end(call_bb);
-                let mangled = format!("{}_{}", store.name, method.name);
-                if let Some(target_fn) = self.functions.get(&mangled).copied() {
-                    let mut args: Vec<BasicMetadataValueEnum> = vec![state.into()];
-                    if !method.params.is_empty() {
-                        args.push(self.value_to_number(data_field).into());
-                    }
-                    let _ = self.builder.build_call(target_fn, &args, "call_msg_fn");
+            self.builder.position_at_end(match_bb);
+            let mangled = format!("{}_{}", store.name, method.name);
+            if let Some(target_fn) = self.functions.get(&mangled).copied() {
+                let mut args: Vec<BasicMetadataValueEnum> = vec![state.into()];
+                if !method.params.is_empty() {
+                    // Pass data_field as Value* pointer directly — handlers expect Value*
+                    args.push(data_field.into());
                 }
-                self.builder.build_unconditional_branch(done_bb).unwrap();
+                let _ = self.builder.build_call(target_fn, &args, "call_msg_fn");
             }
-
-            // Build switch instruction
-            self.builder.position_at_end(handler_entry);
-            let switch = self.builder.build_switch(hash_int, default_bb, &cases).unwrap();
-            let _ = switch; // silence unused warning
-
-            // Default block just jumps to done
-            self.builder.position_at_end(default_bb);
             self.builder.build_unconditional_branch(done_bb).unwrap();
+            current_bb = next_bb;
         }
+        self.builder.position_at_end(current_bb);
+        self.builder.build_unconditional_branch(done_bb).unwrap();
 
         self.builder.position_at_end(done_bb);
         self.builder.build_return(None).unwrap();
@@ -3747,7 +4627,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Create a dummy context for field evaluation
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: ctor_fn,
+            loop_stack: Vec::new(),
         };
         
         // Set __type__ field so we know what store type this is for method dispatch
@@ -3799,18 +4681,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.ensure_globals_initialized();
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
             function: llvm_fn,
+            loop_stack: Vec::new(),
         };
 
         // First param is the store (Map), inject as `self`
         let store_ptr = llvm_fn.get_nth_param(0).unwrap().into_pointer_value();
-        ctx.variables.insert("self".to_string(), store_ptr);
+        self.store_variable(&mut ctx, "self", store_ptr);
 
         // Remaining params are CoralValue* pointers (not f64)
         for (i, param_ast) in function.params.iter().enumerate() {
             let param = llvm_fn.get_nth_param((i + 1) as u32).unwrap();
             let value_ptr = param.into_pointer_value();
-            ctx.variables.insert(param_ast.name.clone(), value_ptr);
+            self.store_variable(&mut ctx, &param_ast.name, value_ptr);
         }
 
         let block_value = self.emit_block(&mut ctx, &function.body)?;
@@ -3826,5 +4710,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
 struct FunctionContext<'ctx> {
     variables: HashMap<String, PointerValue<'ctx>>,
+    /// Stack-allocated slots for variables (alloca Value**) that support mutation/rebinding in loops.
+    variable_allocas: HashMap<String, PointerValue<'ctx>>,
     function: FunctionValue<'ctx>,
+    /// Stack of (loop_header_bb, loop_exit_bb) for break/continue support
+    loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 }

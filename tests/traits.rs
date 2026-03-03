@@ -10,7 +10,7 @@ use coralc::semantic;
 
 #[test]
 fn parse_simple_trait_definition() {
-    let source = "trait Printable\n    *to_string() -> String\n";
+    let source = "trait Printable\n    *to_string()\n";
     let tokens = lexer::lex(source).expect("should lex");
     let parser = parser::Parser::new(tokens, source.len());
     let program = parser.parse().expect("should parse simple trait");
@@ -48,7 +48,7 @@ fn parse_trait_with_default_implementation() {
 
 #[test]
 fn parse_trait_with_dependencies() {
-    let source = "trait Serializable with Printable\n    *serialize() -> Bytes\n";
+    let source = "trait Serializable with Printable\n    *serialize()\n";
     let tokens = lexer::lex(source).expect("should lex");
     let parser = parser::Parser::new(tokens, source.len());
     let program = parser.parse().expect("should parse trait with dependencies");
@@ -102,7 +102,7 @@ fn parse_type_with_trait() {
 
 #[test]
 fn parse_store_with_trait() {
-    let source = "store Counter with Resettable\n    count ? 0\n    *increment()\n        self.count = self.count + 1\n";
+    let source = "store Counter with Resettable\n    count ? 0\n    *increment()\n        self.count is self.count + 1\n";
     let tokens = lexer::lex(source).expect("should lex");
     let parser = parser::Parser::new(tokens, source.len());
     let program = parser.parse().expect("should parse store with trait");
@@ -137,7 +137,7 @@ fn parse_type_with_multiple_traits() {
 
 #[test]
 fn parse_trait_with_multiple_methods() {
-    let source = "trait Comparable\n    *compare(other: Self) -> Int\n    *equals(other: Self) -> Bool\n        self.compare(other) == 0\n    *less_than(other: Self) -> Bool\n";
+    let source = "trait Comparable\n    *compare(other)\n    *equals(other)\n        self.compare(other) is 0\n    *less_than(other)\n";
     let tokens = lexer::lex(source).expect("should lex");
     let parser = parser::Parser::new(tokens, source.len());
     let program = parser.parse().expect("should parse trait with multiple methods");

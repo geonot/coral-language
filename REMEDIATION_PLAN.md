@@ -1,527 +1,574 @@
-# Coral Language Remediation Plan
+# Coral Language — Remediation Plan
 
-**Created**: 2024-01-22  
-**Based on**: Comprehensive Technical Review  
-**Timeline**: 16 weeks (8 phases × 2 weeks each)  
-**Total Effort**: ~320 hours
-
----
-
-## Phase 1: Critical Foundation Fixes (Weeks 1-2)
-
-### 🔴 P0.1: Runtime File Extraction
-**Effort**: 16 hours  
-**Files**: `runtime/src/lib.rs` → Multiple modules
-
-#### Tasks:
-1. **Extract `runtime/src/value.rs`** (4h)
-   - Core `Value` struct and `ValueHandle` type
-   - `coral_value_retain()`, `coral_value_release()`  
-   - `coral_value_type()`, `coral_value_equals()`
-   - Basic value creation functions
-
-2. **Extract `runtime/src/collections/mod.rs`** (4h)
-   - Module structure for collections
-   - Common collection traits and utilities
-
-3. **Extract `runtime/src/collections/list.rs`** (4h)
-   - All `coral_list_*` functions
-   - List iteration and manipulation
-   - List memory management
-
-4. **Extract `runtime/src/collections/map.rs`** (4h) 
-   - All `coral_map_*` functions
-   - Hash table implementation
-   - Map memory management
-
-#### Acceptance Criteria:
-- [ ] All existing tests pass
-- [ ] Runtime FFI interface unchanged
-- [ ] Compilation time for runtime reduced by >40%
-- [ ] Each extracted module <800 LOC
-
-### 🔴 P0.2: Add Cycle Detection
-**Effort**: 12 hours  
-**Files**: `runtime/src/cycle.rs`, `runtime/src/weak_ref.rs`
-
-#### Tasks:
-1. **Implement weak references** (4h)
-   ```rust
-   struct WeakRef {
-       target: *mut ValueHeader,
-       id: u64,
-   }
-   ```
-
-2. **Add cycle collector** (6h)
-   - Implement simplified Bacon-Rajan algorithm
-   - Mark possible roots during release
-   - Periodic cycle collection
-
-3. **Integration and testing** (2h)
-   - Add cycle collection tests
-   - Benchmark cycle collection overhead
-
-#### Acceptance Criteria:
-- [ ] Cyclic linked lists don't leak memory
-- [ ] Cycle collection overhead <5% in benchmarks
-- [ ] 10+ memory leak tests pass
-
-### 🔴 P0.3: Fix Generic Type Instantiation  
-**Effort**: 16 hours  
-**Files**: `src/types/solver.rs`, `src/types/core.rs`
-
-#### Tasks:
-1. **Add type parameter tracking** (4h)
-   ```rust
-   struct TypeContext {
-       type_vars: HashMap<String, TypeId>,
-       bounds: HashMap<TypeVarId, Vec<TypeId>>,
-   }
-   ```
-
-2. **Implement generic substitution** (6h)
-   - Substitute type parameters with concrete types
-   - Handle nested generics (`List[Map[String, T]]`)
-   - Generate specialized type instances
-
-3. **Add collection type checking** (4h)
-   - Check list element types in assignments
-   - Check map key/value types
-   - Generate helpful type error messages
-
-4. **Testing and integration** (2h)
-   - Type error test suite
-   - Generic collection usage tests
-
-#### Acceptance Criteria:
-- [ ] `List[String]` rejects integer assignments
-- [ ] Nested generics work (`List[Map[K,V]]`)
-- [ ] 20+ type error tests pass
-- [ ] Error messages include expected vs actual types
+**Date:** February 16, 2026  
+**Companion to:** COMPREHENSIVE_REVIEW_REPORT.md  
+**Goal:** Resolve all outstanding issues, complete the language to alpha, and lay the foundation for self-hosted compiler, Coral-based runtime, actor framework, and built-in persistence.
 
 ---
 
-## Phase 2: Memory Management Hardening (Weeks 3-4)
+## Language Design Decisions (Binding Constraints)
 
-### 🟠 P1.1: Atomic Reference Counting Audit
-**Effort**: 8 hours  
-**Files**: `runtime/src/value.rs`, `runtime/src/memory.rs`
+> These decisions were established during remediation and override any conflicting tasks below.
 
-#### Tasks:
-1. **Audit atomic operations** (4h)
-   - Review all `AtomicU64` operations
-   - Ensure proper memory ordering (Acquire/Release for cross-thread)
-   - Document ordering requirements
+1. **Pure Type Inference** — No type annotations anywhere in Coral syntax. No `->` return type syntax. No parameter type annotations. The `TypeAnnotation` AST node exists internally but is always `None` in parsed code. All type checking works via inference and constraint solving.
 
-2. **Add concurrency tests** (4h)
-   - Multi-threaded retain/release stress test  
-   - Actor value sharing tests
-   - Memory fence validation
+2. **Method-Based Equality** — No `==` or `!=` operators. Equality is expressed via method calls:
+   - `var.equals(otherVar)` — returns boolean
+   - `var.not_equals(otherVar)` or `not var.equals(otherVar)` — returns boolean
+   - Runtime already provides `coral_value_equals()`. Need to add `coral_value_not_equals()` and wire both as built-in methods.
 
-### 🟠 P1.2: Memory Leak Detection Framework
-**Effort**: 12 hours  
-**Files**: `tests/memory_leaks.rs`, `runtime/src/debug.rs`
-
-#### Tasks:
-1. **Add leak detection utilities** (4h)
-   ```rust
-   #[cfg(test)]
-   fn with_leak_detection<F: FnOnce()>(test: F) {
-       let start_count = live_value_count();
-       test();
-       assert_eq!(live_value_count(), start_count, "Memory leak detected");
-   }
-   ```
-
-2. **Comprehensive leak test suite** (8h)
-   - Cyclic structure tests (linked lists, trees, graphs)
-   - Actor message passing leak tests
-   - Store operation leak tests
-   - Collection resize/rehash leak tests
-
-### 🟠 P1.3: String Interning System
-**Effort**: 12 hours  
-**Files**: `runtime/src/string.rs`, `runtime/src/intern.rs`
-
-#### Tasks:
-1. **Implement string interning** (6h)
-   - Global string table with weak references
-   - Automatic interning for short strings (<128 bytes)
-   - Interning statistics and telemetry
-
-2. **Optimize string operations** (4h)
-   - Fast equality comparison for interned strings
-   - Efficient string concatenation
-   - Memory-efficient string slicing
-
-3. **Integration and benchmarking** (2h)
-   - Benchmark string-heavy workloads
-   - Measure memory usage improvement
-   - Validate correctness
+3. **`is` for Binding** — Variable binding uses `is` keyword, not `=`. The `=` token may be needed only for store field assignment; audit required (task 6.8).
 
 ---
 
-## Phase 3: Type System Enhancement (Weeks 5-6) 
+## Plan Overview
 
-### 🔴 P0.4: Complete Generic Implementation
-**Effort**: 16 hours  
-**Files**: `src/types/solver.rs`, `src/codegen/generic.rs`
+**Total estimated effort: ~640 hours across 24 weeks (6 months)**  
+**Organized into 8 phases, 5 tracks running partially in parallel**
 
-#### Tasks:
-1. **Generic function instantiation** (8h)
-   ```coral
-   *length[T](items: List[T]) -> Int
-       items.count()
-   ```
-   - Parse generic function syntax
-   - Generate specialized versions per call site
-   - Handle generic constraints
+### Tracks
+- **T1 — Correctness:** Fix critical/high bugs to stabilize what exists
+- **T2 — Language Completeness:** Add missing language features (loops, if/else, return, etc.)
+- **T3 — Runtime Hardening:** Fix concurrency bugs, complete store FFI, improve performance
+- **T4 — Self-Hosting Foundation:** Build features needed for compiler self-compilation
+- **T5 — Polish & Testing:** End-to-end tests, documentation, code quality
 
-2. **ADT generic support** (6h)
-   ```coral
-   type Result[T, E]
-       Ok(value: T)
-       Err(error: E)
-   ```
-   - Generic enum/struct definitions
-   - Pattern matching with generic extraction
-   - Memory layout optimization
+### Phase Summary
 
-3. **Generic codegen** (2h)
-   - Generate specialized LLVM types
-   - Eliminate generic overhead at runtime
-
-### 🟠 P1.4: Enhanced Error Handling
-**Effort**: 12 hours  
-**Files**: `src/types/error.rs`, `runtime/src/error.rs`
-
-#### Tasks:
-1. **Error value implementation** (6h)
-   - Complete `FLAG_ERR` value support
-   - Error metadata structure refinement
-   - Error propagation operator (`?`) syntax
-
-2. **Result/Option types** (4h)
-   - Standard library Result/Option definitions
-   - Pattern matching integration
-   - Ergonomic error handling patterns
-
-3. **Error reporting improvements** (2h)
-   - Stack trace capture for error values
-   - Better error message formatting
-   - Error chaining and context
+| Phase | Weeks | Focus | Hours |
+|-------|-------|-------|-------|
+| 1 | 1-3 | **Critical Bug Fixes** — Stop the bleeding | 60h |
+| 2 | 4-6 | **Core Language Gaps** — Loops, if/else, return | 80h |
+| 3 | 7-9 | **Runtime Hardening** — Store FFI, concurrency, shutdown | 80h |
+| 4 | 10-12 | **Type System & Semantics** — Real ADT types, generics, namespacing | 80h |
+| 5 | 13-15 | **Actor System Completion** — Typed messages, networking, monitoring | 60h |
+| 6 | 16-18 | **MIR Rewrite & Optimization** — Single codegen path | 80h |
+| 7 | 19-21 | **Self-Hosting Preparation** — Bootstrap subset, std completeness | 100h |
+| 8 | 22-24 | **Self-Hosted Compiler & Runtime** — Begin Coral-in-Coral | 100h |
 
 ---
 
-## Phase 4: Module System Overhaul (Weeks 7-8)
+## Phase 1: Critical Bug Fixes (Weeks 1-3, 60h)
 
-### 🟠 P1.5: Module Compilation Units
-**Effort**: 16 hours  
-**Files**: `src/module.rs`, `src/module_cache.rs`
+**Goal:** Fix all 7 critical bugs and the most impactful high-severity issues. Establish end-to-end execution tests.
 
-#### Tasks:
-1. **Module IR representation** (6h)
-   ```rust
-   struct CompiledModule {
-       name: String,
-       exports: HashMap<String, Symbol>,
-       dependencies: Vec<ModuleDependency>,
-       ir: String, // LLVM IR
-       metadata_hash: u64,
-   }
-   ```
+### Week 1: Codegen Crash Fixes (20h)
 
-2. **Dependency tracking** (4h)
-   - Module dependency graph construction
-   - Circular dependency detection
-   - Incremental compilation triggers
+| Task | Bug ID | Description | Hours |
+|------|--------|-------------|-------|
+| 1.1 | C1 | Fix `Statement::Return` — return Value* directly, not f64-cast-to-pointer | 3h |
+| 1.2 | C2 | Fix actor handler dispatch — pass Value* data, not f64 conversion | 4h |
+| 1.3 | C3 | Fix hash-based actor dispatch — use same hash function as runtime, or always use sequential dispatch | 4h |
+| 1.4 | C4 | Fix `make_map` zero-arg call — pass empty entries pointer and count=0 | 2h |
+| 1.5 | C5 | Fix `value_hash` return type in runtime.rs declaration — change to i64 and use `into_int_value()` | 2h |
+| 1.6 | — | Create first end-to-end execution test: compile Coral program → link with runtime → execute → verify output | 5h |
 
-3. **Module cache implementation** (4h)
-   - Content-based cache invalidation
-   - Parallel module compilation
-   - Cache persistence between builds
+**Deliverable:** All compiled Coral programs that use return/actors/maps no longer crash.
 
-4. **Namespace isolation** (2h)
-   - Proper module scoping
-   - Export/import resolution
-   - Name collision detection
+### Week 2: Runtime Critical Fixes (20h)
 
----
+| Task | Bug ID | Description | Hours |
+|------|--------|-------------|-------|
+| 2.1 | R1 | Fix cycle detector deadlock — collect values to free in buffer, release after dropping mutex | 4h |
+| 2.2 | R2 | Fix symbol interning — correctly extract string data from Value (handle inline vs heap) | 3h |
+| 2.3 | R3 | Fix store FFI TAG constants — align with lib.rs ValueTag (Number=0, Bool=1, String=2) | 2h |
+| 2.4 | R5 | Make `retain_events`/`release_events` AtomicU32, or guard with `#[cfg(debug_assertions)]` | 2h |
+| 2.5 | R4 | Implement `handle_to_stored_value` — convert runtime Value to StoredValue by reading tag+payload | 6h |
+| 2.6 | R7 | Fix UUID7 atomicity — use compare-and-swap loop for timestamp+counter update | 3h |
 
-## Phase 5: Actor System Performance (Weeks 9-10)
+**Deliverable:** Stores can actually persist data. No deadlocks. No data races.
 
-### 🟠 P1.6: Message Dispatch Optimization  
-**Effort**: 12 hours  
-**Files**: `runtime/src/actor.rs`, `src/codegen/actor.rs`
+### Week 3: Test Infrastructure (20h)
 
-#### Tasks:
-1. **Message name interning** (4h)
-   ```rust
-   type MessageId = u32;
-   static MESSAGE_REGISTRY: Lazy<HashMap<String, MessageId>> = Lazy::new(HashMap::new);
-   ```
+| Task | Description | Hours |
+|------|-------------|-------|
+| 3.1 | Create `tests/execution/` directory with end-to-end test harness: compile → link → run → assert stdout | 8h |
+| 3.2 | Write 15 execution tests: hello world, arithmetic, strings, lists, maps, closures, match, ADTs, error values, pipeline, actors (spawn+send), stores (create+get), nested calls, recursion, globals | 8h |
+| 3.3 | Fix the 1 failing test (parser_fixtures unexpected_dedent.expect message) | 1h |
+| 3.4 | Delete orphaned runtime files (value.rs, memory.rs, collections/, map_hash.rs) or integrate them | 3h |
 
-2. **Compile-time dispatch table generation** (6h)
-   - Generate switch statements instead of string comparison
-   - Validate message handlers exist at compile time
-   - Optimize message serialization
-
-3. **Benchmarking and validation** (2h)
-   - Actor throughput benchmarks
-   - Message dispatch latency measurements
-
-### 🟠 P1.7: Typed Actor Messages
-**Effort**: 16 hours  
-**Files**: `src/ast.rs`, `src/codegen/actor.rs`, `runtime/src/actor.rs`
-
-#### Tasks:
-1. **Message type syntax** (4h)
-   ```coral
-   actor Counter
-       *increment(by: Int) -> Int
-       *reset() -> Int
-   ```
-
-2. **Compile-time message validation** (6h)
-   - Type check message arguments
-   - Generate typed message envelopes  
-   - Ensure handler signatures match
-
-3. **Runtime type-safe dispatch** (4h)
-   - Generated message unmarshaling
-   - Type-safe handler invocation
-   - Eliminate runtime type errors
-
-4. **Testing and integration** (2h)
-   - Typed message test suite
-   - Error handling for malformed messages
+**Deliverable:** 264+ tests, all passing. First runtime-execution tests in the suite. Orphaned code resolved.
 
 ---
 
-## Phase 6: Code Generation Improvements (Weeks 11-12)
+## Phase 2: Core Language Gaps (Weeks 4-6, 80h)
 
-### 🟠 P1.8: Codegen Modularization
-**Effort**: 12 hours  
-**Files**: `src/codegen/*.rs` (multiple new files)
+**Goal:** Implement the missing language constructs that block any non-trivial program.
 
-#### Tasks:
-1. **Extract expression codegen** (4h)
-   - `src/codegen/expression.rs` - arithmetic, comparisons, calls
-   - `src/codegen/control_flow.rs` - if/match/loops
+### Week 4: Loop Constructs (28h)
 
-2. **Extract statement codegen** (4h)
-   - `src/codegen/statement.rs` - assignments, declarations
-   - `src/codegen/function.rs` - function definitions, calls
+| Task | Description | Hours |
+|------|-------------|-------|
+| 4.1 | Add `while`, `for`, `break`, `continue` keywords to lexer | 2h |
+| 4.2 | Add `Statement::While(condition, body, span)` and `Statement::For(binding, iterable, body, span)` to AST | 2h |
+| 4.3 | Implement `parse_while_statement()` — `while condition` + indented body block | 4h |
+| 4.4 | Implement `parse_for_statement()` — `for name in expr` + indented body block | 4h |
+| 4.5 | Add `Break`/`Continue` statement variants and parsing | 2h |
+| 4.6 | Semantic analysis for loops — scope checking, type constraints for iterable | 4h |
+| 4.7 | LLVM codegen for while — create loop header/body/exit basic blocks, emit condition branch | 5h |
+| 4.8 | LLVM codegen for for — emit iterator creation, loop with iter_next, null-check exit | 5h |
 
-3. **Extract specialized codegen** (4h)
-   - `src/codegen/actor.rs` - actor creation, message dispatch
-   - `src/codegen/store.rs` - store operations, persistence
-   - `src/codegen/collections.rs` - list/map optimizations
+**Deliverable:** `while` and `for` loops compile and execute. fizzbuzz.coral is viable.
 
-### 🟡 P2.1: MIR Optimization Infrastructure
-**Effort**: 16 hours  
-**Files**: `src/mir/optimize.rs`, `src/mir/passes/*.rs`
+### Week 5: If/Else & Return (26h)
 
-#### Tasks:
-1. **Optimization pass framework** (4h)
-   ```rust
-   trait OptimizationPass {
-       fn run(&mut self, module: &mut MirModule) -> bool;
-       fn name(&self) -> &'static str;
-   }
-   ```
+| Task | Description | Hours |
+|------|-------------|-------|
+| 5.1 | Add `if`, `elif`, `else` keywords to lexer (if not already present) | 1h |
+| 5.2 | Add `Statement::If(condition, then_block, elif_clauses, else_block, span)` to AST | 2h |
+| 5.3 | Implement `parse_if_statement()` — handles if/elif chains and optional else | 6h |
+| 5.4 | Semantic analysis for if/else — scope checking, branch type compatibility | 3h |
+| 5.5 | LLVM codegen for if/else — basic block chain with phi node for value-producing if-expression | 6h |
+| 5.6 | Implement `parse_return_statement()` — connect the already-lexed `return` keyword | 2h |
+| 5.7 | Fix `Statement::Return` codegen — return Value* directly (verify Phase 1 fix) | 2h |
+| 5.8 | Support return in lambdas (currently rejected) | 4h |
 
-2. **Basic optimization passes** (8h)
-   - Constant folding and propagation
-   - Dead code elimination
-   - Common subexpression elimination
-   - Simple inlining for small functions
+**Deliverable:** Block-level conditionals and return statements work. Ternary is no longer the only conditional mechanism.
 
-3. **Optimization pipeline** (4h)
-   - Pass ordering and iteration
-   - Fixed-point iteration until convergence
-   - Optimization level configuration
+### Week 6: Essential Operators & Syntax (21h)
 
----
+> **Design Decisions Applied:**
+> - ~~6.1 (`!=` operator)~~ — **REMOVED.** Equality is via `.equals()` / `.not_equals()` method calls, not operators.
+> - ~~6.2 (`->` arrow token)~~ — **REMOVED.** No type annotations in syntax; Coral uses pure type inference throughout.
+> - 6.8 updated — `==` is no longer needed as an operator; only `=` for store field assignment needs audit.
 
-## Phase 7: Performance and Instrumentation (Weeks 13-14)
+| Task | Description | Hours |
+|------|-------------|-------|
+| ~~6.1~~ | ~~Add `!=` (NotEqual) token~~ | ~~3h~~ | **REMOVED — equality via `.equals()`/`.not_equals()` methods** |
+| ~~6.2~~ | ~~Add `->` (Arrow) token for return type annotations~~ | ~~2h~~ | **REMOVED — pure type inference, no annotations** |
+| 6.3 | Implement index/subscript syntax `expr[index]` in parser and codegen | 6h |
+| 6.4 | Add hex (`0xFF`), binary (`0b1010`), octal (`0o77`) numeric literals to lexer | 4h |
+| 6.5 | Add underscore separators in numbers (`1_000_000`) | 2h |
+| 6.6 | Fix float-dot ambiguity — lookahead: if char after `.` is a digit, it's a float; otherwise consume number only | 3h |
+| 6.7 | Reject unknown string escape sequences (error on `\q`) | 2h |
+| 6.8 | Audit `=`/`==` tokens — `==` is no longer needed (equality via `.equals()` method). Determine if `=` is needed for store field assignment or can be fully replaced by `is`. Remove `==` token production from lexer. | 4h |
 
-### 🟡 P2.2: Runtime Performance Optimization
-**Effort**: 16 hours  
-**Files**: `runtime/src/collections/*.rs`, `runtime/src/memory.rs`
-
-#### Tasks:
-1. **Optimized hash map implementation** (8h)
-   - Robin Hood hashing or similar
-   - Vectorized key comparison
-   - Memory-efficient bucket layout
-
-2. **Escape analysis in MIR** (6h)
-   - Track value lifetimes across function boundaries
-   - Stack-allocate short-lived values
-   - Eliminate unnecessary heap allocations
-
-3. **Stack frame optimization** (2h)
-   - Register allocation hints
-   - Eliminate redundant stack spills
-   - Optimize calling conventions
-
-### 🟡 P2.3: Comprehensive Benchmarking
-**Effort**: 12 hours  
-**Files**: `benches/*.rs`, `tools/benchmark.rs`
-
-#### Tasks:
-1. **Runtime operation benchmarks** (6h)
-   - Value operations (retain/release/equals)
-   - Collection operations (insert/lookup/iterate) 
-   - String operations (concat/slice/compare)
-
-2. **End-to-end performance tests** (4h)
-   - Compilation time benchmarks
-   - Generated code performance
-   - Memory usage profiling
-
-3. **Regression detection** (2h)
-   - CI integration for performance tracking
-   - Automated performance alerts
-   - Historical performance data
+**Deliverable:** Essential operators work. Numeric literal support suitable for systems programming.
 
 ---
 
-## Phase 8: Production Readiness (Weeks 15-16)
+## Phase 3: Runtime Hardening (Weeks 7-9, 80h)
 
-### 🟡 P2.4: Error Handling Audit
-**Effort**: 8 hours  
-**Files**: All source files
+**Goal:** Make the runtime production-quality for single-machine workloads.
 
-#### Tasks:
-1. **Replace unwrap() calls** (4h)
-   - Audit for panic-prone code
-   - Replace with proper Result propagation
-   - Add context to error messages
+### Week 7: Store FFI Completion (28h)
 
-2. **Graceful degradation** (4h)
-   - Handle out-of-memory conditions
-   - Recover from compilation errors
-   - Provide helpful suggestions
+| Task | Description | Hours |
+|------|-------------|-------|
+| 7.1 | Implement full `handle_to_stored_value` — read Value tag, extract payload, recursively convert nested lists/maps | 8h |
+| 7.2 | Implement `stored_value_to_handle` — reverse conversion, creating runtime Values from store records | 6h |
+| 7.3 | Fix `coral_store_get_by_uuid` — use index's uuid_to_index HashMap for O(1) lookup | 2h |
+| 7.4 | Fix `with_engine` — maintain handle→engine direct mapping instead of string lookup + config reconstruction | 4h |
+| 7.5 | Store end-to-end test: create → get → update → delete → query through Coral code | 6h |
+| 7.6 | WAL recovery test: write data → simulate crash → recover → verify data integrity | 2h |
 
-### 🟡 P2.5: Documentation and Testing
-**Effort**: 16 hours  
-**Files**: Documentation, test suites
+**Deliverable:** Stores can persist and retrieve real data end-to-end.
 
-#### Tasks:
-1. **API documentation** (6h)
-   - Document all public runtime functions
-   - Add usage examples
-   - Document safety requirements
+### Week 8: Concurrency Fixes (26h)
 
-2. **Test suite expansion** (8h)
-   - Stress tests for concurrent scenarios
-   - Fuzzing for parser robustness  
-   - Property-based tests for runtime
+| Task | Description | Hours |
+|------|-------------|-------|
+| 8.1 | Replace single work queue with per-worker channels or work-stealing deque (crossbeam-deque) | 8h |
+| 8.2 | Fix `spawn_named` — check+register name atomically BEFORE spawning actor | 3h |
+| 8.3 | Add runtime shutdown mechanism — poison pill for workers, timer thread signal, store flush | 6h |
+| 8.4 | Replace global value pool Mutex with thread-local pools + periodic global drain | 5h |
+| 8.5 | Change refcount ordering from SeqCst to Acquire (retain) / AcqRel (release) | 2h |
+| 8.6 | Make `drop_heap_value` iterative (explicit worklist) to prevent stack overflow | 2h |
 
-3. **Architecture documentation** (2h)
-   - Update design documents
-   - Document optimization decisions
-   - Create contributor guide
+**Deliverable:** Actor system is production-grade for local workloads. Clean shutdown. No contention bottlenecks.
 
-### 🟡 P2.6: Release Preparation
-**Effort**: 8 hours  
-**Files**: Build system, packaging
+### Week 9: Memory Management Hardening (26h)
 
-#### Tasks:
-1. **CI/CD pipeline** (4h)
-   - Automated testing across platforms
-   - Release artifact generation
-   - Performance regression detection
+| Task | Description | Hours |
+|------|-------------|-------|
+| 9.1 | Fix cycle detector reentrance — collect-then-release pattern with deferred free list | 4h |
+| 9.2 | Fix `scan()` — validate value liveness before accessing children (use weak pointers or epoch tracking) | 6h |
+| 9.3 | Add ErrorMetadata free path in `drop_heap_value` — currently leaks the Box'd metadata | 3h |
+| 9.4 | MapObject proper resize — implement load factor threshold (0.75) with power-of-2 growth | 5h |
+| 9.5 | Add memory leak detection test: create cyclic structures, trigger collection, verify all freed | 4h |
+| 9.6 | Add 48-hour stress test: continuous alloc/free/cycle-create/actor-spawn with memory monitoring | 4h |
 
-2. **Packaging and distribution** (4h)
-   - Package manager integration
-   - Installation documentation
-   - Version management
+**Deliverable:** No memory leaks. No crashes under sustained load. Cycle collection is correct and deadlock-free.
 
 ---
 
-## Success Metrics
+## Phase 4: Type System & Semantics (Weeks 10-12, 80h)
 
-### Phase Completion Metrics
+**Goal:** Make the type system actually enforce correctness.
 
-| Phase | Key Metrics | Target |
-|-------|-------------|--------|
-| Phase 1 | Runtime file size, Memory leak tests | <800 LOC/file, 10+ tests |
-| Phase 2 | Memory usage, Leak detection | <5% overhead, 0 leaks |
-| Phase 3 | Type errors caught | 95% at compile time |
-| Phase 4 | Build time, Cache hits | 50% faster, 80% hits |
-| Phase 5 | Message dispatch | 10x faster than string lookup |
-| Phase 6 | Code maintainability | <1000 LOC/file |
-| Phase 7 | Runtime performance | 2x faster collections |
-| Phase 8 | Production metrics | 0 panics, full test coverage |
+> **DESIGN CONSTRAINT:** Coral uses **pure type inference** throughout — NO type annotations, NO return type signatures, NO `->` syntax.
+> All type checking in this phase must work via inference, constraint solving, and flow analysis.
+> The existing `TypeAnnotation` AST node is internal-only and always `None` in parsed code.
+> Equality checking uses `.equals()` / `.not_equals()` method calls, not operators.
 
-### Overall Success Criteria
+### Week 10: ADT Types in Type System (28h)
 
-- **Memory Safety**: Zero memory leaks in 48-hour stress test
-- **Type Safety**: Zero runtime type errors in type-checked code  
-- **Performance**: Comparable to C for numeric computation
-- **Maintainability**: All files <1000 LOC, >90% test coverage
-- **Production Ready**: Can compile itself (self-hosting milestone)
+| Task | Description | Hours |
+|------|-------------|-------|
+| 10.1 | Add `TypeId::Adt(name, type_args)` variant to type system | 3h |
+| 10.2 | Register type definitions with proper type IDs during semantic first pass (fix S1) | 4h |
+| 10.3 | Namespace variant constructors under their parent type (fix S3) — `Option.Some`, `Option.None` resolves correctly | 6h |
+| 10.4 | Type-check constructor calls — verify field count and infer types from variant definition (no annotations) | 4h |
+| 10.5 | Constrain match scrutinee type from constructor patterns (fix S7) | 4h |
+| 10.6 | Implement exhaustiveness checking for ADTs with >1 level of nesting | 4h |
+| 10.7 | Add `MatchPattern::List` to use `Vec<MatchPattern>` instead of `Vec<Expression>` (fix A3) | 3h |
+
+**Deliverable:** ADTs are properly typed. Pattern matching is type-safe. Constructor namespaces prevent collisions.
+
+### Week 11: Generic Type Instantiation (28h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 11.1 | Implement proper type parameter substitution in `instantiate_generic` | 6h |
+| 11.2 | Specialize `List[T]` → `List[Int]`, `List[String]`, etc. during constraint solving | 6h |
+| 11.3 | Specialize `Map[K,V]` similarly | 4h |
+| 11.4 | Implement proper `Option[T]` and `Result[T,E]` as ADT types (not hardcoded to List/Any) | 6h |
+| 11.5 | Remove dual-track `symbols` map from TypeEnv — use only scoped bindings (fix T4) | 4h |
+| 11.6 | Fix `instantiate_generic` type param leaking (fix T5) | 2h |
+
+**Deliverable:** Generics work. `List[Int]` catches `push(string)` errors at compile time.
+
+### Week 12: Semantic Analysis Completion (24h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 12.1 | Scope-check store/type method bodies (fix S4) | 4h |
+| 12.2 | Distinguish `None` from `Unit` — add `Primitive::None`/`Absent` (fix S5) | 3h |
+| 12.3 | Fix member access type inference for stores/types (fix S6) | 4h |
+| 12.4 | Fix pipeline type inference — verify left type is compatible with first param (fix S8) | 3h |
+| 12.5 | Allow shadowing in inner scopes (fix S9) — or document prohibition | 2h |
+| 12.6 | Replace hardcoded `is_builtin_name` with registry derived from extern declarations (fix S10) | 4h |
+| 12.7 | Add severity levels to diagnostics (warning/info/error) (fix D2) | 2h |
+| 12.8 | Add file ID to Span for multi-file diagnostics (fix D1) | 2h |
+
+**Deliverable:** Semantic analysis catches real errors in methods, stores, and pipelines. Multi-file diagnostics work.
+
+---
+
+## Phase 5: Actor System Completion (Weeks 13-15, 60h)
+
+**Goal:** Complete the actor framework per the ACTOR_SYSTEM_COMPLETION spec.
+
+### Week 13: Typed Messages & Monitoring (20h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 13.1 | Implement `@messages(MessageType)` annotation in parser | 4h |
+| 13.2 | Compile-time type checking at `send()` call sites — verify message type matches handler | 6h |
+| 13.3 | Implement `monitor(actor)` / `demonitor(actor)` runtime functions | 4h |
+| 13.4 | Implement `ActorDown` message delivery when monitored actor dies | 4h |
+| 13.5 | Add tests for typed messages and monitoring | 2h |
+
+### Week 14: Supervision Hardening (20h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 14.1 | Implement full supervision strategy execution (restart budget enforcement, time window) | 6h |
+| 14.2 | Implement escalation chain — child failure propagates to parent if budget exhausted | 4h |
+| 14.3 | Implement graceful actor stop — flush mailbox before termination | 4h |
+| 14.4 | Add supervision tree integration tests — multi-level parent/child with restart scenarios | 4h |
+| 14.5 | Document supervision API and strategies | 2h |
+
+### Week 15: Remote Actors (Foundation) (20h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 15.1 | Implement TCP transport layer with connection pooling | 8h |
+| 15.2 | Implement "CACT" protocol serialization — header/target/payload framing | 4h |
+| 15.3 | Implement remote actor proxy — `send()` serializes and transmits to remote node | 4h |
+| 15.4 | Location-transparent actor lookup — registry checks local then remote | 2h |
+| 15.5 | Remote actor integration tests | 2h |
+
+**Deliverable:** Full actor framework — typed messages, supervision, monitoring, basic networking.
+
+---
+
+## Phase 6: MIR Rewrite & Optimization (Weeks 16-18, 80h)
+
+**Goal:** Replace the vestigial MIR with a proper IR that all codegen routes through.
+
+### Week 16: MIR Data Structures (28h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 16.1 | Design new MIR with SSA, phi nodes, types on all values | 8h |
+| 16.2 | Add all missing instruction types: comparisons, bitwise, unary, member access, construct, match, call (direct/indirect/method), error handling, pipeline | 10h |
+| 16.3 | Add control flow: if/else, while, for, pattern match, break/continue | 6h |
+| 16.4 | Add closure representation, actor message send, store operations | 4h |
+
+### Week 17: AST → MIR Lowering (28h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 17.1 | Implement complete AST → MIR lowering for all expression types | 12h |
+| 17.2 | Implement statement lowering (bindings, assignments, returns, loops, if/else) | 8h |
+| 17.3 | Implement item lowering (functions, stores, actors, types, error defs) | 4h |
+| 17.4 | Verify MIR→LLVM produces identical output as current AST→LLVM for all 249 tests | 4h |
+
+### Week 18: MIR Optimizations (24h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 18.1 | Implement constant folding pass on MIR (replaces current AST-level folder) | 4h |
+| 18.2 | Implement dead code elimination | 4h |
+| 18.3 | Implement basic inlining for small functions | 6h |
+| 18.4 | Implement escape analysis — identify values that can be stack-allocated | 6h |
+| 18.5 | Implement numeric unboxing — keep f64/i64 in registers for pure-arithmetic paths | 4h |
+
+**Deliverable:** Single codegen path through well-typed MIR. Initial optimization passes. Measurable performance improvement.
+
+---
+
+## Phase 7: Self-Hosting Preparation (Weeks 19-21, 100h)
+
+**Goal:** Complete all prerequisites for writing the compiler in Coral.
+
+### Week 19: Standard Library Completion (35h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 19.1 | Expose all runtime trig/log/math functions in std/math.coral | 2h |
+| 19.2 | Expose all error handling functions (make_error, is_err, is_absent, error_name, etc.) as std/error.coral | 4h |
+| 19.3 | Implement std/json.coral with parse/serialize (using runtime string operations) | 8h |
+| 19.4 | Implement std/time.coral wrapping libc time functions | 4h |
+| 19.5 | Fix std/map.coral — replace `.equals(none).not()` with proper `.has()` using `is_absent` check | 2h |
+| 19.6 | Fix std/set.coral — same `.has()` fix, proper empty map construction | 2h |
+| 19.7 | Fix std/result.coral — replace `for` loops with `.map()`/`.reduce()` or implement `for` (done in Phase 2) | 3h |
+| 19.8 | Expose store FFI as std/store.coral | 4h |
+| 19.9 | Create std/encoding.coral (base64, hex, utf8) | 4h |
+| 19.10 | Add all missing runtime function wrappers to appropriate std modules | 2h |
+
+### Week 20: Self-Hosting Language Features (35h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 20.1 | Implement proper `import`/`use` with namespaces — `use std.io` → access as `io.read()` | 10h |
+| 20.2 | Implement trait/mixin system — `trait Printable` with `method` declarations and `with` syntax | 12h |
+| 20.3 | Implement process spawning (`extern fn` wrapping `fork`/`exec`/`waitpid`) for build orchestration | 4h |
+| 20.4 | Implement environment variable access (`extern fn` wrapping `getenv`/`setenv`) | 2h |
+| 20.5 | Implement comprehensive string manipulation (regex matching via POSIX regex or simple patterns) | 5h |
+| 20.6 | File I/O completion — append, delete, mkdir, list_dir, file metadata | 2h |
+
+### Week 21: Compiler Bootstrap Subset Definition (30h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 21.1 | Define "Coral-0" — the exact subset of Coral sufficient to write the lexer (types, match, strings, lists, ternary, functions, error handling) | 4h |
+| 21.2 | Write the Coral lexer in Coral-0 — port lexer.rs to lexer.coral | 12h |
+| 21.3 | Verify Coral lexer produces identical tokens as Rust lexer for all test fixtures | 6h |
+| 21.4 | Document all self-hosting prerequisites and their completion status | 4h |
+| 21.5 | Create bootstrap test: Coral lexer → compiled → runs on syntax.coral → matches Rust lexer output | 4h |
+
+**Deliverable:** Complete standard library. All self-hosting prerequisites met. Coral lexer written in Coral and verified.
+
+---
+
+## Phase 8: Self-Hosted Compiler & Runtime (Weeks 22-24, 100h)
+
+**Goal:** Begin the self-hosting journey — compiler and runtime written in Coral.
+
+### Week 22: Parser in Coral (35h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 22.1 | Define AST data structures as Coral ADTs (`enum Expr`, `enum Stmt`, `enum Item`, etc.) | 6h |
+| 22.2 | Port parser.rs → parser.coral — recursive-descent with indentation tracking | 16h |
+| 22.3 | Verify Coral parser produces identical AST as Rust parser for all test fixtures | 8h |
+| 22.4 | Performance comparison: Coral parser vs Rust parser | 2h |
+| 22.5 | Create combined bootstrap test: Coral lexer → Coral parser → AST verification | 3h |
+
+### Week 23: Semantic Analysis in Coral (35h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 23.1 | Port type system (core.rs, env.rs, solver.rs) → types.coral | 12h |
+| 23.2 | Port semantic.rs → semantic.coral | 14h |
+| 23.3 | Port lower.rs → lower.coral | 4h |
+| 23.4 | Verify identical semantic output | 5h |
+
+### Week 24: Codegen & Integration (30h)
+
+| Task | Description | Hours |
+|------|-------------|-------|
+| 24.1 | Begin MIR codegen port (target: emit LLVM IR as text strings, not via inkwell) | 12h |
+| 24.2 | Text-based LLVM IR emission for core expression types | 10h |
+| 24.3 | Integration test: Coral compiler compiles hello.coral to identical LLVM IR as Rust compiler | 4h |
+| 24.4 | Runtime bootstrap planning: identify which runtime modules can be rewritten first | 4h |
+
+**Deliverable:** Coral compiler front-end (lexer + parser + semantic) self-hosted. Codegen partially ported.
+
+---
+
+## Dependency Graph
+
+```
+Phase 1 (Critical Fixes) ─┬─→ Phase 2 (Language Gaps) ─────┬─→ Phase 4 (Type System) ──→ Phase 6 (MIR Rewrite)
+                           │                                 │                                      │
+                           └─→ Phase 3 (Runtime Hardening) ──┘                                      │
+                                                                                                     ↓
+                           Phase 5 (Actor Completion) ──────────→ Phase 7 (Self-Host Prep) ──→ Phase 8 (Self-Hosted)
+```
+
+- **Phase 1** has no dependencies — start immediately
+- **Phase 2** depends on Phase 1 (codegen fixes needed before adding features)
+- **Phase 3** depends on Phase 1 (runtime fixes from week 2)
+- **Phase 4** depends on Phase 2 (new AST variants need type checking)
+- **Phase 5** depends on Phase 3 (runtime concurrency fixes)
+- **Phase 6** depends on Phase 4 (MIR needs types) and Phase 2 (MIR needs all statement types)
+- **Phase 7** depends on Phase 2 + Phase 4 (complete language features + types)
+- **Phase 8** depends on Phase 7 (all prerequisites)
+
+---
+
+## Success Criteria
+
+### Alpha Release (end of Phase 4, Week 12)
+- [x] All 7 critical bugs fixed
+- [ ] All 15 high-severity bugs fixed (6 remaining: P4, S2, S3, T1, T2, T3)
+- [ ] `for`/`while` loops, `if`/`else` blocks, `return` statements work
+- [ ] 350+ tests, all passing
+- [ ] 20+ end-to-end execution tests
+- [ ] ADTs properly typed with namespace isolation
+- [ ] Generics instantiated correctly
+- [ ] Stores can persist and retrieve real data
+- [ ] All examples that don't require networking compile and run
+- [ ] Zero memory leaks in 4-hour stress test
+
+### Beta Release (end of Phase 6, Week 18)
+- [ ] Full actor framework (typed messages, supervision, monitoring)
+- [ ] Proper MIR as single codegen path
+- [ ] Basic optimization passes (constant folding, dead code, inlining)
+- [ ] Measurable performance improvement from MIR optimizations
+- [ ] 500+ tests
+- [ ] Standard library >80% complete vs spec
+
+### Self-Hosting Milestone (end of Phase 8, Week 24)
+- [ ] Coral compiler front-end (lexer, parser, semantic) self-hosted
+- [ ] Self-hosted front-end produces identical output as Rust front-end
+- [ ] Compilation within 5x of Rust compiler speed
+- [ ] All self-hosting language prerequisites documented and verified
+- [ ] Coral lexer in Coral is the reference lexer going forward
 
 ---
 
 ## Risk Mitigation
 
-### High-Risk Items
-
-1. **Generic Type System Complexity**
-   - **Risk**: Implementation more complex than estimated
-   - **Mitigation**: Implement minimal viable version first, iterate
-
-2. **Runtime Performance Regression**
-   - **Risk**: Optimizations introduce bugs or slowdowns
-   - **Mitigation**: Comprehensive benchmarking before/after changes
-
-3. **Memory Management Correctness**
-   - **Risk**: Cycle collector introduces use-after-free bugs
-   - **Mitigation**: Extensive testing with Valgrind/ASan
-
-### Dependency Risks
-
-1. **LLVM API Changes**: Pin to specific LLVM version until stable
-2. **Inkwell Updates**: Monitor for breaking changes, maintain fork if needed
-3. **Concurrent Development**: Coordinate changes to avoid conflicts
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| MIR rewrite takes longer than estimated | High | Phase 6 delays | Start with MIR that only handles new features; gradually migrate old paths |
+| Self-hosted parser too complex for current type system | Medium | Phase 8 delays | Define smallest viable subset; use `Any` types where inference is insufficient |
+| Actor networking introduces security issues | Medium | Low | Ship local-only first; networking is optional |
+| LLVM 16 becomes unsupported | Low | High | Pin to known-good LLVM version; inkwell abstraction helps migration |
+| Performance regression from boxed-everything model | High | Medium | Phase 6 escape analysis and unboxing are explicitly scheduled |
 
 ---
 
-## Resource Requirements
+## Appendix A: Complete Bug Fix Checklist
 
-### Development Environment
-- Rust 1.70+ with nightly features for testing
-- LLVM 16.x development headers
-- Valgrind/AddressSanitizer for memory testing
-- Criterion for benchmarking
+### Critical (7) — ALL RESOLVED ✅
+- [x] C1: Statement::Return f64/pointer confusion
+- [x] C2: Actor handler dispatch f64/Value* confusion
+- [x] C3: Hash-based actor dispatch hash function mismatch
+- [x] C4: make_map zero-arg to two-arg function
+- [x] R1: Cycle detector deadlock (collect_white/possible_root)
+- [x] R2: Symbol interning memory layout crash
+- [x] R3: Store FFI TAG constants off by one
 
-### Testing Infrastructure  
-- Multi-core machine for concurrency testing
-- Memory profiling tools (heaptrack, massif)
-- Continuous integration with performance tracking
+### High (15) — 6 REMAINING
+- [x] P1: No for/while/loop constructs
+- [x] P2: No if/elif/else blocks
+- [x] P3: return keyword lexed but never parsed
+- [ ] P4: self.field desugaring hack
+- [x] S1: Forward reference failures for type items
+- [ ] S2: Variant constructors typed as Any
+- [ ] S3: Constructor name collisions (no namespace)
+- [x] S4: Store/type method bodies never scope-checked
+- [ ] T1: Int/Float silently unify
+- [ ] T2: Generic instantiation faked (Option→List, Result→Any)
+- [ ] T3: No ADT types in type system
+- [x] R4: Store handle_to_stored_value stub
+- [x] R5: Non-atomic retain/release event counters
+- [x] R6: spawn_named race condition
+- [x] C5: value_hash return type mismatch (consumer removed)
 
-### Review Process
-- Code review required for all changes >100 LOC
-- Performance review required for optimization changes
-- Security review required for unsafe code changes
+### Medium (20+)
+- [ ] L3: No hex/octal/binary numeric literals
+- [ ] L4: Unknown escape sequences silently accepted
+- [ ] P5: synchronize() dead code
+- [ ] P6: Single-error model (subsequent errors dropped)
+- [ ] P7: peek_kind() clones String/Vec payloads
+- [ ] P8: No index/subscript syntax
+- [ ] P10: ~~Trait method return types discarded~~ → **Redesigned:** Remove `-> Type` parsing from `parse_trait_method()` — no return type annotations per design decision
+- [ ] A1: PersistenceMode dead code
+- [ ] A3: MatchPattern::List uses Vec<Expression>
+- [ ] S5: None/Unit conflation
+- [ ] S6: Member access falls back to Map constraint
+- [ ] S8: Pipeline type inference discards left type
+- [ ] T4: Dual-track TypeEnv (scopes vs symbols)
+- [ ] T5: instantiate_generic leaks type params
+- [ ] R8: scan() accesses potentially freed values
+- [ ] R9: drop_heap_value recursive stack overflow
+- [ ] R10: Worker/timer threads never exit
+- [ ] R11: Single work queue contention
+- [ ] D1: Span has no file ID
+- [ ] D2: No diagnostic severity levels
+- [ ] ML1: Text-based export extraction
+- [ ] ML2: No proper namespacing
 
 ---
 
-## Conclusion
+## Appendix B: File Decomposition Plan
 
-This remediation plan addresses the critical architectural issues identified in the comprehensive review while maintaining a systematic approach to improvement. The 16-week timeline is aggressive but achievable with focused effort.
+### runtime/src/lib.rs (4844 lines → 6 files)
+| New File | Content | Est. Lines |
+|----------|---------|------------|
+| value.rs | Value, ValueTag, Payload, alloc_value, drop_heap_value, retain, release | 800 |
+| string.rs | StringObject, inline strings, all coral_string_* FFI | 600 |
+| list.rs | ListObject, all coral_list_* FFI | 400 |
+| map.rs | MapObject, MapBucket, all coral_map_* FFI | 500 |
+| closure.rs | ClosureObject, coral_make_closure, coral_closure_invoke | 200 |
+| lib.rs | Re-exports, remaining FFI (make_number, make_bool, etc.), tests | 800 |
 
-**Key Success Factors**:
-1. **Address P0 issues first** - Memory safety and type safety are foundational
-2. **Maintain test coverage** - Every change must include corresponding tests
-3. **Measure performance impact** - Optimizations should be validated with benchmarks
-4. **Incremental progress** - Each phase builds on previous achievements
+### src/codegen/mod.rs (3830 lines → 5 files)
+| New File | Content | Est. Lines |
+|----------|---------|------------|
+| expression.rs | emit_expression, emit_builtin_call | 1200 |
+| statement.rs | emit_block, emit_statement, emit_binding | 400 |
+| store_actor.rs | Store/actor construction, methods, handlers | 600 |
+| match_adt.rs | Pattern matching, ADT construction, exhaustiveness | 400 |
+| mod.rs | CodeGenerator struct, compile(), function signatures | 800 |
 
-**Expected Outcome**: A production-ready Coral language implementation with robust memory management, type safety, excellent performance, and maintainable codebase architecture.
+### src/semantic.rs (1908 lines → 4 files)
+| New File | Content | Est. Lines |
+|----------|---------|------------|
+| scope.rs | ScopeStack, scope checking, duplicate detection | 400 |
+| constraints.rs | Constraint generation, expression/statement traversal | 600 |
+| mutability.rs | Mutability inference, usage tracking | 300 |
+| semantic.rs | analyze() orchestrator, exhaustiveness, trait validation | 600 |
 
-The path is challenging but the destination—a language combining Python ergonomics with C performance—justifies the engineering investment required.
+---
+
+## Appendix C: Self-Hosting Prerequisites Checklist
+
+| Prerequisite | Status | Needed For |
+|-------------|--------|------------|
+| Sum types (enum/ADT) | ✅ Implemented | Token, Expr, Stmt, Item, Type representation |
+| Exhaustive pattern matching | ✅ Implemented | Token dispatch, AST traversal |
+| String manipulation | ✅ Implemented | Source text processing, error messages |
+| File I/O | ⚠️ Basic | Reading source files, writing output |
+| Maps | ✅ Implemented | Symbol tables, scope maps |
+| Lists | ✅ Implemented | Token streams, AST node children |
+| Closures | ✅ Implemented | Higher-order functions, visitors |
+| Error handling | ✅ Implemented | Parse errors, type errors |
+| For/while loops | ✅ Implemented | Token iteration, tree traversal |
+| If/else blocks | ✅ Implemented | Conditional logic throughout |
+| Return statements | ✅ Implemented | Early returns in parse functions |
+| Index/subscript access | ❌ **Missing** | Array access patterns |
+| Namespaced imports | ❌ **Missing** | Module organization |
+| Trait system | ❌ **Missing** | Visitor pattern, interface abstraction |
+| Process spawning | ❌ **Missing** | Invoking LLVM tools |
+| Environment variables | ❌ **Missing** | Build configuration |
+| Hex numeric literals | ❌ **Missing** | Low-level constants |
+| String regex/patterns | ❌ **Missing** | Lexer patterns (alternative: char-by-char) |
+| Proper generics | ❌ **Missing** | Type-safe collections |
+| Multi-line strings | ❌ **Missing** | LLVM IR template strings |

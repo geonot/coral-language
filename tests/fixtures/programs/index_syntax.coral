@@ -1,0 +1,6 @@
+# Index / subscript syntax test
+items is [10, 20, 30]
+first is items[0]
+second is items[1]
+log(first)
+log(second)

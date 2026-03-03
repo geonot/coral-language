@@ -130,6 +130,46 @@ fn statement_snapshot(statement: &Statement) -> Value {
         Statement::Binding(binding) => json!({ "binding": binding_snapshot(binding) }),
         Statement::Expression(expr) => json!({ "expression": expression_snapshot(expr) }),
         Statement::Return(expr, _) => json!({ "return": expression_snapshot(expr) }),
+        Statement::If { condition, body, elif_branches, else_body, .. } => {
+            let mut obj = json!({
+                "if": {
+                    "condition": expression_snapshot(condition),
+                    "body": block_snapshot(body),
+                }
+            });
+            if !elif_branches.is_empty() {
+                obj["elif"] = json!(elif_branches.iter().map(|(c, b)| json!({
+                    "condition": expression_snapshot(c),
+                    "body": block_snapshot(b),
+                })).collect::<Vec<_>>());
+            }
+            if let Some(else_block) = else_body {
+                obj["else"] = block_snapshot(else_block);
+            }
+            obj
+        }
+        Statement::While { condition, body, .. } => json!({
+            "while": {
+                "condition": expression_snapshot(condition),
+                "body": block_snapshot(body),
+            }
+        }),
+        Statement::For { variable, iterable, body, .. } => json!({
+            "for": {
+                "variable": variable,
+                "iterable": expression_snapshot(iterable),
+                "body": block_snapshot(body),
+            }
+        }),
+        Statement::Break(_) => json!({ "break": true }),
+        Statement::Continue(_) => json!({ "continue": true }),
+        Statement::FieldAssign { target, field, value, .. } => json!({
+            "field_assign": {
+                "target": expression_snapshot(target),
+                "field": field,
+                "value": expression_snapshot(value),
+            }
+        }),
     }
 }
 
@@ -326,6 +366,12 @@ fn expression_snapshot(expr: &Expression) -> Value {
         Expression::ErrorPropagate { expr, .. } => json!({
             "error_propagate": expression_snapshot(expr)
         }),
+        Expression::Index { target, index, .. } => json!({
+            "index": {
+                "target": expression_snapshot(target),
+                "index": expression_snapshot(index)
+            }
+        }),
     }
 }
 
@@ -335,8 +381,8 @@ fn pattern_snapshot(pattern: &MatchPattern) -> Value {
         MatchPattern::Bool(value) => json!({ "bool": value }),
         MatchPattern::Identifier(name) => json!({ "identifier": name }),
         MatchPattern::String(value) => json!({ "string": value }),
-        MatchPattern::List(items) => json!({
-            "list": items.iter().map(expression_snapshot).collect::<Vec<_>>()
+        MatchPattern::List(patterns) => json!({
+            "list": patterns.iter().map(pattern_snapshot).collect::<Vec<_>>()
         }),
         MatchPattern::Constructor { name, fields, .. } => json!({
             "constructor": {
@@ -363,6 +409,7 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
         BinaryOp::ShiftLeft => "ShiftLeft",
         BinaryOp::ShiftRight => "ShiftRight",
         BinaryOp::Equals => "Equals",
+        BinaryOp::NotEquals => "NotEquals",
         BinaryOp::Greater => "Greater",
         BinaryOp::GreaterEq => "GreaterEq",
         BinaryOp::Less => "Less",

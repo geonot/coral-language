@@ -19,7 +19,7 @@ e is 2.718281828459045
 	x < 0
 
 *is_zero(x)
-	x == 0
+	x.equals(0)
 
 *clamp(value, low, high)
 	min(high, max(low, value))

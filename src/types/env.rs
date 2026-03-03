@@ -3,7 +3,7 @@
 //! Provides scope management, mutability tracking, type environment operations,
 //! and type parameter tracking for generic types.
 
-use super::core::{TypeId, TypeVarId, Primitive};
+use super::core::{TypeId, Primitive};
 use std::collections::{HashMap, HashSet};
 
 /// Binding information for a name in scope.
@@ -176,10 +176,9 @@ impl TypeEnv {
             return None; // Arity mismatch
         }
 
-        // Bind type parameters
-        for (param, arg) in params.iter().zip(type_args.iter()) {
-            self.type_params.insert(param.clone(), arg.clone());
-        }
+        // Bind type parameters (note: we don't actually need these insertions
+        // since the return type is constructed directly from type_args below)
+        // The insertions were previously leaked into self.type_params.
 
         // Return the instantiated type
         match type_name {

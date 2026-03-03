@@ -1,0 +1,13 @@
+# Network standard library - Basic networking functions
+# This is a stub implementation for development
+
+*tcp_listen(host, port)
+    # Stub: In real implementation, this would create a TCP listener
+    err NetworkStub:'tcp_listen not implemented'
+
+*tcp_connect(host, port)
+    # Stub: In real implementation, this would create a TCP connection
+    err NetworkStub:'tcp_connect not implemented'
+
+# Error definitions for networking
+err NetworkStub

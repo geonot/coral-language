@@ -4,17 +4,12 @@ An experimental programming language combining Python-like ergonomics with C/Rus
 
 **Status**: Pre-Alpha (102 tests passing, core features working)
 
+
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/ALPHA_ROADMAP.md](docs/ALPHA_ROADMAP.md) | Current state and path to alpha release |
-| [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) | Known issues and technical debt |
-| [docs/STANDARD_LIBRARY_SPEC.md](docs/STANDARD_LIBRARY_SPEC.md) | Standard library specification |
-| [docs/ACTOR_SYSTEM_COMPLETION.md](docs/ACTOR_SYSTEM_COMPLETION.md) | Actor system completion plan |
-| [docs/PERSISTENT_STORE_SPEC.md](docs/PERSISTENT_STORE_SPEC.md) | Persistent storage specification |
-| [docs/SELF_HOSTED_COMPILER_SPEC.md](docs/SELF_HOSTED_COMPILER_SPEC.md) | Self-hosting compiler spec |
-| [docs/SELF_HOSTED_RUNTIME_SPEC.md](docs/SELF_HOSTED_RUNTIME_SPEC.md) | Self-hosting runtime spec |
+All authoritative documentation is now in the [docs/](docs/) directory. See `docs/README.md` for the full index and document status.
+
+**Note:** The former `docs_archive/` directory and all obsolete plans, brainstorms, and status files have been deleted for clarity and consistency. Please refer only to the current roadmap, technical debt, and specification documents in `docs/`.
 
 ## Implementation
 

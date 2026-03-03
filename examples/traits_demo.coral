@@ -1,343 +1,165 @@
-# Traits Demo - Demonstrating Coral's mixin/trait system
+# Traits Demo - Simulating trait-like behavior with functions and types
 
-# Traits are defined with 'trait' keyword
-# They contain method signatures and optional default implementations
+# Type definitions using ADTs (since traits aren't implemented yet)
+enum Shape
+    Circle(radius)
+    Rectangle(width, height)
+    Triangle(base, height)
 
-trait Printable
-    # Required method (no body)
-    *to_string()
-    
-    # Default implementation
-    *print()
-        log(to_string())
-    
-    *print_with_prefix(prefix)
-        log('{prefix}: {to_string()}')
+# "Trait-like" behavior through functions that work with different types
+*area(shape)
+    match shape
+        Circle(r) ? 3.14159 * r * r
+        Rectangle(w, h) ? w * h
+        Triangle(b, h) ? 0.5 * b * h
+        _ ? 0
 
-trait Comparable
-    # Required: compare returns -1, 0, or 1
-    *compare(other)
-    
-    # Defaults derived from compare
-    *less_than(other)
-        compare(other) < 0
-    
-    *greater_than(other)
-        compare(other) > 0
-    
-    *equals(other)
-        compare(other) == 0
-    
-    *less_or_equal(other)
-        compare(other) <= 0
-    
-    *greater_or_equal(other)
-        compare(other) >= 0
+*perimeter(shape)
+    match shape
+        Circle(r) ? 2 * 3.14159 * r
+        Rectangle(w, h) ? 2 * (w + h)
+        Triangle(b, h) ? b + 2 * 5  # Simplified for demo
+        _ ? 0
 
-trait Hashable
-    *hash()
+*describe(shape)
+    match shape
+        Circle(r) ? 'Circle with radius {r}'
+        Rectangle(w, h) ? 'Rectangle {w}x{h}'
+        Triangle(b, h) ? 'Triangle base {b}, height {h}'
+        _ ? 'Unknown shape'
 
-trait Serializable
-    *to_json()
-    *from_json(data)
+# Point type for coordinate operations
+enum Point
+    Point2D(x, y)
+    Point3D(x, y, z)
 
-# Combining traits with 'with'
-trait Equatable
-    with Comparable
-    with Hashable
-    
-    # Additional methods
-    *not_equals(other)
-        not equals(other)
+*distance_from_origin(point)
+    match point
+        Point2D(x, y) ? x*x + y*y
+        Point3D(x, y, z) ? x*x + y*y + z*z
+        _ ? 0
 
-# Using traits in a type definition
-type Point
-    with Printable
-    with Comparable
-    with Hashable
-    
-    x ? 0
-    y ? 0
-    
-    # Implement required methods
-    *to_string()
-        'Point({x}, {y})'
-    
-    *compare(other)
-        # Compare by distance from origin
-        self_dist is math.sqrt(x*x + y*y)
-        other_dist is math.sqrt(other.x*other.x + other.y*other.y)
-        
-        self_dist < other_dist ? -1 !
-        self_dist > other_dist ? 1 !
-        0
-    
-    *hash()
-        # Simple hash combining x and y
-        (x * 31) + y
+*point_to_string(point)
+    match point
+        Point2D(x, y) ? '({x}, {y})'
+        Point3D(x, y, z) ? '({x}, {y}, {z})'
+        _ ? '(unknown)'
 
-type Person
-    with Printable
-    with Serializable
-    
-    name
-    age
-    email
-    
-    *to_string()
-        '{name} (age {age})'
-    
-    *to_json()
-        '{{"name": "{name}", "age": {age}, "email": "{email}"}}'
-    
-    *from_json(data)
-        obj is json.parse(data)
-        Person(
-            name is obj.get('name'),
-            age is obj.get('age'),
-            email is obj.get('email')
-        )
+# Comparable-like behavior
+*compare_shapes(shape1, shape2)
+    area1 is area(shape1)
+    area2 is area(shape2)
+    area1 > area2 ? 1 ! area1 < area2 ? -1 ! 0
 
-# Trait for collections
-trait Collection
-    *length()
-    *is_empty()
-        length() == 0
-    *get(index)
-    *contains(item)
+*is_larger(shape1, shape2)
+    compare_shapes(shape1, shape2) > 0
 
-trait Iterable
-    *iterator()
+# Demo functions
+*shape_demo()
+    log('=== Shape Demo ===')
     
-    *each(fn)
-        iter is iterator()
-        while iter.has_next()
-            fn(iter.next())
+    # Create different shapes
+    circle is Circle(5)
+    rect is Rectangle(4, 6)
+    triangle is Triangle(3, 4)
     
-    *map(fn)
-        result is []
-        each(item)
-            result.push(fn(item))
-        result
-    
-    *filter(pred)
-        result is []
-        each(item)
-            pred(item) ? result.push(item)
-        result
-    
-    *reduce(initial, fn)
-        acc is initial
-        each(item)
-            acc is fn(acc, item)
-        acc
-
-trait Sortable
-    with Collection
-    with Comparable
-    
-    *sort()
-        # Default: quicksort
-        _quicksort(0, length() - 1)
-        self
-    
-    *sorted()
-        # Return new sorted copy
-        copy().sort()
-
-# Generic container using traits (type inference handles this)
-type Stack
-    with Collection
-    with Iterable
-    
-    items ? []
-    
-    *push(item)
-        items.push(item)
-        self
-    
-    *pop()
-        items.length == 0 ? ! err EmptyStack
-        items.pop()
-    
-    *peek()
-        items.length == 0 ? ! err EmptyStack
-        items.get(items.length - 1)
-    
-    *length()
-        items.length
-    
-    *get(index)
-        items.get(index)
-    
-    *contains(item)
-        items.contains(item)
-    
-    *iterator()
-        StackIterator(items is items, index is 0)
-
-type StackIterator
-    items
-    index
-    
-    *has_next()
-        index < items.length
-    
-    *next()
-        item is items.get(index)
-        index is index + 1
-        item
-
-# Numeric traits
-trait Numeric
-    *add(other)
-    *subtract(other)
-    *multiply(other)
-    *divide(other)
-    *negate()
-    
-    # Derived
-    *abs()
-        compare(zero()) < 0 ? negate() ! self
-    
-    *zero()  # Required: return zero value
-
-# Complex numbers implementing numeric
-type Complex
-    with Numeric
-    with Printable
-    with Comparable
-    
-    real ? 0
-    imag ? 0
-    
-    *add(other)
-        Complex(real + other.real, imag + other.imag)
-    
-    *subtract(other)
-        Complex(real - other.real, imag - other.imag)
-    
-    *multiply(other)
-        # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-        Complex(
-            real * other.real - imag * other.imag,
-            real * other.imag + imag * other.real
-        )
-    
-    *divide(other)
-        denom is other.real * other.real + other.imag * other.imag
-        Complex(
-            (real * other.real + imag * other.imag) / denom,
-            (imag * other.real - real * other.imag) / denom
-        )
-    
-    *negate()
-        Complex(-real, -imag)
-    
-    *zero()
-        Complex(0, 0)
-    
-    *magnitude()
-        math.sqrt(real * real + imag * imag)
-    
-    *conjugate()
-        Complex(real, -imag)
-    
-    *compare(other)
-        m1 is magnitude()
-        m2 is other.magnitude()
-        m1 < m2 ? -1 ! m1 > m2 ? 1 ! 0
-    
-    *to_string()
-        imag >= 0 ?
-            '{real} + {imag}i'
-          ! '{real} - {-imag}i'
-
-# Demo
-*demonstrate_points()
-    log('=== Point Trait Demo ===')
-    
-    p1 is Point(3, 4)
-    p2 is Point(1, 1)
-    p3 is Point(6, 8)
-    
-    # Using Printable trait
-    p1.print()
-    p2.print_with_prefix('Origin point')
-    
-    # Using Comparable trait
-    log('p1 > p2: {p1.greater_than(p2)}')
-    log('p1 < p3: {p1.less_than(p3)}')
-    
-    # Using Hashable trait
-    log('Hash of p1: {p1.hash()}')
-
-*demonstrate_collection()
+    # Show descriptions
+    log('Shapes:')
+    log('  - {describe(circle)}')
+    log('  - {describe(rect)}')
+    log('  - {describe(triangle)}')
     log('')
-    log('=== Collection Trait Demo ===')
     
-    stack is Stack()
-    stack.push(10).push(20).push(30)
-    
-    log('Stack length: {stack.length()}')
-    log('Stack contains 20: {stack.contains(20)}')
-    
-    # Using Iterable
-    log('Stack items:')
-    stack.each(item)
-        log('  - {item}')
-    
-    # Map and filter
-    doubled is stack.map($ * 2)
-    log('Doubled: {doubled}')
-    
-    big is stack.filter($ > 15)
-    log('Items > 15: {big}')
-    
-    sum is stack.reduce(0, +)
-    log('Sum: {sum}')
-
-*demonstrate_complex()
+    # Calculate areas
+    log('Areas:')
+    log('  Circle area: {area(circle)}')
+    log('  Rectangle area: {area(rect)}')
+    log('  Triangle area: {area(triangle)}')
     log('')
-    log('=== Complex Number Demo ===')
     
-    c1 is Complex(3, 4)
-    c2 is Complex(1, 2)
-    
-    c1.print_with_prefix('c1')
-    c2.print_with_prefix('c2')
-    
-    sum is c1.add(c2)
-    log('c1 + c2 = {sum.to_string()}')
-    
-    product is c1.multiply(c2)
-    log('c1 * c2 = {product.to_string()}')
-    
-    log('|c1| = {c1.magnitude()}')
-    log('c1 > c2: {c1.greater_than(c2)}')
-
-*demonstrate_serialization()
+    # Calculate perimeters
+    log('Perimeters:')
+    log('  Circle perimeter: {perimeter(circle)}')
+    log('  Rectangle perimeter: {perimeter(rect)}')
+    log('  Triangle perimeter: {perimeter(triangle)}')
     log('')
-    log('=== Serialization Demo ===')
+
+*point_demo()
+    log('=== Point Demo ===')
     
-    person is Person('Alice', 30, 'alice@example.com')
-    person.print()
+    # Create points
+    p2d is Point2D(3, 4)
+    p3d is Point3D(1, 2, 3)
     
-    json_str is person.to_json()
-    log('JSON: {json_str}')
+    # Show points
+    log('Points:')
+    log('  2D Point: {point_to_string(p2d)}')
+    log('  3D Point: {point_to_string(p3d)}')
+    log('')
     
-    # Round-trip
-    restored is Person.from_json(json_str)
-    restored.print_with_prefix('Restored')
+    # Calculate distances
+    log('Distances from origin (squared):')
+    log('  2D distance: {distance_from_origin(p2d)}')
+    log('  3D distance: {distance_from_origin(p3d)}')
+    log('')
+
+*comparison_demo()
+    log('=== Comparison Demo ===')
+    
+    # Create shapes for comparison
+    small_circle is Circle(2)
+    large_circle is Circle(5)
+    square is Rectangle(3, 3)
+    
+    log('Comparing shapes:')
+    log('  Small circle area: {area(small_circle)}')
+    log('  Large circle area: {area(large_circle)}')
+    log('  Square area: {area(square)}')
+    log('')
+    
+    # Compare shapes
+    larger1 is is_larger(large_circle, small_circle)
+    larger2 is is_larger(square, small_circle)
+    larger3 is is_larger(large_circle, square)
+    
+    log('Comparisons (is first larger than second?):')
+    log('  Large circle vs Small circle: {larger1}')
+    log('  Square vs Small circle: {larger2}')
+    log('  Large circle vs Square: {larger3}')
+    log('')
+
+# Collection-like behavior
+*shape_collection_demo()
+    log('=== Shape Collection Demo ===')
+    
+    # Create a list of shapes
+    shapes is [
+        Circle(3),
+        Rectangle(2, 5),
+        Triangle(4, 6),
+        Circle(1)
+    ]
+    
+    log('Shape collection:')
+    log('Shape 0: {describe(shapes.get(0))} - Area: {area(shapes.get(0))}')
+    log('Shape 1: {describe(shapes.get(1))} - Area: {area(shapes.get(1))}')
+    log('Shape 2: {describe(shapes.get(2))} - Area: {area(shapes.get(2))}')
+    log('Shape 3: {describe(shapes.get(3))} - Area: {area(shapes.get(3))}')
+    log('')
+    
+    # Find total area
+    total_area is area(shapes.get(0)) + area(shapes.get(1)) + area(shapes.get(2)) + area(shapes.get(3))
+    log('Total area of all shapes: {total_area}')
+    log('')
 
 *main()
-    log('Coral Traits/Mixins Demo')
-    log('========================')
-    
-    demonstrate_points()
-    demonstrate_collection()
-    demonstrate_complex()
-    demonstrate_serialization()
-    
+    log('Coral Traits Demo (Simulated)')
+    log('=============================')
     log('')
+    
+    shape_demo()
+    point_demo()
+    comparison_demo()
+    shape_collection_demo()
+    
     log('Demo complete!')

@@ -62,7 +62,7 @@ use std.prelude
 
 # Check if string is empty
 *empty(s)
-    s.length == 0
+    s.length is 0
 
 # Concatenate two strings
 *join_two(a, b)

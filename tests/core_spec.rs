@@ -39,3 +39,18 @@ fn compiles_store_with_reference_fields() {
     assert!(ir.contains("define ptr @Node_set_next(ptr %0, ptr %1)"));
 }
 
+#[test]
+fn compiles_index_subscript_syntax() {
+    let mut loader = ModuleLoader::with_default_std();
+    let path = PathBuf::from("tests/fixtures/programs/index_syntax.coral");
+    let source = loader.load(&path).expect("load index_syntax program");
+
+    let compiler = Compiler;
+    let ir = compiler
+        .compile_to_ir(&source)
+        .expect("failed to compile index syntax");
+
+    // Verify subscript desugars to coral_list_get calls
+    assert!(ir.contains("@coral_list_get"));
+}
+

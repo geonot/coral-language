@@ -268,56 +268,75 @@ Target: ~10 weeks of development (405 hours estimated)
 
 #### 5.2.1 Parse `trait` definitions
 - **File**: `src/parser.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 4h
 - **Details**:
   - `KeywordTrait` token exists
-  - Parse trait name, method signatures, default impls
+  - `parse_trait_def()` and `parse_trait_method()` fully implemented
+  - Parses trait name, required traits, methods with optional default bodies
 
 #### 5.2.2 Parse `with Trait` in type/store definitions
 - **File**: `src/parser.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 2h
 - **Details**:
   - `KeywordWith` token exists
-  - Parse `store Foo with Trait1, Trait2`
+  - Parses `store Foo with Trait1, Trait2`
+  - Parses `type Foo with Trait1, Trait2`
+  - `parse_composite_body_with_traits()` handles both
 
 #### 5.2.3 AST nodes for traits
 - **File**: `src/ast.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 2h
 - **Details**:
-  - `TraitDefinition` item type
+  - `TraitDefinition` item type with name, required_traits, methods
   - `TraitMethod` with optional body (default impl)
   - `with_traits` field on StoreDefinition/TypeDefinition
 
 #### 5.2.4 Semantic: trait method resolution
 - **File**: `src/semantic.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 6h
+- **Details**:
+  - Trait methods registered in type env as `TraitName::method`
+  - Default method injection into store/type method lists before codegen
 
 #### 5.2.5 Semantic: check required methods implemented
 - **File**: `src/semantic.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 4h
+- **Details**:
+  - `validate_type_traits()` and `validate_store_traits()` check required methods
+  - Reports missing methods with helpful diagnostics
 
 #### 5.2.6 Semantic: default method inheritance
 - **File**: `src/semantic.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 4h
+- **Details**:
+  - `inject_trait_default_methods()` adds default bodies to store/type method lists
+  - Warns when types override default methods
 
 #### 5.2.7 Codegen: trait method dispatch
 - **File**: `src/codegen/mod.rs`
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 4h
+- **Details**:
+  - Default methods injected at semantic level compile as regular methods
+  - Type methods now compiled alongside store methods (was missing)
+  - 5 E2E tests verify trait method execution
 
 #### 5.2.8 Trait composition
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 - **Effort**: 2h
+- **Details**:
+  - Trait dependency validation (e.g., `Derived with Base`)
+  - Dependency chain checking in `validate_trait_implementations`
 
 #### 5.2.9 Test suite: traits (15+ tests)
-- **File**: `tests/traits.rs` (new)
-- **Status**: ⬜ Not Started
+- **File**: `tests/traits.rs` + `tests/execution.rs`
+- **Status**: ✅ Complete (24 tests: 19 parse/semantic + 5 E2E)
 - **Effort**: 4h
 
 ---
@@ -530,7 +549,9 @@ Target: ~10 weeks of development (405 hours estimated)
 7. **6.4.x**: Typed message contracts - ~20h
 
 ### Current Test Coverage
-- **Total tests**: 214
+- **Total tests**: 406
+- **E2E execution tests**: 121 (tests/execution.rs)
+- **Self-hosting regression tests**: 3 (tests/self_hosting.rs)
 - **ADT tests**: 18 (tests/adt.rs)
 - **Pipeline tests**: 11 (tests/pipeline.rs)  
 - **Error handling tests**: 14 (tests/error_handling.rs)
@@ -538,6 +559,7 @@ Target: ~10 weeks of development (405 hours estimated)
 - **Nested pattern tests**: 13 (tests/nested_patterns.rs)
 - **Named actor tests**: 3 (tests/named_actors.rs)
 - **Timer tests**: 6 (tests/timers.rs)
+- **Trait tests**: 24 (19 parse/semantic + 5 E2E)
 
 ---
 
@@ -548,11 +570,11 @@ Target: ~10 weeks of development (405 hours estimated)
 | 4.1 | 14 | 10 | 71% |
 | 4.2 | 6 | 5 | 83% |
 | 5.1 | 6 | 6 | 100% |
-| 5.2 | 9 | 0 | 0% |
+| 5.2 | 9 | 9 | 100% |
 | 5.3 | 11 | 2 | 18% |
 | 6.x | 25 | 12 | 48% |
 | 7.x | 23 | 0 | 0% |
 | 8.x | 13 | 0 | 0% |
 | 9.x | 11 | 0 | 0% |
-| **Total** | **118** | **35** | **30%** |
+| **Total** | **118** | **44** | **37%** |
 

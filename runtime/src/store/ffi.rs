@@ -35,19 +35,20 @@ unsafe extern "C" {
     fn coral_value_as_number(value: ValueHandle) -> f64;
     fn coral_value_as_bool(value: ValueHandle) -> u8;
     fn coral_list_len(list: ValueHandle) -> usize;
-    fn coral_list_get(list: ValueHandle, index: usize) -> ValueHandle;
+    fn coral_list_get_index(list: ValueHandle, index: usize) -> ValueHandle;
     fn coral_map_get(map: ValueHandle, key: ValueHandle) -> ValueHandle;
     fn coral_map_keys(map: ValueHandle) -> ValueHandle;
 }
 
 // Tag values matching ValueTag in lib.rs
-const TAG_UNIT: u8 = 0;
-const TAG_NUMBER: u8 = 1;
-const TAG_BOOL: u8 = 2;
-const TAG_STRING: u8 = 3;
-const TAG_BYTES: u8 = 4;
-const TAG_LIST: u8 = 5;
-const TAG_MAP: u8 = 6;
+// ValueTag: Number=0, Bool=1, String=2, List=3, Map=4, Store=5, Actor=6, Unit=7, Closure=8, Bytes=9
+const TAG_NUMBER: u8 = 0;
+const TAG_BOOL: u8 = 1;
+const TAG_STRING: u8 = 2;
+const TAG_LIST: u8 = 3;
+const TAG_MAP: u8 = 4;
+const TAG_UNIT: u8 = 7;
+const TAG_BYTES: u8 = 9;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -56,22 +57,23 @@ pub struct MapEntry {
     pub value: ValueHandle,
 }
 
-/// Store handle info (store_type and store_name)
+/// Store handle info (store_type, store_name, and data_path)
 #[derive(Clone)]
 pub struct StoreHandleInfo {
     pub store_type: String,
     pub store_name: String,
+    pub data_path: String,
 }
 
 // Global handle registry
 static STORE_HANDLES: RwLock<Option<HashMap<u64, StoreHandleInfo>>> = RwLock::new(None);
 static NEXT_HANDLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn register_handle(store_type: String, store_name: String) -> u64 {
+fn register_handle(store_type: String, store_name: String, data_path: String) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut guard = STORE_HANDLES.write().unwrap();
     let handles = guard.get_or_insert_with(HashMap::new);
-    handles.insert(id, StoreHandleInfo { store_type, store_name });
+    handles.insert(id, StoreHandleInfo { store_type, store_name, data_path });
     id
 }
 
@@ -133,12 +135,89 @@ fn stored_value_to_handle(value: &StoredValue) -> ValueHandle {
     }
 }
 
-/// Convert a Coral ValueHandle to a StoredValue (placeholder - needs runtime internals)
-fn handle_to_stored_value(_value: ValueHandle) -> Option<StoredValue> {
-    // This requires access to runtime internals to properly extract values.
-    // For now, return an empty map for map values.
-    // TODO: Implement proper conversion when runtime integration is complete.
-    Some(StoredValue::Map(Vec::new()))
+/// Convert a Coral ValueHandle to a StoredValue
+fn handle_to_stored_value(value: ValueHandle) -> Option<StoredValue> {
+    if value.is_null() {
+        return Some(StoredValue::Unit);
+    }
+    let tag = unsafe { coral_value_tag(value) };
+    match tag {
+        TAG_UNIT => Some(StoredValue::Unit),
+        TAG_NUMBER => {
+            let n = unsafe { coral_value_as_number(value) };
+            // Use Int if the value is a whole number that fits in i64, else Float
+            if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                Some(StoredValue::Int(n as i64))
+            } else {
+                Some(StoredValue::Float(n))
+            }
+        }
+        TAG_BOOL => {
+            let b = unsafe { coral_value_as_bool(value) };
+            Some(StoredValue::Bool(b != 0))
+        }
+        TAG_STRING => {
+            // Cast to the actual Value type to access string data
+            let val = unsafe { &*(value as *const crate::Value) };
+            let s = crate::value_to_rust_string(val);
+            Some(StoredValue::String(s))
+        }
+        TAG_BYTES => {
+            let val = unsafe { &*(value as *const crate::Value) };
+            let bytes = crate::string_to_bytes(val);
+            Some(StoredValue::Bytes(bytes))
+        }
+        TAG_LIST => {
+            let len = unsafe { coral_list_len(value) };
+            let mut items = Vec::with_capacity(len);
+            for i in 0..len {
+                let elem = unsafe { coral_list_get_index(value, i) };
+                if let Some(sv) = handle_to_stored_value(elem) {
+                    items.push(sv);
+                } else {
+                    items.push(StoredValue::Unit);
+                }
+            }
+            Some(StoredValue::List(items))
+        }
+        TAG_MAP => {
+            let keys_list = unsafe { coral_map_keys(value) };
+            let keys_len = unsafe { coral_list_len(keys_list) };
+            let mut pairs = Vec::with_capacity(keys_len);
+            for i in 0..keys_len {
+                let key_handle = unsafe { coral_list_get_index(keys_list, i) };
+                let key_val = unsafe { &*(key_handle as *const crate::Value) };
+                let key_str = crate::value_to_rust_string(key_val);
+                let val_handle = unsafe { coral_map_get(value, key_handle) };
+                let stored_val = handle_to_stored_value(val_handle)
+                    .unwrap_or(StoredValue::Unit);
+                pairs.push((key_str, stored_val));
+            }
+            unsafe { coral_value_release(keys_list); }
+            Some(StoredValue::Map(pairs))
+        }
+        _ => {
+            // Unsupported tags (Store, Actor, Closure, Tagged) → store as Unit
+            Some(StoredValue::Unit)
+        }
+    }
+}
+
+/// Extract field pairs from a Map ValueHandle.
+/// If the handle is not a map or is null, returns an empty vec.
+fn extract_field_pairs(fields: ValueHandle) -> Vec<(String, StoredValue)> {
+    if fields.is_null() {
+        return Vec::new();
+    }
+    let tag = unsafe { coral_value_tag(fields) };
+    if tag != TAG_MAP {
+        return Vec::new();
+    }
+    // Use handle_to_stored_value to convert the map, then extract pairs
+    match handle_to_stored_value(fields) {
+        Some(StoredValue::Map(pairs)) => pairs,
+        _ => Vec::new(),
+    }
 }
 
 /// Create a map with system attributes from stored object
@@ -262,7 +341,7 @@ pub extern "C" fn coral_store_open(
     // Open store engine
     match open_store_engine(&store_type, &store_name, config) {
         Ok(_) => {
-            let handle_id = register_handle(store_type, store_name);
+            let handle_id = register_handle(store_type, store_name, data_path);
             unsafe { coral_make_number(handle_id as f64) }
         }
         Err(e) => {
@@ -310,7 +389,7 @@ where
         None => return Err(unsafe { coral_make_error(4, b"InvalidHandle".as_ptr(), 13) }),
     };
     
-    let config = StoreConfig::minimal(&info.store_type, ".coral_data");
+    let config = StoreConfig::minimal(&info.store_type, &info.data_path);
     let engine = match open_store_engine(&info.store_type, &info.store_name, config) {
         Ok(e) => e,
         Err(e) => {
@@ -332,9 +411,9 @@ where
 /// * `handle` - Store handle
 /// * `fields` - Map of field name -> value pairs
 #[unsafe(no_mangle)]
-pub extern "C" fn coral_store_create(handle: ValueHandle, _fields: ValueHandle) -> ValueHandle {
-    // For now, create with empty fields until we have proper value conversion
-    let field_pairs: Vec<(String, StoredValue)> = Vec::new();
+pub extern "C" fn coral_store_create(handle: ValueHandle, fields: ValueHandle) -> ValueHandle {
+    // Convert fields map to stored value pairs
+    let field_pairs = extract_field_pairs(fields);
     
     match with_engine(handle, |engine| {
         engine.create(field_pairs.clone())
@@ -414,43 +493,25 @@ pub extern "C" fn coral_store_get_by_uuid(
         Err(_) => return unsafe { coral_make_error(8, b"InvalidUuid".as_ptr(), 11) },
     };
     
-    let handle_id = unsafe { coral_value_as_number(handle) as u64 };
-    
-    let info = match get_handle_info(handle_id) {
-        Some(i) => i,
-        None => return unsafe { coral_make_error(4, b"InvalidHandle".as_ptr(), 13) },
-    };
-    
-    let config = StoreConfig::minimal(&info.store_type, ".coral_data");
-    let engine = match open_store_engine(&info.store_type, &info.store_name, config) {
-        Ok(e) => e,
-        Err(e) => {
-            let msg = format!("EngineError:{}", e);
-            return unsafe { coral_make_error(3, msg.as_ptr(), msg.len()) };
+    // Use indexed lookup via with_engine + get_by_uuid
+    match with_engine(handle, |engine| {
+        engine.get_by_uuid(&uuid)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(Some(obj)) => {
+            create_object_map(
+                obj.index,
+                &obj.uuid.to_string(),
+                obj.version,
+                obj.created_at,
+                obj.updated_at,
+                obj.deleted_at,
+                &obj.fields,
+            )
         }
-    };
-    
-    // Get by UUID requires mutable access to load from disk
-    // This is a limitation - we'd need RwLock internals
-    // For now, just scan the all() indices
-    let indices = engine.all();
-    for idx in indices {
-        if let Ok(Some(obj)) = engine.get(idx) {
-            if obj.uuid == uuid {
-                return create_object_map(
-                    obj.index,
-                    &obj.uuid.to_string(),
-                    obj.version,
-                    obj.created_at,
-                    obj.updated_at,
-                    obj.deleted_at,
-                    &obj.fields,
-                );
-            }
-        }
+        Ok(None) => unsafe { coral_make_absent() },
+        Err(e) => e,
     }
-    
-    unsafe { coral_make_absent() }
 }
 
 /// Update an object by index.
@@ -458,12 +519,12 @@ pub extern "C" fn coral_store_get_by_uuid(
 pub extern "C" fn coral_store_update(
     handle: ValueHandle,
     index: ValueHandle,
-    _fields: ValueHandle,
+    fields: ValueHandle,
 ) -> ValueHandle {
     let idx = unsafe { coral_value_as_number(index) as u64 };
     
-    // For now, update with empty fields until we have proper value conversion
-    let field_pairs: Vec<(String, StoredValue)> = Vec::new();
+    // Convert fields map to stored value pairs
+    let field_pairs = extract_field_pairs(fields);
     
     match with_engine(handle, |engine| {
         engine.update(idx, field_pairs.clone())
@@ -654,18 +715,20 @@ mod tests {
     
     #[test]
     fn test_handle_registry() {
-        let id1 = register_handle("TestType".to_string(), "default".to_string());
-        let id2 = register_handle("TestType".to_string(), "other".to_string());
+        let id1 = register_handle("TestType".to_string(), "default".to_string(), ".coral_data".to_string());
+        let id2 = register_handle("TestType".to_string(), "other".to_string(), "/tmp/test".to_string());
         
         assert_ne!(id1, id2);
         
         let info1 = get_handle_info(id1).unwrap();
         assert_eq!(info1.store_type, "TestType");
         assert_eq!(info1.store_name, "default");
+        assert_eq!(info1.data_path, ".coral_data");
         
         let info2 = get_handle_info(id2).unwrap();
         assert_eq!(info2.store_type, "TestType");
         assert_eq!(info2.store_name, "other");
+        assert_eq!(info2.data_path, "/tmp/test");
         
         remove_handle(id1);
         assert!(get_handle_info(id1).is_none());

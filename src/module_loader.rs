@@ -11,6 +11,7 @@ const STD_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/std");
 
 /// Cache entry for a loaded module.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ModuleCacheEntry {
     /// The expanded source content
     content: String,
@@ -18,8 +19,6 @@ struct ModuleCacheEntry {
     content_hash: u64,
     /// Last modified time of the source file
     modified_time: SystemTime,
-    /// Hash of all dependencies (transitive)
-    dependency_hash: u64,
     /// List of direct dependencies (module paths)
     dependencies: Vec<PathBuf>,
 }
@@ -246,17 +245,6 @@ impl ModuleLoader {
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         
-        // Compute dependency hash
-        let dependency_hash = {
-            let mut dep_hash = 0u64;
-            for dep in dependencies {
-                if let Some(entry) = self.cache.get(dep) {
-                    dep_hash ^= entry.content_hash;
-                }
-            }
-            dep_hash
-        };
-        
         // Extract import names from dependencies
         let imports: Vec<String> = dependencies
             .iter()
@@ -269,7 +257,6 @@ impl ModuleLoader {
             content_hash: hash,
             modified_time,
             dependencies: dependencies.to_vec(),
-            dependency_hash,
         });
         
         // Update module info

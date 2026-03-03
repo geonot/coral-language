@@ -149,6 +149,29 @@ impl Compiler {
                 crate::ast::Statement::Return(expr, _) => {
                     *expr = Self::fold_expr(expr.clone());
                 }
+                crate::ast::Statement::If { condition, body, elif_branches, else_body, .. } => {
+                    *condition = Self::fold_expr(condition.clone());
+                    Self::fold_block(body);
+                    for (cond, blk) in elif_branches.iter_mut() {
+                        *cond = Self::fold_expr(cond.clone());
+                        Self::fold_block(blk);
+                    }
+                    if let Some(else_blk) = else_body {
+                        Self::fold_block(else_blk);
+                    }
+                }
+                crate::ast::Statement::While { condition, body, .. } => {
+                    *condition = Self::fold_expr(condition.clone());
+                    Self::fold_block(body);
+                }
+                crate::ast::Statement::For { iterable, body, .. } => {
+                    *iterable = Self::fold_expr(iterable.clone());
+                    Self::fold_block(body);
+                }
+                crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_) => {}
+                crate::ast::Statement::FieldAssign { value, .. } => {
+                    *value = Self::fold_expr(value.clone());
+                }
             }
         }
         if let Some(value) = &mut block.value {
@@ -268,6 +291,11 @@ impl Compiler {
             Expression::Member { target, property, span } => {
                 let target = Box::new(Self::fold_expr(*target));
                 Expression::Member { target, property, span }
+            }
+            Expression::Index { target, index, span } => {
+                let target = Box::new(Self::fold_expr(*target));
+                let index = Box::new(Self::fold_expr(*index));
+                Expression::Index { target, index, span }
             }
             Expression::Lambda { params, mut body, span } => {
                 Self::fold_block(&mut body);

@@ -151,6 +151,50 @@ impl PlaceholderLowerer {
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 Ok(Statement::Return(value, span))
             }
+            Statement::If { condition, body, elif_branches, else_body, span } => {
+                let condition = self
+                    .lower_expression(condition)?
+                    .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                let body = self.lower_block(body)?;
+                let mut lowered_elifs = Vec::with_capacity(elif_branches.len());
+                for (cond, blk) in elif_branches {
+                    let cond = self
+                        .lower_expression(cond)?
+                        .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                    let blk = self.lower_block(blk)?;
+                    lowered_elifs.push((cond, blk));
+                }
+                let else_body = match else_body {
+                    Some(blk) => Some(self.lower_block(blk)?),
+                    None => None,
+                };
+                Ok(Statement::If { condition, body, elif_branches: lowered_elifs, else_body, span })
+            }
+            Statement::While { condition, body, span } => {
+                let condition = self
+                    .lower_expression(condition)?
+                    .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                let body = self.lower_block(body)?;
+                Ok(Statement::While { condition, body, span })
+            }
+            Statement::For { variable, iterable, body, span } => {
+                let iterable = self
+                    .lower_expression(iterable)?
+                    .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                let body = self.lower_block(body)?;
+                Ok(Statement::For { variable, iterable, body, span })
+            }
+            Statement::Break(span) => Ok(Statement::Break(span)),
+            Statement::Continue(span) => Ok(Statement::Continue(span)),
+            Statement::FieldAssign { target, field, value, span } => {
+                let target = self
+                    .lower_expression(target)?
+                    .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                let value = self
+                    .lower_expression(value)?
+                    .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                Ok(Statement::FieldAssign { target, field, value, span })
+            }
         }
     }
 
@@ -223,6 +267,22 @@ impl PlaceholderLowerer {
                         span,
                     },
                     lowered.placeholder,
+                ))
+            }
+            Expression::Index { target, index, span } => {
+                let target_lowered = self.lower_expression(*target)?;
+                let index_lowered = self.lower_expression(*index)?;
+                let placeholder = PlaceholderInfo::merge_option(
+                    target_lowered.placeholder,
+                    index_lowered.placeholder,
+                );
+                Ok(ExprLowering::new_with_placeholder(
+                    Expression::Index {
+                        target: Box::new(target_lowered.expr),
+                        index: Box::new(index_lowered.expr),
+                        span,
+                    },
+                    placeholder,
                 ))
             }
             Expression::Ternary { condition, then_branch, else_branch, span } => {
@@ -503,6 +563,11 @@ impl PlaceholderInfo {
                 property,
                 span,
             },
+            Expression::Index { target, index, span } => Expression::Index {
+                target: Box::new(self.replace_placeholders(*target, names)),
+                index: Box::new(self.replace_placeholders(*index, names)),
+                span,
+            },
             Expression::Ternary { condition, then_branch, else_branch, span } => Expression::Ternary {
                 condition: Box::new(self.replace_placeholders(*condition, names)),
                 then_branch: Box::new(self.replace_placeholders(*then_branch, names)),
@@ -545,6 +610,32 @@ impl PlaceholderInfo {
                     self.replace_placeholders(expr, names),
                     span,
                 ),
+                Statement::If { condition, body, elif_branches, else_body, span } => {
+                    let condition = self.replace_placeholders(condition, names);
+                    let body = self.replace_block_placeholders(body, names);
+                    let elif_branches = elif_branches.into_iter().map(|(cond, blk)| {
+                        (self.replace_placeholders(cond, names), self.replace_block_placeholders(blk, names))
+                    }).collect();
+                    let else_body = else_body.map(|blk| self.replace_block_placeholders(blk, names));
+                    Statement::If { condition, body, elif_branches, else_body, span }
+                }
+                Statement::While { condition, body, span } => {
+                    let condition = self.replace_placeholders(condition, names);
+                    let body = self.replace_block_placeholders(body, names);
+                    Statement::While { condition, body, span }
+                }
+                Statement::For { variable, iterable, body, span } => {
+                    let iterable = self.replace_placeholders(iterable, names);
+                    let body = self.replace_block_placeholders(body, names);
+                    Statement::For { variable, iterable, body, span }
+                }
+                Statement::Break(span) => Statement::Break(span),
+                Statement::Continue(span) => Statement::Continue(span),
+                Statement::FieldAssign { target, field, value, span } => {
+                    let target = self.replace_placeholders(target, names);
+                    let value = self.replace_placeholders(value, names);
+                    Statement::FieldAssign { target, field, value, span }
+                }
             })
             .collect();
         if let Some(value) = block.value.take() {

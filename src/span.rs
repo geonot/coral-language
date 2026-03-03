@@ -4,17 +4,23 @@ use std::fmt;
 pub struct Span {
     pub start: usize,
     pub end: usize,
+    pub file_id: u32,
 }
 
 impl Span {
     pub fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
+        Self { start, end, file_id: 0 }
+    }
+
+    pub fn with_file(start: usize, end: usize, file_id: u32) -> Self {
+        Self { start, end, file_id }
     }
 
     pub fn join(self, other: Span) -> Span {
         Span {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
+            file_id: self.file_id,
         }
     }
 
@@ -22,6 +28,7 @@ impl Span {
         Span {
             start: self.start.saturating_add(offset),
             end: self.end.saturating_add(offset),
+            file_id: self.file_id,
         }
     }
 }

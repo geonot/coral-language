@@ -4,29 +4,81 @@ use std.prelude
 
 # Get value for key, or none if not found
 *get_key(m, key)
-    m.get(key)
+	m.get(key)
 
 # Set key to value (returns new map)
 *set_key(m, key, value)
-    m.set(key, value)
+	m.set(key, value)
 
 # Get number of entries
 *len(m)
-    m.size
+	m.size
 
 # Check if map is empty
 *empty(m)
-    m.size == 0
+	m.size is 0
 
 # Get all keys as a list
 *keys_list(m)
-    m.keys()
+	m.keys()
 
 # Check if key exists (returns true if key is present)
 *has(m, key)
-    m.get(key).equals(none).not()
+	has_key(m, key)
 
 # Get value or default if not found
 *get_or(m, key, default)
-    result is m.get(key)
-    result.equals(none) ? default ! result
+	result is m.get(key)
+	is_absent(result) ? default ! result
+
+# Remove a key from the map
+*remove_key(m, key)
+	map_remove(m, key)
+
+# Get all values as a list
+*values_list(m)
+	map_values(m)
+
+# Get all entries as a list of [key, value] pairs
+*entries_list(m)
+	map_entries(m)
+
+# Merge two maps (second map's values take precedence)
+*merge_maps(a, b)
+	map_merge(a, b)
+
+# Map over values, returning a new map
+*map_values_fn(m, func)
+	result is map()
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		result is result.set(key, func(val))
+	result
+
+# Filter entries by predicate on (key, value)
+*filter_entries(m, predicate)
+	result is map()
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		if predicate(key, val)
+			result is result.set(key, val)
+	result
+
+# Count entries matching a predicate
+*count_entries(m, predicate)
+	count is 0
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		if predicate(key, val)
+			count is count + 1
+	count
+
+# Create a map from a list of [key, value] pairs
+*from_entries(pairs)
+	result is map()
+	for pair in pairs
+		result is result.set(pair.get(0), pair.get(1))
+	result

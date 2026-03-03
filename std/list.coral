@@ -4,52 +4,141 @@ use std.prelude
 
 # Transform each element using a function
 *map_list(lst, func)
-    lst.map(func)
+	lst.map(func)
 
 # Keep only elements matching predicate
 *filter_list(lst, predicate)
-    lst.filter(predicate)
+	lst.filter(predicate)
 
 # Reduce list to single value
 *fold(lst, initial, func)
-    lst.reduce(initial, func)
+	lst.reduce(initial, func)
 
 # Alias for fold
 *reduce_list(lst, initial, func)
-    lst.reduce(initial, func)
+	lst.reduce(initial, func)
 
 # Get element at index (0-based)
 *at(lst, index)
-    lst.get(index)
+	lst.get(index)
 
 # Get first element
 *first(lst)
-    lst.get(0)
+	lst.get(0)
 
 # Get last element
 *last(lst)
-    lst.get(lst.length - 1)
+	lst.get(lst.length - 1)
 
 # Get list length
 *len(lst)
-    lst.length
+	lst.length
 
 # Check if list is empty
 *empty(lst)
-    lst.length == 0
+	lst.length is 0
 
 # Append element to end
 *push_item(lst, elem)
-    lst.push(elem)
+	lst.push(elem)
 
 # Remove and return last element
 *pop_item(lst)
-    lst.pop()
+	lst.pop()
 
 # Sum all numbers in list
 *sum(lst)
-    lst.reduce(0, *fn(acc, x) acc + x)
+	lst.reduce(0, *fn(acc, x) acc + x)
 
 # Product of all numbers in list
 *product(lst)
-    lst.reduce(1, *fn(acc, x) acc * x)
+	lst.reduce(1, *fn(acc, x) acc * x)
+
+# Check if list contains a value
+*contains(lst, value)
+	list_contains(lst, value)
+
+# Find index of value in list (-1 if not found)
+*index_of(lst, value)
+	list_index_of(lst, value)
+
+# Reverse a list
+*reverse(lst)
+	list_reverse(lst)
+
+# Get a sub-list from start to end index
+*list_sub(lst, start_idx, end_idx)
+	list_slice(lst, start_idx, end_idx)
+
+# Sort a list (numeric then string lexicographic)
+*sort(lst)
+	list_sort(lst)
+
+# Join list elements into a string with separator
+*join(lst, separator)
+	list_join(lst, separator)
+
+# Concatenate two lists
+*concat_lists(a, b)
+	list_concat(a, b)
+
+# Check if any element matches predicate
+*any(lst, predicate)
+	result is false
+	for item in lst
+		if predicate(item)
+			result is true
+			break
+	result
+
+# Check if all elements match predicate
+*all(lst, predicate)
+	result is true
+	for item in lst
+		if !predicate(item)
+			result is false
+			break
+	result
+
+# Find first element matching predicate, or none
+*find(lst, predicate)
+	for item in lst
+		if predicate(item)
+			return item
+	none
+
+# Take first n elements
+*take(lst, n)
+	list_slice(lst, 0, n)
+
+# Drop first n elements
+*drop(lst, n)
+	list_slice(lst, n, len(lst))
+
+# Create a list of numbers from start to end (exclusive)
+*range(start_val, end_val)
+	result is []
+	i is start_val
+	while i < end_val
+		result is result.push(i)
+		i is i + 1
+	result
+
+# Zip two lists into a list of pairs
+*zip(a, b)
+	result is []
+	i is 0
+	max_len is min(len(a), len(b))
+	while i < max_len
+		pair is [a.get(i), b.get(i)]
+		result is result.push(pair)
+		i is i + 1
+	result
+
+# Flatten a list of lists into a single list
+*flatten(lst)
+	result is []
+	for sub in lst
+		for item in sub
+			result is result.push(item)
+	result

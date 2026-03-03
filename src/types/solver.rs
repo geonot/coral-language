@@ -214,7 +214,20 @@ pub fn solve_constraints(
     let mut errors = Vec::new();
     let dummy = Span::new(0, 0);
 
-    for c in &constraints.constraints {
+    // Sort constraints by priority for better solving efficiency:
+    // 1. Equality constraints (cheapest to solve)
+    // 2. Type requirements (numeric, boolean)
+    // 3. Complex constraints (callable, iterable)
+    let mut sorted_constraints = constraints.constraints.clone();
+    sorted_constraints.sort_by_key(|c| match c {
+        ConstraintKind::Equal(_, _) | ConstraintKind::EqualAt(_, _, _) => 0,
+        ConstraintKind::Numeric(_) | ConstraintKind::NumericAt(_, _) 
+        | ConstraintKind::Boolean(_) | ConstraintKind::BooleanAt(_, _) => 1,
+        ConstraintKind::Iterable(_, _) | ConstraintKind::IterableAt(_, _, _) => 2,
+        ConstraintKind::Callable(_, _, _) | ConstraintKind::CallableAt(_, _, _, _) => 3,
+    });
+
+    for c in &sorted_constraints {
         let result = match c {
             // New variants with span
             ConstraintKind::EqualAt(a, b, span) => unify(a.clone(), b.clone(), graph, *span),
@@ -250,12 +263,17 @@ pub fn solve_constraints(
 
         if let Err(e) = result {
             errors.push(e);
+            // For now, continue processing other constraints to gather all errors
+            // Could add early termination with environment variable:
+            // if std::env::var("CORAL_FAIL_FAST").is_ok() { break; }
         }
     }
 
     if errors.is_empty() {
         Ok(())
     } else {
+        // Sort errors by span for better diagnostic output
+        errors.sort_by_key(|e| (e.span.start, e.span.end));
         Err(errors)
     }
 }
@@ -359,6 +377,15 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
             }
         }
 
+        // ADT unification: same name unifies.
+        (TypeId::Adt(a_name), TypeId::Adt(b_name)) => {
+            if a_name == b_name {
+                Ok(())
+            } else {
+                Err(TypeError::mismatch(&ra, &rb, span))
+            }
+        }
+
         // List unification.
         (TypeId::List(ae), TypeId::List(be)) => unify(*ae.clone(), *be.clone(), graph, span),
 
@@ -404,7 +431,7 @@ fn occurs(var: TypeVarId, ty: &TypeId, graph: &mut TypeGraph) -> bool {
         TypeId::Func(args, ret) => {
             args.iter().any(|a| occurs(var, a, graph)) || occurs(var, &ret, graph)
         }
-        _ => false,
+        TypeId::Adt(_) | _ => false,
     }
 }
 

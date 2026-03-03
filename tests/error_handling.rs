@@ -57,7 +57,7 @@ fn error_propagation_through_comparison() {
     let code = r#"
 *main()
     x is err NotFound
-    y is x == 5
+    y is x.equals(5)
     log(y)
 "#;
     let compiler = Compiler;

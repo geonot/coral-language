@@ -1,0 +1,28 @@
+{
+  "name": "coral-lang",
+  "displayName": "Coral Language",
+  "description": "Syntax highlighting and language support for the Coral programming language",
+  "version": "0.1.0",
+  "publisher": "coral",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "coral",
+        "aliases": ["Coral", "coral"],
+        "extensions": [".coral"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "coral",
+        "scopeName": "source.coral",
+        "path": "./syntaxes/coral.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -26,6 +26,7 @@ pub struct RuntimeBindings<'ctx> {
     pub value_as_bool: FunctionValue<'ctx>,
     pub value_add: FunctionValue<'ctx>,
     pub value_equals: FunctionValue<'ctx>,
+    pub value_not_equals: FunctionValue<'ctx>,
     pub value_hash: FunctionValue<'ctx>,
     pub value_bitand: FunctionValue<'ctx>,
     pub value_bitor: FunctionValue<'ctx>,
@@ -130,6 +131,46 @@ pub struct RuntimeBindings<'ctx> {
     pub math_tanh: FunctionValue<'ctx>,
     pub math_trunc: FunctionValue<'ctx>,
     pub math_sign: FunctionValue<'ctx>,
+    // Universal iterator
+    pub value_iter_next: FunctionValue<'ctx>,
+    // Process/environment
+    pub process_args: FunctionValue<'ctx>,
+    pub process_exit: FunctionValue<'ctx>,
+    pub env_get: FunctionValue<'ctx>,
+    pub env_set: FunctionValue<'ctx>,
+    // File I/O extensions
+    pub fs_append: FunctionValue<'ctx>,
+    pub fs_read_dir: FunctionValue<'ctx>,
+    pub fs_mkdir: FunctionValue<'ctx>,
+    pub fs_delete: FunctionValue<'ctx>,
+    pub fs_is_dir: FunctionValue<'ctx>,
+    // stdin
+    pub stdin_read_line: FunctionValue<'ctx>,
+    // List extensions
+    pub list_contains: FunctionValue<'ctx>,
+    pub list_index_of: FunctionValue<'ctx>,
+    pub list_reverse: FunctionValue<'ctx>,
+    pub list_slice: FunctionValue<'ctx>,
+    pub list_sort: FunctionValue<'ctx>,
+    pub list_join: FunctionValue<'ctx>,
+    pub list_concat: FunctionValue<'ctx>,
+    // Map extensions
+    pub map_remove: FunctionValue<'ctx>,
+    pub map_values: FunctionValue<'ctx>,
+    pub map_entries: FunctionValue<'ctx>,
+    pub map_has_key: FunctionValue<'ctx>,
+    pub map_merge: FunctionValue<'ctx>,
+    // Bytes extensions
+    pub bytes_get: FunctionValue<'ctx>,
+    pub bytes_from_string: FunctionValue<'ctx>,
+    pub bytes_to_string: FunctionValue<'ctx>,
+    pub bytes_slice_val: FunctionValue<'ctx>,
+    // Type reflection
+    pub type_of: FunctionValue<'ctx>,
+    // Character operations
+    pub string_ord: FunctionValue<'ctx>,
+    pub string_chr: FunctionValue<'ctx>,
+    pub string_compare: FunctionValue<'ctx>,
 }
 
 impl<'ctx> RuntimeBindings<'ctx> {
@@ -340,6 +381,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let value_equals = module.add_function(
             "coral_value_equals",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let value_not_equals = module.add_function(
+            "coral_value_not_equals",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
@@ -811,6 +857,185 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Universal iterator next
+        let value_iter_next = module.add_function(
+            "coral_value_iter_next",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Process/environment
+        let process_args = module.add_function(
+            "coral_process_args",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let process_exit = module.add_function(
+            "coral_process_exit",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let env_get = module.add_function(
+            "coral_env_get",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let env_set = module.add_function(
+            "coral_env_set",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
+        // File I/O extensions
+        let fs_append = module.add_function(
+            "coral_fs_append",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let fs_read_dir = module.add_function(
+            "coral_fs_read_dir",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let fs_mkdir = module.add_function(
+            "coral_fs_mkdir",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let fs_delete = module.add_function(
+            "coral_fs_delete",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let fs_is_dir = module.add_function(
+            "coral_fs_is_dir",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // stdin
+        let stdin_read_line = module.add_function(
+            "coral_stdin_read_line",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+
+        // List extensions
+        let list_contains = module.add_function(
+            "coral_list_contains",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let list_index_of = module.add_function(
+            "coral_list_index_of",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let list_reverse = module.add_function(
+            "coral_list_reverse",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let list_slice = module.add_function(
+            "coral_list_slice",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_sort = module.add_function(
+            "coral_list_sort",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let list_join = module.add_function(
+            "coral_list_join",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let list_concat = module.add_function(
+            "coral_list_concat",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
+        // Map extensions
+        let map_remove = module.add_function(
+            "coral_map_remove",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let map_values = module.add_function(
+            "coral_map_values",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let map_entries = module.add_function(
+            "coral_map_entries",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let map_has_key = module.add_function(
+            "coral_map_has_key",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let map_merge = module.add_function(
+            "coral_map_merge",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
+        // Bytes extensions
+        let bytes_get = module.add_function(
+            "coral_bytes_get",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let bytes_from_string = module.add_function(
+            "coral_bytes_from_string",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let bytes_to_string = module.add_function(
+            "coral_bytes_to_string",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let bytes_slice_val = module.add_function(
+            "coral_bytes_slice_val",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+
+        // Type reflection
+        let type_of = module.add_function(
+            "coral_type_of",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Character operations
+        let string_ord = module.add_function(
+            "coral_string_ord",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let string_chr = module.add_function(
+            "coral_string_chr",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let string_compare = module.add_function(
+            "coral_string_compare",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
         Self {
             value_ptr_type,
             make_number,
@@ -824,6 +1049,7 @@ impl<'ctx> RuntimeBindings<'ctx> {
             value_as_bool,
             value_add,
             value_equals,
+            value_not_equals,
             value_hash,
             value_bitand,
             value_bitor,
@@ -924,6 +1150,37 @@ impl<'ctx> RuntimeBindings<'ctx> {
             math_tanh,
             math_trunc,
             math_sign,
+            value_iter_next,
+            process_args,
+            process_exit,
+            env_get,
+            env_set,
+            fs_append,
+            fs_read_dir,
+            fs_mkdir,
+            fs_delete,
+            fs_is_dir,
+            stdin_read_line,
+            list_contains,
+            list_index_of,
+            list_reverse,
+            list_slice,
+            list_sort,
+            list_join,
+            list_concat,
+            map_remove,
+            map_values,
+            map_entries,
+            map_has_key,
+            map_merge,
+            bytes_get,
+            bytes_from_string,
+            bytes_to_string,
+            bytes_slice_val,
+            type_of,
+            string_ord,
+            string_chr,
+            string_compare,
         }
     }
 }

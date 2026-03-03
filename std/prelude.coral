@@ -1,21 +1,63 @@
+# std/prelude.coral - Core functions available everywhere
+
+# Log a value and return it (for debugging)
 *log_line(value)
 	log(value)
 	value
 
+# Log with a prefix
 *log_with_prefix(prefix, value)
 	message is prefix + value
 	log(message)
 	message
 
+# Identity function
 *identity(input)
 	input
 
+# Debug tap - log and pass through
 *tap(value)
 	log_line(value)
 	value
 
+# Conditional value
 *when(condition, value)
 	condition ? value ! none
 
 true_value is true
 false_value is false
+
+# Assert that a condition is true
+*assert(condition, message)
+	if !condition
+		log("ASSERTION FAILED: " + message)
+		exit(1)
+
+# Assert two values are equal
+*assert_eq(actual, expected, message)
+	if !actual.equals(expected)
+		log("ASSERTION FAILED: " + message)
+		log("  expected: " + to_string(expected))
+		log("  actual:   " + to_string(actual))
+		exit(1)
+
+# Panic - exit with error message
+*panic(message)
+	log("PANIC: " + message)
+	exit(1)
+
+# Get type of a value as a string
+*typeof(value)
+	type_of(value)
+
+# Get process arguments
+*get_args()
+	process_args()
+
+# Get environment variable (returns none if not set)
+*get_env(name)
+	env_get(name)
+
+# Set environment variable
+*set_env(name, value)
+	env_set(name, value)

@@ -1,90 +1,76 @@
-# Calculator - Expression evaluation with Coral's error model
+# Calculator - Demonstrating arithmetic operations and conditional logic
 
-# Error definitions
-err Calc
-    err DivisionByZero
-        message is 'Cannot divide by zero'
-    err InvalidOperator
-        message is 'Unknown operator'
-    err InvalidInput
-        message is 'Invalid input format'
+# Basic arithmetic operations
+*add(a, b)
+    a + b
 
-# Basic operations that can fail
+*subtract(a, b)
+    a - b
+
+*multiply(a, b)
+    a * b
+
 *divide(a, b)
-    b == 0 ? ! err Calc:DivisionByZero
-    a / b
+    b.equals(0) ? 0 ! a / b
 
+*modulo(a, b)
+    b.equals(0) ? 0 ! a % b
+
+# Calculate result based on operator character
 *calculate(left, op, right)
     match op
-        '+' ? left + right
-        '-' ? left - right
-        '*' ? left * right
+        '+' ? add(left, right)
+        '-' ? subtract(left, right)
+        '*' ? multiply(left, right)
         '/' ? divide(left, right)
-        '%' ? right == 0 ? ! err Calc:DivisionByZero ! left % right
-        '^' ? math.pow(left, right)
-            ! err Calc:InvalidOperator
+        '%' ? modulo(left, right)
+        _ ? 0
 
-# Parse a simple expression like "10 + 5"
-*parse_expression(input)
-    parts is input.split(' ')
-    parts.length != 3 ? ! err Calc:InvalidInput
-    
-    left is parts.get(0).to_number() ! return err
-    op is parts.get(1)
-    right is parts.get(2).to_number() ! return err
-    
-    map('left' is left, 'op' is op, 'right' is right)
-
-# Evaluate an expression string
-*evaluate(input)
-    expr is parse_expression(input) ! return err
-    calculate(expr.get('left'), expr.get('op'), expr.get('right'))
-
-# Interactive calculator
-*run_calculator()
-    log('Coral Calculator')
-    log('Enter expressions like: 10 + 5')
-    log('Supported operators: + - * / % ^')
-    log('Type "quit" to exit')
-    log('')
-    
-    loop
-        log('> ')
-        input is readline()
-        
-        input == 'quit' ? break
-        
-        result is evaluate(input)
-        
-        # Handle errors gracefully
-        result.is_err ?
-            log('Error: {result.err.message}')
-          ! log('= {result}')
-
-# Demo mode with preset expressions
+# Demo with different operations
 *demo()
     log('Calculator Demo')
-    log('===============')
+    log('==============')
     log('')
     
-    expressions is [
-        '10 + 5',
-        '20 - 8',
-        '6 * 7',
-        '100 / 4',
-        '17 % 5',
-        '2 ^ 10',
-        '10 / 0',      # This will error
-        '5 @ 3'        # This will error (invalid operator)
-    ]
+    # Test basic operations
+    a is 20
+    b is 8
     
-    expressions.each(expr)
-        log('Expression: {expr}')
-        result is evaluate(expr)
-        result.is_err ?
-            log('  Error: {result.err.message}')
-          ! log('  Result: {result}')
-        log('')
+    log('Numbers: a = {a}, b = {b}')
+    log('')
+    log('Addition: a + b = {add(a, b)}')
+    log('Subtraction: a - b = {subtract(a, b)}')
+    log('Multiplication: a * b = {multiply(a, b)}')
+    log('Division: a / b = {divide(a, b)}')
+    log('Modulo: a % b = {modulo(a, b)}')
+    log('')
+    
+    # Test with operators
+    log('Using calculate function:')
+    log('calculate(10, "+", 5) = {calculate(10, "+", 5)}')
+    log('calculate(10, "-", 3) = {calculate(10, "-", 3)}')
+    log('calculate(6, "*", 7) = {calculate(6, "*", 7)}')
+    log('calculate(15, "/", 3) = {calculate(15, "/", 3)}')
+    log('calculate(17, "%", 5) = {calculate(17, "%", 5)}')
+    log('')
+    
+    # Test division by zero safety
+    log('Safety tests:')
+    log('divide(10, 0) = {divide(10, 0)}')
+    log('modulo(10, 0) = {modulo(10, 0)}')
+    log('')
+    
+    # Test conditional logic
+    x is 42
+    y is 40
+    bigger is x > y ? x ! y
+    log('The bigger of {x} and {y} is: {bigger}')
+    
+    result is x > 50 ? 'large' ! 'small or medium'
+    log('{x} is {result}')
+    
+    log('')
+    log('Calculator demo complete!')
 
 *main()
     demo()

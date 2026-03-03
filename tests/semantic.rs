@@ -55,7 +55,9 @@ fn rejects_duplicate_global_bindings() {
 }
 
 #[test]
-fn rejects_duplicate_bindings_in_function_scope() {
+fn allows_rebinding_in_function_scope() {
+    // Rebinding (shadowing) is allowed: `value is 1; value is 2`
+    // This is needed for while loop counter patterns like `i is i + 1`
     let function = Function {
         name: "main".into(),
         params: vec![],
@@ -81,8 +83,8 @@ fn rejects_duplicate_bindings_in_function_scope() {
         span: span(),
     };
     let program = Program::new(vec![Item::Function(function)], span());
-    let error = semantic::analyze(program).expect_err("expected duplicate binding error");
-    assert_eq!(error.message, "duplicate binding `value`");
+    let result = semantic::analyze(program);
+    assert!(result.is_ok(), "rebinding should be allowed, got: {:?}", result.err());
 }
 
 #[test]
@@ -575,7 +577,7 @@ fn binary_op(s: &str) -> coralc::ast::BinaryOp {
         "%" => Mod,
         "and" => And,
         "or" => Or,
-        "==" => Equals,
+        "==" | "is" => Equals,
         "<" => Less,
         "<=" => LessEq,
         ">" => Greater,

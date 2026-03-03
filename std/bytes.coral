@@ -1,8 +1,30 @@
+# std/bytes.coral - Byte array operations
+
+# Concatenate two byte arrays
 *concat(first, second)
-    first + second
+	first + second
 
+# Get length of byte array
 *length(value)
-    value.length
+	value.length
 
+# Check if byte array is empty
 *is_empty(value)
-    value.length == 0
+	value.length is 0
+
+# Get byte at index (returns number 0-255)
+*get_byte(b, index)
+	bytes_get(b, index)
+
+# Slice bytes from start to end index
+*sub_bytes(b, start_idx, end_idx)
+	bytes_slice(b, start_idx, end_idx)
+
+# Convert string to bytes (UTF-8)
+*from_string(s)
+	bytes_from_string(s)
+
+# Convert bytes to string (UTF-8, lossy)
+*to_string_lossy(b)
+	bytes_to_string(b)
+

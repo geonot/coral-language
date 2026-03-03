@@ -55,6 +55,8 @@ pub enum TypeId {
     Placeholder(u32),
     /// Type variable (for inference).
     TypeVar(TypeVarId),
+    /// Algebraic Data Type (user-defined enum/sum type).
+    Adt(String),
     /// Unknown type (for permissive parsing, but should error in strict mode).
     #[default]
     Unknown,
@@ -74,7 +76,7 @@ impl TypeId {
     /// Check if this type contains no unresolved type variables.
     pub fn is_concrete(&self) -> bool {
         match self {
-            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) => true,
+            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) | TypeId::Adt(_) => true,
             TypeId::TypeVar(_) => false,
             TypeId::List(elem) => elem.is_concrete(),
             TypeId::Map(k, v) => k.is_concrete() && v.is_concrete(),
@@ -149,6 +151,7 @@ pub fn format_type(ty: &TypeId) -> String {
         }
         TypeId::Placeholder(id) => format!("${}", id),
         TypeId::TypeVar(id) => format!("{}", id),
+        TypeId::Adt(name) => name.clone(),
         TypeId::Unknown => "_".into(),
     }
 }

@@ -176,7 +176,7 @@ store actor ChatServer
         loop
             data is conn.read(4096)
             data.is_err ? break
-            data.length == 0 ? break
+            data.length is 0 ? break
             client.receive(data)
     
     @join_room(user, room_name)
@@ -211,7 +211,7 @@ store actor ChatServer
         
         # Send to all users in room
         room.users.each(user_id)
-            user is users.values().find($.id == user_id) ! continue
+            user is users.values().find($.id is user_id) ! continue
             client is connections.get(user.username) ! continue
             client.send_message(msg)
         
@@ -223,7 +223,7 @@ store actor ChatServer
         msg is map('user' is 'SYSTEM', 'text' is message, 'time' is time.now())
         
         room.users.each(user_id)
-            user is users.values().find($.id == user_id) ! continue
+            user is users.values().find($.id is user_id) ! continue
             client is connections.get(user.username) ! continue
             client.send_message(msg)
     

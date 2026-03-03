@@ -25,7 +25,7 @@ err Http
     i is 1
     while i < lines.length
         line is lines.get(i)
-        line.length == 0 ? break
+        line.length is 0 ? break
         
         parts is line.split(': ')
         parts.length >= 2 ?
@@ -61,7 +61,7 @@ err Http
 
 *json_response(status, data)
     body is json.encode(data)
-    status_text is status == 200 ? 'OK' ! 'Error'
+    status_text is status is 200 ? 'OK' ! 'Error'
     
     headers is [
         'HTTP/1.1 {status} {status_text}',

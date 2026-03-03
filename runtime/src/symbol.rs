@@ -132,7 +132,7 @@ pub fn resolve(id: SymbolId) -> Option<String> {
 
 // ========== FFI Exports ==========
 
-use crate::{Value, ValueHandle, ValueTag, coral_make_string, coral_make_number, coral_make_bool};
+use crate::{Value, ValueHandle, ValueTag, coral_make_string, coral_make_number, coral_make_bool, value_to_rust_string};
 
 /// Intern a string Value and return its symbol ID as a number Value.
 #[unsafe(no_mangle)]
@@ -146,23 +146,13 @@ pub extern "C" fn coral_symbol_intern(string_val: ValueHandle) -> ValueHandle {
         return coral_make_number(SymbolId::INVALID.0 as f64);
     }
     
-    // Get string data from the value
-    let (ptr, len) = unsafe {
-        let payload_ptr = value.payload.ptr;
-        if payload_ptr.is_null() {
-            return coral_make_number(SymbolId::INVALID.0 as f64);
-        }
-        // String layout: len (usize) followed by data
-        let len = *(payload_ptr as *const usize);
-        let data = (payload_ptr as *const u8).add(std::mem::size_of::<usize>());
-        (data, len)
-    };
+    // Use the canonical string extraction that handles both inline and heap strings
+    let s = value_to_rust_string(value);
+    if s.is_empty() {
+        return coral_make_number(SymbolId::INVALID.0 as f64);
+    }
     
-    let s = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len))
-    };
-    
-    let id = intern(s);
+    let id = intern(&s);
     coral_make_number(id.0 as f64)
 }
 
@@ -179,22 +169,10 @@ pub extern "C" fn coral_symbol_lookup(string_val: ValueHandle) -> ValueHandle {
         return coral_make_number(0.0);
     }
     
-    // Get string data from the value
-    let (ptr, len) = unsafe {
-        let payload_ptr = value.payload.ptr;
-        if payload_ptr.is_null() {
-            return coral_make_number(0.0);
-        }
-        let len = *(payload_ptr as *const usize);
-        let data = (payload_ptr as *const u8).add(std::mem::size_of::<usize>());
-        (data, len)
-    };
+    // Use the canonical string extraction that handles both inline and heap strings
+    let s = value_to_rust_string(value);
     
-    let s = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len))
-    };
-    
-    match get_symbol_table().lookup(s) {
+    match get_symbol_table().lookup(&s) {
         Some(id) => coral_make_number(id.0 as f64),
         None => coral_make_number(0.0),
     }

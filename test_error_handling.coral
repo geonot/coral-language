@@ -1,0 +1,21 @@
+# Test current error handling syntax
+
+*test_basic_error()
+    x is 5
+    y is 0
+    y.equals(0) ? err DivisionByZero ! x / y
+
+*test_error_propagate()
+    result is test_basic_error()
+    # Try error propagation syntax
+    value is result ! return 0
+    value
+
+*test_bangbang_syntax()
+    # Try to use !! syntax 
+    !!ErrorTest
+        code is 1001
+        message is 'Test error'
+
+*main()
+    test_error_propagate()
