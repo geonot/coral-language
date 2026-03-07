@@ -30,6 +30,7 @@ use codegen
 
 	# Step 2: Parse
 	program is parse(tokens)
+	stmts is program.get("statements")
 	# Step 3: Lower (placeholder desugaring)
 	lower_result is lower(program)
 	if lower_result.get("ok") is false
@@ -41,6 +42,8 @@ use codegen
 	if sem_result.get("ok") is false
 		return map("ok" is false, "stage" is "semantic", "message" is sem_result.get("message"))
 	model is sem_result.get("value")
+	fns is model.get("functions")
+	globs is model.get("globals")
 
 	# Step 5: Constant folding
 	fold_expressions(model)

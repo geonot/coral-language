@@ -10,6 +10,7 @@
 # This mirrors the Rust parser's structure, adapted for Coral idioms.
 
 use std.char
+use lexer
 
 # ─── AST Node Constructors ─────────────────────────────────────────
 
@@ -416,6 +417,17 @@ use std.char
 
 	expect(p, "keyword_is")
 	value is parse_expression(p)
+
+	# Guard: `name is value ? body` → if name == value { body }
+	if current_kind(p) is "question"
+		advance_parser(p)
+		# Reinterpret binding as equality: name == value
+		condition is make_binary_expr("Equals", make_identifier_expr(name, make_span(start, start)), value, make_span(start, start))
+		# Parse guard body: single inline statement
+		guard_stmt is parse_statement(p)
+		guard_body is map("kind" is "block", "statements" is [guard_stmt], "value" is none)
+		return make_if_stmt(condition, guard_body, [], none, make_span(start, current_token(p).get("start")))
+
 	expect_newline(p)
 	return make_binding_stmt(name, value, make_span(start, current_token(p).get("start")))
 
@@ -649,10 +661,16 @@ use std.char
 	return parse_ternary(p)
 
 # Ternary: expr ? then ! else
+# Guard: expr ? return/break/continue/block  (handled at statement level)
 *parse_ternary(p)
 	expr is parse_pipeline(p)
 
 	if current_kind(p) is "question"
+		# Check if this is a guard (handled at statement level) vs ternary expression
+		next_kind is peek_token(p, 1).get("kind")
+		if next_kind is "keyword_return" or next_kind is "keyword_break" or next_kind is "keyword_continue" or next_kind is "newline" or next_kind is "indent"
+			# Guard — leave `?` unconsumed for statement-level handling
+			return expr
 		advance_parser(p)
 		then_branch is parse_expression(p)
 		if current_kind(p) is "bang"
@@ -996,8 +1014,14 @@ use std.char
 # ─── Template String ───────────────────────────────────────────────
 
 *parse_template_string(p)
-	# Handles template_start "prefix" template_expr "expr" template_end ...
-	# Desugars into concat(prefix, to_string(expr), ...) chains
+	# Handles template strings with interpolation.
+	# The lexer emits tokens as:
+	#   (template_start(prefix) template_expr(expr) template_end(""))+  string(trailing)?
+	# Each interpolation group produces a template_start/template_expr/template_end triple.
+	# Subsequent interpolations get NEW template_start tokens with the middle text.
+	# Any trailing text after the last interpolation is a regular string token.
+	# We desugar into a binary + chain: prefix + expr + mid + expr2 + ... + suffix
+	# coral_value_add handles string + non-string coercion at runtime.
 	start is current_token(p).get("start")
 
 	# Collect parts: alternating string literals and expressions
@@ -1009,7 +1033,7 @@ use std.char
 	if string_length(prefix) > 0
 		parts.push(make_string_expr(prefix, make_span(start, start)))
 
-	# Now consume template_expr/template_end pairs
+	# Process template_expr/template_end groups, then optional template_start for next group
 	while current_kind(p) is "template_expr"
 		# The expression text inside {}
 		expr_tok is current_token(p)
@@ -1021,16 +1045,30 @@ use std.char
 		inner_p is make_parser(expr_tokens)
 		skip_newlines(inner_p)
 		expr_node is parse_expression(inner_p)
-		# Wrap in to_string call for safe concatenation
-		to_str_call is make_call_expr(make_identifier_expr("to_string", make_span(0, 0)), [expr_node], make_span(0, 0))
-		parts.push(to_str_call)
+		# Use expression directly - coral_value_add handles type coercion
+		parts.push(expr_node)
 
-		# Consume template_end (suffix text after } until next { or end of string)
+		# Consume template_end (always empty in current lexer)
 		if current_kind(p) is "template_end"
 			suffix is current_token(p).get("value")
 			advance_parser(p)
 			if string_length(suffix) > 0
 				parts.push(make_string_expr(suffix, make_span(0, 0)))
+
+		# If next token is another template_start, it contains middle text
+		# between interpolations - consume it and continue the loop
+		if current_kind(p) is "template_start"
+			mid_text is current_token(p).get("value")
+			advance_parser(p)
+			if string_length(mid_text) > 0
+				parts.push(make_string_expr(mid_text, make_span(0, 0)))
+
+	# After all interpolation groups, check for trailing string token
+	if current_kind(p) is "string"
+		trail is current_token(p).get("value")
+		advance_parser(p)
+		if string_length(trail) > 0
+			parts.push(make_string_expr(trail, make_span(0, 0)))
 
 	# Build concat chain: fold parts with binary + operator
 	if parts.length() is 0
@@ -1039,7 +1077,7 @@ use std.char
 	result is parts[0]
 	i is 1
 	while i < parts.length()
-		result is make_binary_expr("+", result, parts[i], make_span(start, current_token(p).get("start")))
+		result is make_binary_expr("Add", result, parts[i], make_span(start, current_token(p).get("start")))
 		i is i + 1
 
 	return result
@@ -1116,7 +1154,7 @@ use std.char
 	key is parse_comparison(p)
 	expect(p, "keyword_is")
 	value is parse_expression(p)
-	return map("key" is key, "value" is value)
+	return [key, value]
 
 # ─── Match Expression ──────────────────────────────────────────────
 

@@ -290,17 +290,17 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 	elifs is stmt.get("elif_branches")
 	if elifs isnt none
 		for elif_branch in elifs
-			elif_cond_lowered is lower_expression(elif_branch[0])
+			elif_cond_lowered is lower_expression(elif_branch.get("condition"))
 			if elif_cond_lowered.get("ok") is false
 				return elif_cond_lowered
 			lr_ec is elif_cond_lowered.get("value")
 			ec_result is expect_no_placeholders(lr_ec, PLACEHOLDER_MSG)
 			if ec_result.get("ok") is false
 				return ec_result
-			elif_body_result is lower_block(elif_branch[1])
+			elif_body_result is lower_block(elif_branch.get("body"))
 			if elif_body_result.get("ok") is false
 				return elif_body_result
-			lowered_elifs.push([ec_result.get("value"), elif_body_result.get("value")])
+			lowered_elifs.push(map("condition" is ec_result.get("value"), "body" is elif_body_result.get("value")))
 	# Lower else body
 	lowered_else is none
 	else_body is stmt.get("else_body")

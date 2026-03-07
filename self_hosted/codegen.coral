@@ -1,4 +1,4 @@
-qq# Self-hosted Coral LLVM IR Text Emitter
+# Self-hosted Coral LLVM IR Text Emitter
 #
 # Emits LLVM IR (.ll) text from a SemanticModel.
 # All Coral values are %CoralValue* (boxed, tagged).
@@ -275,6 +275,7 @@ qq# Self-hosted Coral LLVM IR Text Emitter
 	decl(b, "coral_string_chr", val_t(), val_t())
 	decl2(b, "coral_string_compare", val_t(), val_t(), val_t())
 	decl(b, "coral_number_to_string", val_t(), val_t())
+	decl(b, "coral_value_to_string", val_t(), val_t())
 	# Tagged/ADT ops
 	decl3(b, "coral_tagged_is_tag", val_t(), "i8*", "i64", val_t())
 	decl2(b, "coral_tagged_get_field", val_t(), "i64", val_t())
@@ -952,8 +953,9 @@ qq# Self-hosted Coral LLVM IR Text Emitter
 		idx is 0
 		cur_bb is first_elif_bb
 		while idx < elifs.length()
+			branch is elifs[idx]
 			begin_bb(b, cur_bb)
-			elif_cond is emit_expression(b, elifs[idx].get("condition"))
+			elif_cond is emit_expression(b, branch.get("condition"))
 			elif_bool is value_to_bool(b, elif_cond)
 			elif_body_bb is fresh_bb(b, "elif_body")
 			# Where to branch if this elif condition is false
@@ -964,7 +966,7 @@ qq# Self-hosted Coral LLVM IR Text Emitter
 				next_bb is else_bb
 			emit_br_cond(b, elif_bool, elif_body_bb, next_bb)
 			begin_bb(b, elif_body_bb)
-			emit_block(b, elifs[idx].get("body"))
+			emit_block(b, branch.get("body"))
 			emit_br(b, cont_bb)
 			cur_bb is next_bb
 			idx is idx + 1
@@ -1370,7 +1372,7 @@ qq# Self-hosted Coral LLVM IR Text Emitter
 	if name is "str" or name is "to_string"
 		arg is emit_expression(b, args[0])
 		r is fresh_reg(b)
-		emit_indent(b, '{r} = call %CoralValue* @coral_number_to_string(%CoralValue* {arg})')
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_to_string(%CoralValue* {arg})')
 		return r
 	if name is "int" or name is "float"
 		return emit_expression(b, args[0])
@@ -1738,7 +1740,7 @@ qq# Self-hosted Coral LLVM IR Text Emitter
 		return r
 	if prop is "to_string"
 		r is fresh_reg(b)
-		emit_indent(b, '{r} = call %CoralValue* @coral_number_to_string(%CoralValue* {target})')
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_to_string(%CoralValue* {target})')
 		return r
 	if prop is "equals"
 		r is fresh_reg(b)
