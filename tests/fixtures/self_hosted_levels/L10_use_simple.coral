@@ -1,0 +1,5 @@
+# Test: compile a file that uses another module
+use lexer
+
+*main()
+	log("module loaded")

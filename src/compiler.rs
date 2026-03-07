@@ -3,17 +3,20 @@ use crate::codegen::{CodeGenerator, InlineAsmMode};
 use crate::diagnostics::{CompileError, Stage};
 use crate::lexer;
 use crate::lower;
-use crate::mir_const::ConstEvaluator;
-use crate::mir_lower;
 use crate::parser::Parser;
 use crate::semantic;
-use crate::span::Span;
 use inkwell::context::Context;
 
 pub struct Compiler;
 
 impl Compiler {
     pub fn compile_to_ir(&self, source: &str) -> Result<String, CompileError> {
+        let (ir, _warnings) = self.compile_to_ir_with_warnings(source)?;
+        Ok(ir)
+    }
+
+    /// Compile source to LLVM IR and return any warnings collected during analysis.
+    pub fn compile_to_ir_with_warnings(&self, source: &str) -> Result<(String, Vec<String>), CompileError> {
         let tokens = lexer::lex(source).map_err(|diag| CompileError::new(Stage::Lex, diag))?;
         let parser = Parser::new(tokens, source.len());
         let program = parser
@@ -24,9 +27,9 @@ impl Compiler {
         let mut model = semantic::analyze(program)
             .map_err(|diag| CompileError::new(Stage::Semantic, diag))?;
         self.maybe_emit_alloc_report(&model);
-        let mir_module = mir_lower::lower_semantic_model(&model);
-        let const_eval = ConstEvaluator::new(mir_module);
-        self.fold_const_globals(&mut model, &const_eval);
+        
+        // Collect warnings before folding
+        let warnings: Vec<String> = model.warnings.iter().map(|w| w.message.clone()).collect();
         
         // Fold constant expressions (1 + 2 → 3, true and false → false, etc.)
         Self::fold_expressions(&mut model);
@@ -42,45 +45,7 @@ impl Compiler {
         let module = generator
             .compile(&model)
             .map_err(|diag| CompileError::new(Stage::Codegen, diag))?;
-        Ok(module.print_to_string().to_string())
-    }
-
-    fn fold_const_globals(
-        &self,
-        model: &mut semantic::SemanticModel,
-        evaluator: &ConstEvaluator,
-    ) {
-        use std::collections::HashSet;
-
-        let zero_arity: HashSet<String> = model
-            .functions
-            .iter()
-            .filter(|func| func.params.is_empty())
-            .map(|func| func.name.clone())
-            .collect();
-
-        for binding in &mut model.globals {
-            let replacement = match &binding.value {
-                Expression::Call { callee, args, span } if args.is_empty() => {
-                    if let Expression::Identifier(name, _) = callee.as_ref() {
-                        if zero_arity.contains(name) {
-                            evaluator
-                                .eval_zero_arity(name)
-                                .map(|value| Self::const_value_to_expression(&value, span.join(binding.span)))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-
-            if let Some(expr) = replacement {
-                binding.value = expr;
-            }
-        }
+        Ok((module.print_to_string().to_string(), warnings))
     }
 
     fn maybe_emit_alloc_report(&self, model: &semantic::SemanticModel) {
@@ -114,16 +79,6 @@ impl Compiler {
         }
     }
 
-    fn const_value_to_expression(value: &crate::mir_interpreter::Value, span: Span) -> Expression {
-        match value {
-            crate::mir_interpreter::Value::Number(n) => Expression::Float(*n, span),
-            crate::mir_interpreter::Value::Bool(b) => Expression::Bool(*b, span),
-            crate::mir_interpreter::Value::String(s) => Expression::String(s.clone(), span),
-            crate::mir_interpreter::Value::Bytes(bytes) => Expression::Bytes(bytes.clone(), span),
-            crate::mir_interpreter::Value::Unit => Expression::Unit,
-        }
-    }
-    
     /// Fold constant expressions in the semantic model.
     /// This includes arithmetic on literals (e.g., 1 + 2 → 3) and boolean operations.
     fn fold_expressions(model: &mut semantic::SemanticModel) {

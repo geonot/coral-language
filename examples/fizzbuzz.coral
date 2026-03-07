@@ -1,11 +1,16 @@
 # FizzBuzz - Classic programming exercise in Coral
 
 *fizzbuzz(n)
-    match (n % 3 is 0, n % 5 is 0)
-        (true, true) ? 'FizzBuzz'
-        (true, false) ? 'Fizz'
-        (false, true) ? 'Buzz'
-            ! '{n}'
+    div3 is (n % 3).equals(0)
+    div5 is (n % 5).equals(0)
+    if div3 and div5
+        'FizzBuzz'
+    elif div3
+        'Fizz'
+    elif div5
+        'Buzz'
+    else
+        '{n}'
 
 *range(start, end)
     result is []
@@ -16,18 +21,13 @@
     result
 
 *main()
-    log('FizzBuzz from 1 to 100:')
+    log('FizzBuzz from 1 to 20:')
     log('')
     
-    numbers is range(1, 100)
+    i is 1
+    while i <= 20
+        log(fizzbuzz(i))
+        i is i + 1
     
-    # Using map with implicit parameter $
-    results is numbers.map(fizzbuzz($))
-    
-    # Print each result
-    results.each(log($))
-    
-    # Alternative: Using pipeline operator ~
-    # range(1, 100) ~ map(fizzbuzz($)) ~ each(log($))
-    
-    'Done'
+    log('')
+    log('Done')

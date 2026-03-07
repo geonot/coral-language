@@ -67,3 +67,46 @@ use std.prelude
 # Concatenate two strings
 *join_two(a, b)
     concat(a, b)
+
+# Split string into lines
+*lines(s)
+    divide(s, "\n")
+
+# Join a list of strings with separator
+*join(parts, separator)
+    result is ""
+    first is true
+    for part in parts
+        if first
+            result is part
+            first is false
+        else
+            result is concat(result, concat(separator, part))
+    result
+
+# Repeat a string n times
+*repeat_str(s, n)
+    result is ""
+    i is 0
+    while i < n
+        result is concat(result, s)
+        i is i + 1
+    result
+
+# Check if string matches prefix (alias for begins_with)
+*starts(s, prefix)
+    starts_with(s, prefix)
+
+# Check if string matches suffix (alias for finishes_with)
+*ends(s, suffix)
+    ends_with(s, suffix)
+
+# Reverse a string
+*reverse_str(s)
+    chars_list is chars(s)
+    result is ""
+    i is chars_list.length - 1
+    while i >= 0
+        result is concat(result, chars_list.get(i))
+        i is i - 1
+    result

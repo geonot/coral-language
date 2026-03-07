@@ -1,6 +1,8 @@
 # std/process.coral - Process and system operations
+#
+# Wraps runtime builtins: process_args, exit, env_get, env_set.
 
-use std.prelude
+# ===== Command-Line Arguments =====
 
 # Get command-line arguments as a list of strings
 *argv()
@@ -14,9 +16,11 @@ use std.prelude
 *arg(index)
 	args_list is process_args()
 	if index < args_list.length
-		args_list.get(index)
+		args_list[index]
 	else
 		none
+
+# ===== Exit =====
 
 # Exit with a code (0 = success)
 *exit_with(code)
@@ -30,7 +34,9 @@ use std.prelude
 *exit_fail()
 	exit(1)
 
-# Get environment variable
+# ===== Environment Variables =====
+
+# Get environment variable (returns absent if not set)
 *env(name)
 	env_get(name)
 

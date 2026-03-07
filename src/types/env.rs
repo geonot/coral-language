@@ -69,11 +69,9 @@ impl Scope {
 }
 
 /// Type environment with nested scopes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TypeEnv {
     scopes: Vec<Scope>,
-    /// Legacy field for backward compatibility with semantic.rs
-    pub symbols: HashMap<String, TypeId>,
     /// Tracking undefined names
     pub undefined: HashSet<String>,
     /// Type parameter bindings: maps type parameter names to their instantiated types
@@ -86,11 +84,22 @@ pub struct TypeEnv {
     generic_types: HashMap<String, Vec<String>>,
 }
 
+impl Default for TypeEnv {
+    fn default() -> Self {
+        Self {
+            scopes: vec![Scope::new()],
+            undefined: HashSet::new(),
+            type_params: HashMap::new(),
+            type_param_stack: Vec::new(),
+            generic_types: HashMap::new(),
+        }
+    }
+}
+
 impl TypeEnv {
     pub fn new() -> Self {
         let mut env = Self {
             scopes: vec![Scope::new()],
-            symbols: HashMap::new(),
             undefined: HashSet::new(),
             type_params: HashMap::new(),
             type_param_stack: Vec::new(),
@@ -163,6 +172,10 @@ impl TypeEnv {
                 params.iter().map(|p| self.resolve_type(p)).collect(),
                 Box::new(self.resolve_type(ret)),
             ),
+            TypeId::Adt(name, args) => TypeId::Adt(
+                name.clone(),
+                args.iter().map(|a| self.resolve_type(a)).collect(),
+            ),
             other => other.clone(),
         }
     }
@@ -189,12 +202,10 @@ impl TypeEnv {
                 let v = args.next()?;
                 Some(TypeId::Map(Box::new(k), Box::new(v)))
             }
-            "Option" => Some(TypeId::List(Box::new(type_args.into_iter().next()?))), // Simplified for now
-            "Result" => {
-                // Result[T, E] is represented as a union type, simplified for now
-                Some(TypeId::Primitive(Primitive::Any))
-            }
-            _ => None,
+            "Option" => Some(TypeId::Adt("Option".to_string(), type_args)),
+            "Result" => Some(TypeId::Adt("Result".to_string(), type_args)),
+            // For any other registered generic type, return Adt with type args
+            _ => Some(TypeId::Adt(type_name.to_string(), type_args)),
         }
     }
 
@@ -213,17 +224,14 @@ impl TypeEnv {
     }
 
     /// Insert a binding into the current (innermost) scope.
-    /// Also updates legacy symbols map.
     pub fn insert(&mut self, name: String, ty: TypeId) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.clone(), Binding::immutable(ty.clone()));
+            scope.insert(name, Binding::immutable(ty));
         }
-        self.symbols.insert(name, ty);
     }
 
     /// Insert a binding with explicit mutability.
     pub fn insert_binding(&mut self, name: String, binding: Binding) {
-        self.symbols.insert(name.clone(), binding.ty.clone());
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, binding);
         }
@@ -236,7 +244,6 @@ impl TypeEnv {
 
     /// Define a mutable variable.
     pub fn define_mut(&mut self, name: String, ty: TypeId) {
-        self.symbols.insert(name.clone(), ty.clone());
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, Binding::mutable(ty));
         }
@@ -252,19 +259,24 @@ impl TypeEnv {
         None
     }
 
-    /// Look up the type of a name (legacy API).
+    /// Look up the type of a name (searches from innermost to outermost scope).
     pub fn get(&self, name: &str) -> Option<&TypeId> {
-        self.symbols.get(name)
+        for scope in self.scopes.iter().rev() {
+            if let Some(binding) = scope.get(name) {
+                return Some(&binding.ty);
+            }
+        }
+        None
     }
 
     /// Look up the type of a name.
     pub fn get_type(&self, name: &str) -> Option<TypeId> {
-        self.symbols.get(name).cloned()
+        self.get(name).cloned()
     }
 
     /// Check if a name is defined in any scope.
     pub fn contains(&self, name: &str) -> bool {
-        self.symbols.contains_key(name)
+        self.scopes.iter().rev().any(|s| s.contains(name))
     }
 
     /// Check if a name is mutable.
@@ -280,6 +292,21 @@ impl TypeEnv {
     /// Current scope depth (0 = global).
     pub fn depth(&self) -> usize {
         self.scopes.len().saturating_sub(1)
+    }
+
+    /// Iterate over all bindings across all scopes (innermost first, deduplicating by name).
+    /// Returns (name, type) pairs for each unique binding.
+    pub fn iter_all(&self) -> Vec<(String, TypeId)> {
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        for scope in self.scopes.iter().rev() {
+            for (name, binding) in &scope.bindings {
+                if seen.insert(name.clone()) {
+                    result.push((name.clone(), binding.ty.clone()));
+                }
+            }
+        }
+        result
     }
 }
 
@@ -478,8 +505,8 @@ mod tests {
         env.pop_scope();
         
         assert!(env.contains("outer"));
-        // Note: legacy symbols map retains all entries for backward compat.
-        // Use get_binding() for proper scoped lookup.
+        // After pop, inner scope is gone - contains properly returns false
+        assert!(!env.contains("inner"));
         assert!(env.get_binding("inner").is_none());
     }
 
@@ -493,17 +520,16 @@ mod tests {
         env.define("x".to_string(), TypeId::Primitive(Primitive::Bool));
         assert!(env.defined_in_current_scope("x"));
         
-        // get_type uses legacy symbols which will have the newer value.
+        // get_type uses scope-based lookup, so it sees the shadowed value.
         assert_eq!(env.get_type("x"), Some(TypeId::Primitive(Primitive::Bool)));
         
         env.pop_scope();
         
-        // After pop, get_binding should return None for "x" in inner scope,
-        // but symbols map retains last value. This is okay for backward compat.
-        // The scoped lookup via get_binding would show the outer value.
+        // After pop, both get_binding and get_type show the outer value.
         let outer_binding = env.get_binding("x");
         assert!(outer_binding.is_some());
         assert_eq!(outer_binding.unwrap().ty, TypeId::Primitive(Primitive::Int));
+        assert_eq!(env.get_type("x"), Some(TypeId::Primitive(Primitive::Int)));
     }
 
     #[test]

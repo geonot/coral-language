@@ -45,6 +45,10 @@ pub struct SemanticModel {
     pub allocation: AllocationHints,
     pub usage: UsageMetrics,
     pub warnings: Vec<Diagnostic>,  // Non-fatal warnings (e.g., unhandled errors)
+    /// Maps (TypeName, FieldName) → field index for store/type field tracking
+    pub field_types: HashMap<(String, String), usize>,
+    /// Maps store/type names to list of field names for member access validation
+    pub store_field_names: HashMap<String, Vec<String>>,
 }
 
 /// Register error definitions recursively, building paths like "Database:Connection:Timeout"
@@ -79,6 +83,9 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     
     // Track constructor→enum_name to detect collisions (S3)
     let mut constructor_owners: HashMap<String, String> = HashMap::new();
+    // Track (TypeName, FieldName) → field index for member access type inference (TS-4)
+    let mut field_types: HashMap<(String, String), usize> = HashMap::new();
+    let mut store_field_names: HashMap<String, Vec<String>> = HashMap::new();
 
     // First pass: collect all top-level names (functions, externs, store constructors, types)
     // This allows undefined name detection to know about forward references
@@ -168,12 +175,12 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                 // Handle enum (sum type) variants - register constructors
                 if !r#type.variants.is_empty() {
                     // Register the enum type itself as an ADT
-                    types.insert(r#type.name.clone(), TypeId::Adt(r#type.name.clone()));
+                    types.insert(r#type.name.clone(), TypeId::Adt(r#type.name.clone(), vec![]));
                     
                     // Register each variant constructor
                     for variant in &r#type.variants {
                         let ctor_name = variant.name.clone();
-                        let adt_type = TypeId::Adt(r#type.name.clone());
+                        let adt_type = TypeId::Adt(r#type.name.clone(), vec![]);
                         
                         // Detect constructor name collisions (S3)
                         if let Some(other_enum) = constructor_owners.get(&ctor_name) {
@@ -214,6 +221,15 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     }
                 }
                 
+                // Track type field names for member access type inference (TS-4)
+                {
+                    let names: Vec<String> = r#type.fields.iter().map(|f| f.name.clone()).collect();
+                    for (i, field) in r#type.fields.iter().enumerate() {
+                        field_types.insert((r#type.name.clone(), field.name.clone()), i);
+                    }
+                    store_field_names.insert(r#type.name.clone(), names);
+                }
+
                 // Scope-check type method bodies
                 for method in &r#type.methods {
                     check_method_with_fields(method, &r#type.fields, &known_names)?;
@@ -247,6 +263,15 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                         TypeId::Func(vec![], Box::new(TypeId::Primitive(Primitive::Any))),
                     );
                 }
+                // Track store field names for member access type inference (TS-4)
+                {
+                    let names: Vec<String> = store.fields.iter().map(|f| f.name.clone()).collect();
+                    for (i, field) in store.fields.iter().enumerate() {
+                        field_types.insert((store.name.clone(), field.name.clone()), i);
+                    }
+                    store_field_names.insert(store.name.clone(), names);
+                }
+
                 // Scope-check store method bodies
                 for method in &store.methods {
                     check_method_with_fields(method, &store.fields, &known_names)?;
@@ -290,19 +315,19 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     }
     // Resolve types after solving for easier diagnostics downstream.
     let mut resolved = TypeEnv::default();
-    for (name, ty) in types.symbols.iter() {
+    for (name, ty) in types.iter_all() {
         let mut g = graph.clone();
         let r = crate::types::resolve(ty.clone(), &mut g);
-        resolved.insert(name.clone(), r);
+        resolved.insert(name, r);
     }
 
     let (usage, mutability, allocation) = infer_mutability_and_usage(&globals, &functions);
 
-    // Check match exhaustiveness after type definitions are collected
-    check_all_match_exhaustiveness(&globals, &functions, &type_defs)?;
-
     // Collect warnings for unhandled error values
     let mut warnings = Vec::new();
+
+    // Check match exhaustiveness after type definitions are collected (TS-9: warnings, not errors)
+    check_all_match_exhaustiveness(&globals, &functions, &type_defs, &mut warnings);
     check_unhandled_errors(&globals, &functions, &mut warnings);
 
     // Inject default trait method bodies into types/stores that don't override them
@@ -325,6 +350,8 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         allocation,
         usage,
         warnings,
+        field_types,
+        store_field_names,
     })
 }
 
@@ -687,8 +714,11 @@ fn collect_block_constraints(
                 let _ = collect_constraints_expr(condition, constraints, types, graph);
                 let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
             }
-            crate::ast::Statement::For { iterable, body, .. } => {
-                let _ = collect_constraints_expr(iterable, constraints, types, graph);
+            crate::ast::Statement::For { variable, iterable, body, span } => {
+                let iterable_ty = collect_constraints_expr(iterable, constraints, types, graph);
+                let elem_ty = TypeId::TypeVar(graph.fresh());
+                constraints.push(ConstraintKind::IterableAt(iterable_ty, elem_ty.clone(), *span));
+                types.insert(variable.clone(), elem_ty);
                 let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
             }
             crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_) => {}
@@ -718,12 +748,11 @@ fn collect_constraints_expr(
         Expression::String(_, _) => TypeId::Primitive(Primitive::String),
         Expression::Bytes(_, _) => TypeId::Primitive(Primitive::Bytes),
         Expression::Unit => TypeId::Primitive(Primitive::Unit),
-        Expression::None(_) => TypeId::Primitive(Primitive::Unit),  // none is unit/absent
+        Expression::None(_) => TypeId::Primitive(Primitive::None),  // none is absent (distinct from Unit)
         Expression::InlineAsm { .. } => TypeId::Unknown,
         Expression::PtrLoad { .. } => TypeId::Unknown,
         Expression::Unsafe { .. } => TypeId::Unknown,
         Expression::Identifier(name, _) => types
-            .symbols
             .get(name)
             .cloned()
             .unwrap_or(TypeId::Unknown),
@@ -958,7 +987,7 @@ fn collect_constraints_expr(
                         if let Some(ctor_ty) = types.get(name) {
                             let adt_ty = match ctor_ty {
                                 // Nullary constructor → type is directly the ADT
-                                TypeId::Adt(adt_name) => TypeId::Adt(adt_name.clone()),
+                                TypeId::Adt(adt_name, args) => TypeId::Adt(adt_name.clone(), args.clone()),
                                 // Constructor with fields → return type of the function is the ADT
                                 TypeId::Func(_, ret) => (**ret).clone(),
                                 _ => TypeId::Primitive(Primitive::Any),
@@ -996,8 +1025,7 @@ fn collect_constraints_expr(
         Expression::Throw { value, .. } => collect_constraints_expr(value, constraints, types, graph),
         Expression::Lambda { params, body, .. } => {
             let mut param_tys = Vec::new();
-            let mut shadow = TypeEnv::default();
-            shadow.symbols = types.symbols.clone();
+            let mut shadow = types.clone();
             for param in params {
                 let ty = match &param.type_annotation {
                     Some(ann) => type_from_annotation(ann),
@@ -1012,14 +1040,40 @@ fn collect_constraints_expr(
             constraints.constraints.extend(nested_constraints.constraints);
             TypeId::Func(param_tys, Box::new(body_ty))
         }
-        Expression::Pipeline { left, right, .. } => {
+        Expression::Pipeline { left, right, span } => {
             // Pipeline `a ~ f(args)` desugars to `f(a, args)`
-            // Collect constraints for both sides
+            // Collect constraints for left side
             let _left_ty = collect_constraints_expr(left, constraints, types, graph);
-            let right_ty = collect_constraints_expr(right, constraints, types, graph);
-            // The result type depends on what's on the right - usually a call expression
-            // We'll handle actual desugaring in codegen, here we just propagate types
-            right_ty
+            // Handle the right side based on its form:
+            match right.as_ref() {
+                Expression::Call { callee, args, span: call_span } => {
+                    // a ~ f(args) desugars to f(a, args)
+                    // Build a desugared call with left prepended to args
+                    let mut full_args = vec![*left.clone()];
+                    full_args.extend(args.clone());
+                    let desugared = Expression::Call {
+                        callee: callee.clone(),
+                        args: full_args,
+                        span: *call_span,
+                    };
+                    collect_constraints_expr(&desugared, constraints, types, graph)
+                }
+                Expression::Identifier(_name, _id_span) => {
+                    // a ~ f desugars to f(a)
+                    let desugared = Expression::Call {
+                        callee: right.clone(),
+                        args: vec![*left.clone()],
+                        span: *span,
+                    };
+                    collect_constraints_expr(&desugared, constraints, types, graph)
+                }
+                _ => {
+                    // For any other expression on the right, collect constraints
+                    // and use the result type (best effort)
+                    let right_ty = collect_constraints_expr(right, constraints, types, graph);
+                    right_ty
+                }
+            }
         }
         Expression::ErrorValue { .. } => {
             // Error values are a special type - for now treat as Any since
@@ -1285,6 +1339,7 @@ fn is_builtin_name(name: &str) -> bool {
         "string_to_upper" | "to_upper" | "string_to_lower" | "to_lower" |
         "string_replace" | "replace" | "string_contains" | "contains" |
         "string_parse_number" | "parse_number" | "number_to_string" |
+        "string_length" |
         // Bytes operations
         "bytes_length" | "bytes_get" | "bytes_set" |
         "bytes_from_string" | "to_bytes" | "bytes_to_string" | "bytes_slice" |
@@ -1301,7 +1356,7 @@ fn is_builtin_name(name: &str) -> bool {
         "list_contains" | "list_index_of" | "list_reverse" | "list_slice" |
         "list_sort" | "list_join" | "list_concat" |
         // Map operations
-        "map_remove" | "map_values" | "map_entries" | "entries" |
+        "map_remove" | "map_values" | "map_keys" | "map_entries" | "entries" |
         "map_has_key" | "has_key" | "map_merge" | "merge" |
         // Type introspection
         "type_of" |
@@ -1311,8 +1366,30 @@ fn is_builtin_name(name: &str) -> bool {
         "ord" | "string_ord" | "chr" | "string_chr" | "string_compare" | "strcmp" |
         // Actor operations (runtime FFI)
         "actor_spawn" | "actor_send" | "actor_stop" | "actor_self" |
+        "actor_monitor" | "monitor" | "actor_demonitor" | "demonitor" |
+        "actor_graceful_stop" | "graceful_stop" |
+        // JSON operations
+        "json_parse" | "json_serialize" | "json_stringify" | "json_serialize_pretty" |
+        // Time operations
+        "time_now" | "time_timestamp" | "time_format_iso" |
+        "time_year" | "time_month" | "time_day" |
+        "time_hour" | "time_minute" | "time_second" |
+        // String extended
+        "string_lines" |
+        // Sort operations
+        "sort_natural" | "list_sort_natural" |
+        // Bytes extended
+        "bytes_from_hex" | "bytes_contains" | "bytes_find" |
+        // Encoding operations
+        "base64_encode" | "base64_decode" |
+        "hex_encode" | "hex_decode" |
+        // TCP networking
+        "tcp_listen" | "tcp_accept" | "tcp_connect" |
+        "tcp_read" | "tcp_write" | "tcp_close" |
         // Memory operations (runtime FFI)
-        "value_retain" | "value_release" | "heap_alloc" | "heap_free"
+        "value_retain" | "value_release" | "heap_alloc" | "heap_free" |
+        // Range helper
+        "range"
     )
 }
 
@@ -1373,137 +1450,144 @@ fn check_all_match_exhaustiveness(
     globals: &[Binding],
     functions: &[Function],
     type_defs: &[crate::ast::TypeDefinition],
-) -> Result<(), Diagnostic> {
+    warnings: &mut Vec<Diagnostic>,
+) {
     let ctor_map = build_constructor_map(type_defs);
+    // Also build a map from enum name → list of variant names (for nested checking)
+    let enum_variants: HashMap<String, Vec<String>> = type_defs.iter()
+        .filter(|td| !td.variants.is_empty())
+        .map(|td| (td.name.clone(), td.variants.iter().map(|v| v.name.clone()).collect()))
+        .collect();
     
     // Check globals
     for binding in globals {
-        check_expr_match_exhaustiveness(&binding.value, &ctor_map)?;
+        check_expr_match_exhaustiveness(&binding.value, &ctor_map, &enum_variants, warnings);
     }
     
     // Check functions
     for function in functions {
-        check_block_match_exhaustiveness(&function.body, &ctor_map)?;
+        check_block_match_exhaustiveness(&function.body, &ctor_map, &enum_variants, warnings);
     }
-    
-    Ok(())
 }
 
 fn check_block_match_exhaustiveness(
     block: &Block,
     ctor_map: &HashMap<String, (String, Vec<String>)>,
-) -> Result<(), Diagnostic> {
+    enum_variants: &HashMap<String, Vec<String>>,
+    warnings: &mut Vec<Diagnostic>,
+) {
     for statement in &block.statements {
         match statement {
             Statement::Binding(binding) => {
-                check_expr_match_exhaustiveness(&binding.value, ctor_map)?;
+                check_expr_match_exhaustiveness(&binding.value, ctor_map, enum_variants, warnings);
             }
             Statement::Expression(expr) => {
-                check_expr_match_exhaustiveness(expr, ctor_map)?;
+                check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
             }
             Statement::Return(expr, _) => {
-                check_expr_match_exhaustiveness(expr, ctor_map)?;
+                check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
             }
             Statement::If { condition, body, elif_branches, else_body, .. } => {
-                check_expr_match_exhaustiveness(condition, ctor_map)?;
-                check_block_match_exhaustiveness(body, ctor_map)?;
+                check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
+                check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
                 for (cond, blk) in elif_branches {
-                    check_expr_match_exhaustiveness(cond, ctor_map)?;
-                    check_block_match_exhaustiveness(blk, ctor_map)?;
+                    check_expr_match_exhaustiveness(cond, ctor_map, enum_variants, warnings);
+                    check_block_match_exhaustiveness(blk, ctor_map, enum_variants, warnings);
                 }
                 if let Some(else_blk) = else_body {
-                    check_block_match_exhaustiveness(else_blk, ctor_map)?;
+                    check_block_match_exhaustiveness(else_blk, ctor_map, enum_variants, warnings);
                 }
             }
             Statement::While { condition, body, .. } => {
-                check_expr_match_exhaustiveness(condition, ctor_map)?;
-                check_block_match_exhaustiveness(body, ctor_map)?;
+                check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
+                check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
             }
             Statement::For { iterable, body, .. } => {
-                check_expr_match_exhaustiveness(iterable, ctor_map)?;
-                check_block_match_exhaustiveness(body, ctor_map)?;
+                check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
+                check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
             }
             Statement::Break(_) | Statement::Continue(_) => {}
             Statement::FieldAssign { value, .. } => {
-                check_expr_match_exhaustiveness(value, ctor_map)?;
+                check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
             }
         }
     }
     if let Some(value) = &block.value {
-        check_expr_match_exhaustiveness(value, ctor_map)?;
+        check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
     }
-    Ok(())
 }
 
 fn check_expr_match_exhaustiveness(
     expr: &Expression,
     ctor_map: &HashMap<String, (String, Vec<String>)>,
-) -> Result<(), Diagnostic> {
+    enum_variants: &HashMap<String, Vec<String>>,
+    warnings: &mut Vec<Diagnostic>,
+) {
     match expr {
         Expression::Binary { left, right, .. } => {
-            check_expr_match_exhaustiveness(left, ctor_map)?;
-            check_expr_match_exhaustiveness(right, ctor_map)?;
+            check_expr_match_exhaustiveness(left, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(right, ctor_map, enum_variants, warnings);
         }
         Expression::Unary { expr, .. } => {
-            check_expr_match_exhaustiveness(expr, ctor_map)?;
+            check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
         }
         Expression::List(items, _) => {
             for item in items {
-                check_expr_match_exhaustiveness(item, ctor_map)?;
+                check_expr_match_exhaustiveness(item, ctor_map, enum_variants, warnings);
             }
         }
         Expression::Map(entries, _) => {
             for (key, value) in entries {
-                check_expr_match_exhaustiveness(key, ctor_map)?;
-                check_expr_match_exhaustiveness(value, ctor_map)?;
+                check_expr_match_exhaustiveness(key, ctor_map, enum_variants, warnings);
+                check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
             }
         }
         Expression::Call { callee, args, .. } => {
-            check_expr_match_exhaustiveness(callee, ctor_map)?;
+            check_expr_match_exhaustiveness(callee, ctor_map, enum_variants, warnings);
             for arg in args {
-                check_expr_match_exhaustiveness(arg, ctor_map)?;
+                check_expr_match_exhaustiveness(arg, ctor_map, enum_variants, warnings);
             }
         }
         Expression::Member { target, .. } => {
-            check_expr_match_exhaustiveness(target, ctor_map)?;
+            check_expr_match_exhaustiveness(target, ctor_map, enum_variants, warnings);
         }
         Expression::Index { target, index, .. } => {
-            check_expr_match_exhaustiveness(target, ctor_map)?;
-            check_expr_match_exhaustiveness(index, ctor_map)?;
+            check_expr_match_exhaustiveness(target, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(index, ctor_map, enum_variants, warnings);
         }
         Expression::Ternary { condition, then_branch, else_branch, .. } => {
-            check_expr_match_exhaustiveness(condition, ctor_map)?;
-            check_expr_match_exhaustiveness(then_branch, ctor_map)?;
-            check_expr_match_exhaustiveness(else_branch, ctor_map)?;
+            check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(then_branch, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(else_branch, ctor_map, enum_variants, warnings);
         }
         Expression::Match(match_expr) => {
             // Recursively check the matched value and arm bodies
-            check_expr_match_exhaustiveness(&match_expr.value, ctor_map)?;
+            check_expr_match_exhaustiveness(&match_expr.value, ctor_map, enum_variants, warnings);
             for arm in &match_expr.arms {
-                check_block_match_exhaustiveness(&arm.body, ctor_map)?;
+                check_block_match_exhaustiveness(&arm.body, ctor_map, enum_variants, warnings);
             }
             if let Some(default) = &match_expr.default {
-                check_block_match_exhaustiveness(default, ctor_map)?;
+                check_block_match_exhaustiveness(default, ctor_map, enum_variants, warnings);
             }
             
-            // Now check exhaustiveness
-            check_single_match_exhaustiveness(match_expr, ctor_map)?;
+            // Now check exhaustiveness (emits warnings)
+            check_single_match_exhaustiveness(match_expr, ctor_map, enum_variants, warnings);
         }
         Expression::Throw { value, .. } => {
-            check_expr_match_exhaustiveness(value, ctor_map)?;
+            check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
         }
         Expression::Lambda { body, .. } => {
-            check_block_match_exhaustiveness(body, ctor_map)?;
+            check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
         }
         Expression::Pipeline { left, right, .. } => {
-            check_expr_match_exhaustiveness(left, ctor_map)?;
-            check_expr_match_exhaustiveness(right, ctor_map)?;
+            check_expr_match_exhaustiveness(left, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(right, ctor_map, enum_variants, warnings);
         }
         Expression::ErrorValue { .. } => {
             // Error values don't contain sub-expressions
         }
         Expression::ErrorPropagate { expr, .. } => {
-            check_expr_match_exhaustiveness(expr, ctor_map)?;
+            check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
         }
         // Other expressions don't contain sub-expressions or match
         Expression::Identifier(_, _)
@@ -1520,17 +1604,18 @@ fn check_expr_match_exhaustiveness(
         | Expression::Unit
         | Expression::None(_) => {}
     }
-    Ok(())
 }
 
-/// Check a single match expression for exhaustiveness
+/// Check a single match expression for exhaustiveness (TS-9: warnings + nested ADT checking)
 fn check_single_match_exhaustiveness(
     match_expr: &MatchExpression,
     ctor_map: &HashMap<String, (String, Vec<String>)>,
-) -> Result<(), Diagnostic> {
+    enum_variants: &HashMap<String, Vec<String>>,
+    warnings: &mut Vec<Diagnostic>,
+) {
     // If there's a default block, the match is exhaustive
     if match_expr.default.is_some() {
-        return Ok(());
+        return;
     }
     
     // Collect all matched constructors and check for wildcards
@@ -1557,13 +1642,13 @@ fn check_single_match_exhaustiveness(
     
     // If there's a wildcard or identifier catch-all, match is exhaustive
     if has_wildcard || has_identifier_catch_all {
-        return Ok(());
+        return;
     }
     
     // If no constructor patterns, we can't determine exhaustiveness 
     // (matching on literals or unknown types)
     if matched_ctors.is_empty() {
-        return Ok(());
+        return;
     }
     
     // Find the enum these constructors belong to
@@ -1577,12 +1662,12 @@ fn check_single_match_exhaustiveness(
             if let Some((other_enum, _)) = ctor_map.get(ctor) {
                 if other_enum != enum_name {
                     // Mixed enum types - this is a type error, but we let type checker handle it
-                    return Ok(());
+                    return;
                 }
             }
         }
         
-        // Check which variants are missing
+        // Check which variants are missing at the top level
         let missing: Vec<&String> = all_variants.iter()
             .filter(|v| !matched_ctors.contains(*v))
             .collect();
@@ -1593,16 +1678,109 @@ fn check_single_match_exhaustiveness(
                 .collect::<Vec<_>>()
                 .join(", ");
             
-            return Err(Diagnostic::new(
-                format!("non-exhaustive match: missing pattern(s) for {}", missing_list),
-                match_expr.span,
-            ).with_help(
-                "add arm(s) for the missing variant(s) or add a `_ =>` default arm".to_string()
-            ));
+            warnings.push(
+                Diagnostic::new(
+                    format!("non-exhaustive match: missing pattern(s) for {}", missing_list),
+                    match_expr.span,
+                ).with_help(
+                    "add arm(s) for the missing variant(s) or add a default arm".to_string()
+                )
+            );
+            return; // Don't check nested if top-level is already non-exhaustive
+        }
+        
+        // TS-9: Check nested pattern exhaustiveness for each constructor
+        // Group arms by their top-level constructor, then check sub-patterns
+        check_nested_exhaustiveness(&match_expr.arms, ctor_map, enum_variants, match_expr.span, warnings);
+    }
+}
+
+/// TS-9: Check nested pattern exhaustiveness within each constructor group.
+/// For example, in `match x` with arms `Some(Some(v)) ? ...` and `Some(None) ? ...` and `None ? ...`,
+/// the `Some` arms have sub-patterns on an inner `Option` type; we check those are exhaustive.
+fn check_nested_exhaustiveness(
+    arms: &[crate::ast::MatchArm],
+    ctor_map: &HashMap<String, (String, Vec<String>)>,
+    enum_variants: &HashMap<String, Vec<String>>,
+    span: Span,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    // Group arms by top-level constructor name
+    let mut groups: HashMap<String, Vec<&[crate::ast::MatchPattern]>> = HashMap::new();
+    
+    for arm in arms {
+        if let crate::ast::MatchPattern::Constructor { name, fields, .. } = &arm.pattern {
+            groups.entry(name.clone()).or_default().push(fields);
         }
     }
     
-    Ok(())
+    // For each constructor group, check sub-pattern exhaustiveness at each field position
+    for (ctor_name, field_groups) in &groups {
+        if field_groups.is_empty() {
+            continue;
+        }
+        
+        // Determine how many fields this constructor has
+        let max_fields = field_groups.iter().map(|f| f.len()).max().unwrap_or(0);
+        
+        for field_idx in 0..max_fields {
+            // Collect the sub-patterns at this field position
+            let mut sub_ctors: HashSet<String> = HashSet::new();
+            let mut has_catch_all = false;
+            
+            for fields in field_groups {
+                if field_idx < fields.len() {
+                    match &fields[field_idx] {
+                        crate::ast::MatchPattern::Constructor { name, .. } => {
+                            sub_ctors.insert(name.clone());
+                        }
+                        crate::ast::MatchPattern::Identifier(_) | crate::ast::MatchPattern::Wildcard(_) => {
+                            has_catch_all = true;
+                        }
+                        _ => {
+                            // Literal patterns don't contribute to constructor exhaustiveness
+                        }
+                    }
+                } else {
+                    // If this arm has fewer fields, it implicitly catches all
+                    has_catch_all = true;
+                }
+            }
+            
+            // If there's a catch-all, this position is exhaustive
+            if has_catch_all || sub_ctors.is_empty() {
+                continue;
+            }
+            
+            // All sub-patterns are constructors — check if they cover all variants of their enum
+            let first_sub = sub_ctors.iter().next().unwrap();
+            if let Some((sub_enum_name, sub_all_variants)) = ctor_map.get(first_sub) {
+                let sub_missing: Vec<&String> = sub_all_variants.iter()
+                    .filter(|v| !sub_ctors.contains(*v))
+                    .collect();
+                
+                if !sub_missing.is_empty() {
+                    let missing_list = sub_missing.iter()
+                        .map(|s| format!("`{}`", s))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    
+                    warnings.push(
+                        Diagnostic::new(
+                            format!(
+                                "non-exhaustive match: within `{}`, nested pattern(s) for {} of `{}` are missing",
+                                ctor_name, missing_list, sub_enum_name
+                            ),
+                            span,
+                        ).with_help(
+                            format!("add arm(s) for `{}({})` or use a catch-all pattern", ctor_name,
+                                sub_missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+                        )
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn check_field_uniqueness(owner_kind: &str, owner_name: &str, fields: &[Field]) -> Result<(), Diagnostic> {

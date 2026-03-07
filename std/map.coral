@@ -82,3 +82,79 @@ use std.prelude
 	for pair in pairs
 		result is result.set(pair.get(0), pair.get(1))
 	result
+
+# Map a function over keys, returning a new map with transformed keys
+*map_keys(m, func)
+	result is map()
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		result is result.set(func(key), val)
+	result
+
+# Flat map: apply func to each (key, value) pair, merge resulting maps
+*flat_map(m, func)
+	result is map()
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		sub is func(key, val)
+		result is map_merge(result, sub)
+	result
+
+# Group a list by key function, returning map of key -> list
+*group_by(lst, key_fn)
+	result is map()
+	for item in lst
+		key is key_fn(item)
+		existing is result.get(key)
+		if is_absent(existing)
+			result is result.set(key, [item])
+		else
+			result is result.set(key, existing.push(item))
+	result
+
+# Transform each entry with a function (key, value) -> new_value
+*map_entries_fn(m, func)
+	result is map()
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		result is result.set(key, func(key, val))
+	result
+
+# Find first entry matching predicate, or none
+*find_entry(m, predicate)
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		if predicate(key, val)
+			return entry
+	none
+
+# Check if any entry matches predicate
+*any_entry(m, predicate)
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		if predicate(key, val)
+			return true
+	false
+
+# Check if all entries match predicate
+*all_entries(m, predicate)
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		if !predicate(key, val)
+			return false
+	true
+
+# Fold/reduce over map entries
+*fold_entries(m, initial, func)
+	acc is initial
+	for entry in m
+		key is entry.get(0)
+		val is entry.get(1)
+		acc is func(acc, key, val)
+	acc

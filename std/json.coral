@@ -1,0 +1,24 @@
+# std/json.coral - JSON parsing and serialization
+#
+# Provides JSON encode/decode via runtime FFI.
+
+# Parse a JSON string into a Coral value (map, list, number, string, bool, or unit)
+*parse(text)
+	json_parse(text)
+
+# Serialize a Coral value to a JSON string
+*serialize(value)
+	json_serialize(value)
+
+# Alias for serialize
+*stringify(value)
+	json_serialize(value)
+
+# Serialize with pretty-printing (indented)
+*pretty(value)
+	json_serialize_pretty(value)
+
+# Check if a string is valid JSON
+*is_valid(text)
+	result is json_parse(text)
+	is_ok(result)

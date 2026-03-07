@@ -1,0 +1,8 @@
+*fib(n)
+	cond is n < 2
+	if cond
+		return n
+	return fib(n - 1) + fib(n - 2)
+
+*main()
+	log(fib(10))

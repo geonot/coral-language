@@ -1,25 +1,33 @@
-# Coral Language Showcase
+# Coral Examples
 
-This directory contains example programs demonstrating Coral's features and idioms.
+Example programs demonstrating Coral's features.
 
 ## Examples
 
-| File | Description |
-|------|-------------|
-| `hello.coral` | Basic hello world |
-| `fizzbuzz.coral` | Classic programming exercise |
-| `calculator.coral` | Expression evaluation with error handling |
-| `http_server.coral` | Simple HTTP server using actors |
-| `data_pipeline.coral` | Data processing with pipeline operator |
-| `chat_server.coral` | Multi-user chat with actors and stores |
-| `traits_demo.coral` | Mixin/trait system demonstration |
+| File | Description | Status |
+|------|-------------|--------|
+| `hello.coral` | Variables, lists, maps, ternaries, template strings | **Runs** |
+| `calculator.coral` | Arithmetic, match expressions, conditional logic | **Runs** |
+| `traits_demo.coral` | Trait definitions, default methods, implementations | **Runs** |
+| `data_pipeline.coral` | Store construction, iteration, data processing | **Compiles** (display issues) |
+| `fizzbuzz.coral` | Classic FizzBuzz with tuple pattern matching | **Parse error** (tuple patterns unsupported) |
+| `chat_server.coral` | Multi-user chat with actors and stores | **Lex error** (indentation) |
+| `http_server.coral` | Simple HTTP server using actors | **Lex error** (indentation) |
 
 ## Running Examples
 
 ```bash
-# Compile and run
-coralc examples/hello.coral -o hello && ./hello
+# Build the compiler and runtime first
+cargo build
+cargo build -p runtime --release
 
-# Or use the run command
-coralc run examples/fizzbuzz.coral
+# Run via JIT
+./target/debug/coralc --jit examples/hello.coral
+
+# Compile to native binary
+./target/debug/coralc examples/hello.coral --emit-binary ./hello
+./hello
+
+# Emit LLVM IR only
+./target/debug/coralc examples/hello.coral --emit-ir hello.ll
 ```

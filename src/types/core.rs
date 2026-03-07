@@ -11,6 +11,7 @@ pub enum Primitive {
     String,
     Bytes,
     Unit,
+    None,
     Any,
     Actor,
 }
@@ -24,6 +25,7 @@ impl fmt::Display for Primitive {
             Primitive::String => write!(f, "String"),
             Primitive::Bytes => write!(f, "Bytes"),
             Primitive::Unit => write!(f, "Unit"),
+            Primitive::None => write!(f, "None"),
             Primitive::Any => write!(f, "Any"),
             Primitive::Actor => write!(f, "Actor"),
         }
@@ -55,8 +57,8 @@ pub enum TypeId {
     Placeholder(u32),
     /// Type variable (for inference).
     TypeVar(TypeVarId),
-    /// Algebraic Data Type (user-defined enum/sum type).
-    Adt(String),
+    /// Algebraic Data Type (user-defined enum/sum type), with optional type arguments.
+    Adt(String, Vec<TypeId>),
     /// Unknown type (for permissive parsing, but should error in strict mode).
     #[default]
     Unknown,
@@ -76,7 +78,8 @@ impl TypeId {
     /// Check if this type contains no unresolved type variables.
     pub fn is_concrete(&self) -> bool {
         match self {
-            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) | TypeId::Adt(_) => true,
+            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) => true,
+            TypeId::Adt(_, args) => args.iter().all(|a| a.is_concrete()),
             TypeId::TypeVar(_) => false,
             TypeId::List(elem) => elem.is_concrete(),
             TypeId::Map(k, v) => k.is_concrete() && v.is_concrete(),
@@ -151,7 +154,14 @@ pub fn format_type(ty: &TypeId) -> String {
         }
         TypeId::Placeholder(id) => format!("${}", id),
         TypeId::TypeVar(id) => format!("{}", id),
-        TypeId::Adt(name) => name.clone(),
+        TypeId::Adt(name, args) => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let args_s: Vec<String> = args.iter().map(format_type).collect();
+                format!("{}[{}]", name, args_s.join(", "))
+            }
+        }
         TypeId::Unknown => "_".into(),
     }
 }

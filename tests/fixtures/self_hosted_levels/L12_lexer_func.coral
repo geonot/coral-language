@@ -1,0 +1,20 @@
+# A simplified version of one lexer function to isolate the semantic bug
+*measure_indent(src, pos, length)
+	start is pos
+	has_tabs is false
+	has_spaces is false
+	while pos < length
+		c is char_at(src, pos)
+		if c is " "
+			has_spaces is true
+		elif c is "\t"
+			has_tabs is true
+		else
+			break
+		pos is pos + 1
+	indent is pos - start
+	return map("indent" is indent, "has_tabs" is has_tabs, "has_spaces" is has_spaces)
+
+*main()
+	result is measure_indent("  hello", 0, 7)
+	log(result.get("indent"))

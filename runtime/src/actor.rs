@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -143,11 +143,17 @@ pub enum SendResult {
 #[derive(Debug, Clone)]
 pub enum Message {
     Exit,
+    GracefulStop,
     User(crate::ValueHandle),
     Failure(String),
     /// Child failure notification sent to parent supervisor.
     ChildFailure {
         child_id: ActorId,
+        reason: String,
+    },
+    /// Actor death notification sent to monitors.
+    ActorDown {
+        actor_id: ActorId,
         reason: String,
     },
 }
@@ -470,6 +476,8 @@ pub struct ActorSystem {
     pub(crate) registry: Arc<Mutex<HashMap<ActorId, ActorEntry>>>,
     /// Named actor registry: maps string names to actor handles.
     named_registry: Arc<Mutex<HashMap<String, ActorHandle>>>,
+    /// Monitor registry: maps monitored actor → set of watcher actors.
+    monitors: Arc<Mutex<HashMap<ActorId, HashSet<ActorId>>>>,
     scheduler: Scheduler,
     /// Timer wheel for delayed/scheduled messages.
     pub timer_wheel: TimerWheel,
@@ -487,6 +495,7 @@ impl ActorSystem {
         let system = Self { 
             registry: Arc::new(Mutex::new(HashMap::new())), 
             named_registry: Arc::new(Mutex::new(HashMap::new())),
+            monitors: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Scheduler::new(),
             timer_wheel: timer_wheel.clone(),
         };
@@ -535,7 +544,11 @@ impl ActorSystem {
                 supervision_config,
             };
             ctx.run(f);
+            // Notify monitors of actor death (AC-2)
+            system.notify_monitors(id, "normal");
             system.registry.lock().unwrap().remove(&id);
+            // Clean up monitor registrations for this actor
+            system.monitors.lock().unwrap().remove(&id);
         });
         handle
     }
@@ -611,6 +624,47 @@ impl ActorSystem {
     }
 
     // ========== Named Actor Registry ==========
+
+    // ========== Actor Monitoring (AC-2) ==========
+
+    /// Register `watcher` to be notified when `watched` dies.
+    pub fn monitor(&self, watcher: ActorId, watched: ActorId) {
+        let mut monitors = self.monitors.lock().unwrap();
+        monitors.entry(watched).or_insert_with(HashSet::new).insert(watcher);
+    }
+
+    /// Unregister `watcher` from death notifications of `watched`.
+    pub fn demonitor(&self, watcher: ActorId, watched: ActorId) {
+        let mut monitors = self.monitors.lock().unwrap();
+        if let Some(watchers) = monitors.get_mut(&watched) {
+            watchers.remove(&watcher);
+            if watchers.is_empty() {
+                monitors.remove(&watched);
+            }
+        }
+    }
+
+    /// Notify all monitors that an actor has died.
+    fn notify_monitors(&self, dead_actor: ActorId, reason: &str) {
+        let watchers = {
+            let monitors = self.monitors.lock().unwrap();
+            match monitors.get(&dead_actor) {
+                Some(set) => set.clone(),
+                None => return,
+            }
+        };
+        let registry = self.registry.lock().unwrap();
+        for watcher_id in watchers {
+            if let Some(entry) = registry.get(&watcher_id) {
+                let _ = entry.sender.try_send(Message::ActorDown {
+                    actor_id: dead_actor,
+                    reason: reason.to_string(),
+                });
+            }
+        }
+    }
+
+    // ========== Named Actor Registry (continued) ==========
 
     /// Register an actor with a name. Returns true if successful, false if name already taken.
     pub fn register_named(&self, name: &str, handle: ActorHandle) -> bool {

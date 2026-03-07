@@ -168,6 +168,12 @@ use std.char
 *make_pat_wildcard(span)
 	return map("kind" is "pat_wildcard", "span" is span)
 
+*make_pat_list(patterns, span)
+	return map("kind" is "pat_list", "patterns" is patterns, "span" is span)
+
+*make_template_expr(parts, span)
+	return map("kind" is "template", "parts" is parts, "span" is span)
+
 # ─── Parser State ───────────────────────────────────────────────────
 
 *make_parser(tokens)
@@ -267,6 +273,42 @@ use std.char
 
 # ─── Parse Entry Point ─────────────────────────────────────────────
 
+*is_item_start(kind)
+	if kind is "star"
+		return true
+	if kind is "keyword_type"
+		return true
+	if kind is "keyword_enum"
+		return true
+	if kind is "keyword_store"
+		return true
+	if kind is "keyword_actor"
+		return true
+	if kind is "keyword_err"
+		return true
+	if kind is "keyword_trait"
+		return true
+	if kind is "keyword_extern"
+		return true
+	if kind is "keyword_use"
+		return true
+	if kind is "keyword_persist"
+		return true
+	return false
+
+*synchronize_to_item(p)
+	# Skip tokens until we reach a known item-start boundary
+	while current_kind(p) isnt "eof"
+		kind is current_kind(p)
+		if is_item_start(kind)
+			return p
+		# Dedent back to top level can also be a sync point
+		if kind is "dedent" and p.get("layout_depth") > 0
+			consume_dedent(p)
+			return p
+		advance_parser(p)
+	return p
+
 *parse(tokens)
 	p is make_parser(tokens)
 	items is []
@@ -282,6 +324,9 @@ use std.char
 		item is parse_item(p)
 		if item isnt none
 			items.push(item)
+		else
+			# Error recovery: skip to next item boundary
+			synchronize_to_item(p)
 		skip_newlines(p)
 
 	return make_program(items, make_span(0, 0))
@@ -429,13 +474,24 @@ use std.char
 
 	return make_param(name, default, make_span(start, current_token(p).get("start")))
 
+# ─── Block Helpers ──────────────────────────────────────────────────
+
+*extract_block_value(stmts)
+	if stmts.length() > 0
+		last is stmts[stmts.length() - 1]
+		if last.get("kind") is "expression_stmt"
+			stmts.pop()
+			return last.get("expr")
+	return none
+
 # ─── Block Parsing ─────────────────────────────────────────────────
 
 *parse_block(p)
 	start is current_token(p).get("start")
 	stmts is []
 
-	if not consume_indent(p)
+	got_indent is consume_indent(p)
+	if got_indent is false
 		# Empty block — no indent found
 		return make_block([], none, make_span(start, start))
 
@@ -445,19 +501,14 @@ use std.char
 			break
 
 		stmt is parse_statement(p)
-		if stmt isnt none
+		if stmt.get("kind") isnt "skip"
 			stmts.push(stmt)
 		skip_newlines(p)
 
 	consume_dedent(p)
 
 	# Last expression becomes block value
-	value is none
-	if stmts.length() > 0
-		last is stmts[stmts.length() - 1]
-		if last.get("kind") is "expression_stmt"
-			value is last.get("expr")
-			stmts.pop()
+	value is extract_block_value(stmts)
 
 	return make_block(stmts, value, make_span(start, current_token(p).get("start")))
 
@@ -524,9 +575,9 @@ use std.char
 	# Skip stray newlines
 	if kind is "newline"
 		advance_parser(p)
-		return none
+		return map("kind" is "skip")
 
-	return none
+	return map("kind" is "skip")
 
 *parse_return_statement(p)
 	start is current_token(p).get("start")
@@ -643,7 +694,7 @@ use std.char
 	while current_kind(p) is "keyword_or"
 		advance_parser(p)
 		right is parse_logic_and(p)
-		left is make_binary_expr("or", left, right, make_span(0, 0))
+		left is make_binary_expr("Or", left, right, make_span(0, 0))
 
 	return left
 
@@ -654,7 +705,7 @@ use std.char
 	while current_kind(p) is "keyword_and"
 		advance_parser(p)
 		right is parse_bitwise_or(p)
-		left is make_binary_expr("and", left, right, make_span(0, 0))
+		left is make_binary_expr("And", left, right, make_span(0, 0))
 
 	return left
 
@@ -665,7 +716,7 @@ use std.char
 	while current_kind(p) is "pipe"
 		advance_parser(p)
 		right is parse_bitwise_xor(p)
-		left is make_binary_expr("bitor", left, right, make_span(0, 0))
+		left is make_binary_expr("BitOr", left, right, make_span(0, 0))
 
 	return left
 
@@ -676,7 +727,7 @@ use std.char
 	while current_kind(p) is "caret"
 		advance_parser(p)
 		right is parse_bitwise_and(p)
-		left is make_binary_expr("bitxor", left, right, make_span(0, 0))
+		left is make_binary_expr("BitXor", left, right, make_span(0, 0))
 
 	return left
 
@@ -687,7 +738,7 @@ use std.char
 	while current_kind(p) is "ampersand"
 		advance_parser(p)
 		right is parse_equality(p)
-		left is make_binary_expr("bitand", left, right, make_span(0, 0))
+		left is make_binary_expr("BitAnd", left, right, make_span(0, 0))
 
 	return left
 
@@ -696,7 +747,7 @@ use std.char
 	left is parse_comparison(p)
 
 	while current_kind(p) is "keyword_is" or current_kind(p) is "keyword_isnt"
-		op is current_kind(p) is "keyword_is" ? "equals" ! "not_equals"
+		op is current_kind(p) is "keyword_is" ? "Equals" ! "NotEquals"
 		advance_parser(p)
 		right is parse_comparison(p)
 		left is make_binary_expr(op, left, right, make_span(0, 0))
@@ -709,7 +760,7 @@ use std.char
 
 	kind is current_kind(p)
 	while kind is "greater" or kind is "greater_eq" or kind is "less" or kind is "less_eq"
-		op is kind
+		op is kind is "greater" ? "Greater" ! (kind is "greater_eq" ? "GreaterEq" ! (kind is "less" ? "Less" ! "LessEq"))
 		advance_parser(p)
 		right is parse_shift(p)
 		left is make_binary_expr(op, left, right, make_span(0, 0))
@@ -723,7 +774,7 @@ use std.char
 
 	kind is current_kind(p)
 	while kind is "shift_left" or kind is "shift_right"
-		op is kind
+		op is kind is "shift_left" ? "ShiftLeft" ! "ShiftRight"
 		advance_parser(p)
 		right is parse_term(p)
 		left is make_binary_expr(op, left, right, make_span(0, 0))
@@ -737,7 +788,7 @@ use std.char
 
 	kind is current_kind(p)
 	while kind is "plus" or kind is "minus"
-		op is kind is "plus" ? "add" ! "sub"
+		op is kind is "plus" ? "Add" ! "Sub"
 		advance_parser(p)
 		right is parse_factor(p)
 		left is make_binary_expr(op, left, right, make_span(0, 0))
@@ -751,7 +802,7 @@ use std.char
 
 	kind is current_kind(p)
 	while kind is "star" or kind is "slash" or kind is "percent"
-		op is kind is "star" ? "mul" ! (kind is "slash" ? "div" ! "mod")
+		op is kind is "star" ? "Mul" ! (kind is "slash" ? "Div" ! "Mod")
 		advance_parser(p)
 		right is parse_unary(p)
 		left is make_binary_expr(op, left, right, make_span(0, 0))
@@ -766,7 +817,7 @@ use std.char
 	if kind is "minus"
 		advance_parser(p)
 		expr is parse_unary(p)
-		return make_unary_expr("neg", expr, make_span(0, 0))
+		return make_unary_expr("Neg", expr, make_span(0, 0))
 
 	if kind is "keyword_not" or kind is "bang"
 		# ! followed by !! is throw
@@ -778,7 +829,7 @@ use std.char
 				return make_throw_expr(value, make_span(0, 0))
 		advance_parser(p)
 		expr is parse_unary(p)
-		return make_unary_expr("not", expr, make_span(0, 0))
+		return make_unary_expr("Not", expr, make_span(0, 0))
 
 	return parse_postfix(p)
 
@@ -857,17 +908,21 @@ use std.char
 	# Integer literal
 	if kind is "integer"
 		advance_parser(p)
-		return make_integer_expr(to_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
+		return make_integer_expr(parse_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
 
 	# Float literal
 	if kind is "float"
 		advance_parser(p)
-		return make_float_expr(to_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
+		return make_float_expr(parse_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
 
 	# String literal
 	if kind is "string"
 		advance_parser(p)
 		return make_string_expr(tok.get("value"), make_span(tok.get("start"), tok.get("end")))
+
+	# Template string: template_start, (template_expr, template_end)* 
+	if kind is "template_start"
+		return parse_template_string(p)
 
 	# Boolean literals
 	if kind is "keyword_true"
@@ -927,7 +982,7 @@ use std.char
 	# Placeholder $N
 	if kind is "placeholder"
 		advance_parser(p)
-		return make_placeholder_expr(to_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
+		return make_placeholder_expr(parse_number(tok.get("value")), make_span(tok.get("start"), tok.get("end")))
 
 	# Error value: err Name:Sub
 	if kind is "keyword_err"
@@ -937,6 +992,57 @@ use std.char
 	record_error(p, "unexpected token: " + kind)
 	advance_parser(p)
 	return make_unit_expr()
+
+# ─── Template String ───────────────────────────────────────────────
+
+*parse_template_string(p)
+	# Handles template_start "prefix" template_expr "expr" template_end ...
+	# Desugars into concat(prefix, to_string(expr), ...) chains
+	start is current_token(p).get("start")
+
+	# Collect parts: alternating string literals and expressions
+	parts is []
+
+	# First part is the template_start token (string prefix before first {})
+	prefix is current_token(p).get("value")
+	advance_parser(p)
+	if string_length(prefix) > 0
+		parts.push(make_string_expr(prefix, make_span(start, start)))
+
+	# Now consume template_expr/template_end pairs
+	while current_kind(p) is "template_expr"
+		# The expression text inside {}
+		expr_tok is current_token(p)
+		advance_parser(p)
+
+		# Lex and parse the expression text properly
+		expr_text is expr_tok.get("value")
+		expr_tokens is lex(expr_text)
+		inner_p is make_parser(expr_tokens)
+		skip_newlines(inner_p)
+		expr_node is parse_expression(inner_p)
+		# Wrap in to_string call for safe concatenation
+		to_str_call is make_call_expr(make_identifier_expr("to_string", make_span(0, 0)), [expr_node], make_span(0, 0))
+		parts.push(to_str_call)
+
+		# Consume template_end (suffix text after } until next { or end of string)
+		if current_kind(p) is "template_end"
+			suffix is current_token(p).get("value")
+			advance_parser(p)
+			if string_length(suffix) > 0
+				parts.push(make_string_expr(suffix, make_span(0, 0)))
+
+	# Build concat chain: fold parts with binary + operator
+	if parts.length() is 0
+		return make_string_expr("", make_span(start, current_token(p).get("start")))
+
+	result is parts[0]
+	i is 1
+	while i < parts.length()
+		result is make_binary_expr("+", result, parts[i], make_span(start, current_token(p).get("start")))
+		i is i + 1
+
+	return result
 
 # ─── List Literal ───────────────────────────────────────────────────
 
@@ -1006,7 +1112,8 @@ use std.char
 	return make_map_expr(entries, make_span(start, current_token(p).get("start")))
 
 *parse_map_entry(p)
-	key is parse_expression(p)
+	# Parse key at comparison level (below equality) so 'is' separator isn't consumed
+	key is parse_comparison(p)
 	expect(p, "keyword_is")
 	value is parse_expression(p)
 	return map("key" is key, "value" is value)
@@ -1045,13 +1152,7 @@ use std.char
 			expect(p, "question")
 
 			# Arm body can be single-line expr or indented block
-			kind is current_kind(p)
-			if kind is "newline"
-				skip_newlines(p)
-				arm_body is parse_block(p)
-			else
-				arm_expr is parse_expression(p)
-				arm_body is make_block([], arm_expr, make_span(0, 0))
+			arm_body is parse_match_arm_body(p)
 
 			arms.push(make_match_arm(pat, arm_body))
 			skip_newlines(p)
@@ -1059,6 +1160,16 @@ use std.char
 		consume_dedent(p)
 
 	return make_match_expr(value, arms, default, make_span(start, current_token(p).get("start")))
+
+# ─── Match Arm Body Helper ──────────────────────────────────────────
+
+*parse_match_arm_body(p)
+	kind is current_kind(p)
+	if kind is "newline"
+		skip_newlines(p)
+		return parse_block(p)
+	arm_expr is parse_expression(p)
+	return make_block([], arm_expr, make_span(0, 0))
 
 # ─── Pattern Parsing ───────────────────────────────────────────────
 
@@ -1069,14 +1180,14 @@ use std.char
 	# Integer pattern
 	if kind is "integer"
 		advance_parser(p)
-		return make_pat_integer(to_number(tok.get("value")))
+		return make_pat_integer(parse_number(tok.get("value")))
 
 	# Negative integer
 	if kind is "minus"
 		advance_parser(p)
 		num_tok is current_token(p)
 		advance_parser(p)
-		return make_pat_integer(0 - to_number(num_tok.get("value")))
+		return make_pat_integer(0 - parse_number(num_tok.get("value")))
 
 	# Boolean pattern
 	if kind is "keyword_true"
@@ -1091,6 +1202,20 @@ use std.char
 	if kind is "string"
 		advance_parser(p)
 		return make_pat_string(tok.get("value"))
+
+	# List pattern: [a, b, c]
+	if kind is "lbracket"
+		start_pos is tok.get("start")
+		advance_parser(p)
+		pats is []
+		while current_kind(p) isnt "rbracket" and current_kind(p) isnt "eof"
+			pat is parse_pattern(p)
+			pats.push(pat)
+			if current_kind(p) is "comma"
+				advance_parser(p)
+		end_pos is current_token(p).get("end")
+		expect(p, "rbracket")
+		return make_pat_list(pats, make_span(start_pos, end_pos))
 
 	# Wildcard
 	if kind is "identifier" and tok.get("value") is "_"
@@ -1126,6 +1251,14 @@ use std.char
 	advance_parser(p)
 	return make_pat_wildcard(make_span(0, 0))
 
+*parse_lambda_body(p)
+	kind is current_kind(p)
+	if kind is "indent" or kind is "newline"
+		skip_newlines(p)
+		return parse_block(p)
+	expr is parse_expression(p)
+	return make_block([], expr, make_span(0, 0))
+
 # ─── Lambda Expression ─────────────────────────────────────────────
 
 *parse_lambda(p)
@@ -1137,13 +1270,7 @@ use std.char
 	skip_newlines(p)
 
 	# Lambda can be single-line or multiline
-	kind is current_kind(p)
-	if kind is "indent" or kind is "newline"
-		skip_newlines(p)
-		body is parse_block(p)
-	else
-		expr is parse_expression(p)
-		body is make_block([], expr, make_span(0, 0))
+	body is parse_lambda_body(p)
 
 	return make_lambda_expr(params, body, make_span(start, current_token(p).get("start")))
 
@@ -1660,9 +1787,9 @@ use std.char
 		i is i + 1
 	return result
 
-# ─── Main: Parse a sample and display AST ──────────────────────────
+# ─── Demo: Parse a sample and display AST ──────────────────────────
 
-*main()
+*parser_demo()
 	# Import the lexer
 	sample is "*add(a, b)\n\treturn a + b\n\n*main()\n\tx is add(1, 2)\n\tlog(x)\n\tif x > 0\n\t\tlog(\"positive\")\n\telse\n\t\tlog(\"not positive\")\n"
 	# Note: in a real build, we'd use `use self_hosted.lexer` and call lex()

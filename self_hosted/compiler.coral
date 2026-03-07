@@ -1,0 +1,316 @@
+# Self-hosted Coral Compiler Pipeline
+#
+# Orchestrates: source → module_loader → lexer → parser → lower → semantic → codegen → IR
+#
+# Usage:
+#   result is compile(source)
+#   if result.get("ok")
+#       ir_text is result.get("value")
+#   else
+#       error_msg is result.get("message")
+#
+# Mirrors the Rust src/compiler.rs pipeline.
+
+# Pull in all compiler components (the module loader deduplicates these).
+use lexer
+use parser
+use lower
+use module_loader
+use semantic
+use codegen
+
+# ─── Pipeline Entry ────────────────────────────────────────────────
+
+*compile(source)
+	return compile_with_warnings(source)
+
+*compile_with_warnings(source)
+	# Step 1: Lex
+	tokens is lex(source)
+
+	# Step 2: Parse
+	program is parse(tokens)
+	# Step 3: Lower (placeholder desugaring)
+	lower_result is lower(program)
+	if lower_result.get("ok") is false
+		return map("ok" is false, "stage" is "lower", "message" is lower_result.get("message"))
+	program is lower_result.get("value")
+
+	# Step 4: Semantic analysis
+	sem_result is analyze(program)
+	if sem_result.get("ok") is false
+		return map("ok" is false, "stage" is "semantic", "message" is sem_result.get("message"))
+	model is sem_result.get("value")
+
+	# Step 5: Constant folding
+	fold_expressions(model)
+
+	# Step 6: Code generation (LLVM IR text)
+	ir_text is generate(model)
+
+	# Collect warnings
+	warnings is []
+	model_warnings is model.get("warnings")
+	if model_warnings isnt none
+		for w in model_warnings
+			warnings.push(w.get("message"))
+
+	return map("ok" is true, "value" is ir_text, "warnings" is warnings)
+
+# ─── Compile from file ─────────────────────────────────────────────
+
+*compile_file(path)
+	# Read source
+	source is fs_read(path)
+	if source is none
+		return map("ok" is false, "stage" is "io", "message" is 'cannot read file: {path}')
+
+	# Try module loader; fall back to raw source if it returns empty
+	loader is make_module_loader([])
+	load_result is load_module(loader, path)
+	full_source is ""
+	if load_result.get("ok")
+		full_source is load_result.get("value")
+	if full_source.length() is 0
+		full_source is source
+
+	return compile(full_source)
+
+# ─── Constant Folding ──────────────────────────────────────────────
+# Folds compile-time constant expressions:
+#   1 + 2 → 3, true and false → false, "a" + "b" → "ab"
+
+*fold_expressions(model)
+	# Fold globals
+	globals is model.get("globals")
+	if globals isnt none
+		for g in globals
+			val is g.get("value")
+			if val isnt none
+				g.set("value", fold_expr(val))
+	# Fold function bodies
+	functions is model.get("functions")
+	if functions isnt none
+		for func in functions
+			fold_block(func.get("body"))
+
+*fold_block(block)
+	if block is none
+		return none
+	stmts is block.get("statements")
+	if stmts isnt none
+		for stmt in stmts
+			fold_statement(stmt)
+	val is block.get("value")
+	if val isnt none
+		block.set("value", fold_expr(val))
+
+*fold_statement(stmt)
+	kind is stmt.get("kind")
+	if kind is "binding"
+		val is stmt.get("value")
+		if val isnt none
+			stmt.set("value", fold_expr(val))
+	elif kind is "expression_stmt"
+		expr is stmt.get("expr")
+		if expr isnt none
+			stmt.set("expr", fold_expr(expr))
+	elif kind is "return"
+		expr is stmt.get("expr")
+		if expr isnt none
+			stmt.set("expr", fold_expr(expr))
+	elif kind is "if"
+		cond is stmt.get("condition")
+		if cond isnt none
+			stmt.set("condition", fold_expr(cond))
+		fold_block(stmt.get("body"))
+		elifs is stmt.get("elif_branches")
+		if elifs isnt none
+			for eb in elifs
+				eb.set("condition", fold_expr(eb.get("condition")))
+				fold_block(eb.get("body"))
+		fold_block(stmt.get("else_body"))
+	elif kind is "while"
+		cond is stmt.get("condition")
+		if cond isnt none
+			stmt.set("condition", fold_expr(cond))
+		fold_block(stmt.get("body"))
+	elif kind is "for"
+		iter is stmt.get("iterable")
+		if iter isnt none
+			stmt.set("iterable", fold_expr(iter))
+		fold_block(stmt.get("body"))
+	elif kind is "field_assign"
+		val is stmt.get("value")
+		if val isnt none
+			stmt.set("value", fold_expr(val))
+
+*fold_expr(expr)
+	if expr is none
+		return expr
+	kind is expr.get("kind")
+
+	if kind is "binary"
+		left is fold_expr(expr.get("left"))
+		right is fold_expr(expr.get("right"))
+		expr.set("left", left)
+		expr.set("right", right)
+		op is expr.get("op")
+		span is expr.get("span")
+
+		# Integer + Integer
+		if left.get("kind") is "integer" and right.get("kind") is "integer"
+			a is left.get("value")
+			b is right.get("value")
+			if op is "Add"
+				return map("kind" is "integer", "value" is a + b, "span" is span)
+			if op is "Sub"
+				return map("kind" is "integer", "value" is a - b, "span" is span)
+			if op is "Mul"
+				return map("kind" is "integer", "value" is a * b, "span" is span)
+			if op is "Div" and b isnt 0
+				return map("kind" is "integer", "value" is a / b, "span" is span)
+			if op is "Mod" and b isnt 0
+				return map("kind" is "integer", "value" is a % b, "span" is span)
+			if op is "Equals"
+				return map("kind" is "bool", "value" is a is b, "span" is span)
+			if op is "Less"
+				return map("kind" is "bool", "value" is a < b, "span" is span)
+			if op is "Greater"
+				return map("kind" is "bool", "value" is a > b, "span" is span)
+
+		# Float + Float
+		if left.get("kind") is "float" and right.get("kind") is "float"
+			a is left.get("value")
+			b is right.get("value")
+			if op is "Add"
+				return map("kind" is "float", "value" is a + b, "span" is span)
+			if op is "Sub"
+				return map("kind" is "float", "value" is a - b, "span" is span)
+			if op is "Mul"
+				return map("kind" is "float", "value" is a * b, "span" is span)
+			if op is "Div"
+				return map("kind" is "float", "value" is a / b, "span" is span)
+
+		# Bool + Bool
+		if left.get("kind") is "bool" and right.get("kind") is "bool"
+			a is left.get("value")
+			b is right.get("value")
+			if op is "And"
+				return map("kind" is "bool", "value" is a and b, "span" is span)
+			if op is "Or"
+				return map("kind" is "bool", "value" is a or b, "span" is span)
+			if op is "Equals"
+				return map("kind" is "bool", "value" is a is b, "span" is span)
+
+		# String + String (concat)
+		if left.get("kind") is "string_lit" and right.get("kind") is "string_lit"
+			if op is "Add"
+				return map("kind" is "string_lit", "value" is '{left.get("value")}{right.get("value")}', "span" is span)
+
+		return expr
+
+	if kind is "unary"
+		inner is fold_expr(expr.get("expr"))
+		expr.set("expr", inner)
+		op is expr.get("op")
+		span is expr.get("span")
+		if op is "Neg" and inner.get("kind") is "integer"
+			return map("kind" is "integer", "value" is 0 - inner.get("value"), "span" is span)
+		if op is "Neg" and inner.get("kind") is "float"
+			return map("kind" is "float", "value" is 0 - inner.get("value"), "span" is span)
+		if op is "Not" and inner.get("kind") is "bool"
+			return map("kind" is "bool", "value" is !inner.get("value"), "span" is span)
+		return expr
+
+	if kind is "ternary"
+		cond is fold_expr(expr.get("condition"))
+		then_b is fold_expr(expr.get("then_branch"))
+		else_b is fold_expr(expr.get("else_branch"))
+		expr.set("condition", cond)
+		expr.set("then_branch", then_b)
+		expr.set("else_branch", else_b)
+		if cond.get("kind") is "bool"
+			if cond.get("value")
+				return then_b
+			else
+				return else_b
+		return expr
+
+	if kind is "call"
+		callee is fold_expr(expr.get("callee"))
+		expr.set("callee", callee)
+		args is expr.get("args")
+		if args isnt none
+			idx is 0
+			while idx < args.length()
+				args[idx] is fold_expr(args[idx])
+				idx is idx + 1
+		return expr
+
+	if kind is "list"
+		items is expr.get("items")
+		if items isnt none
+			idx is 0
+			while idx < items.length()
+				items[idx] is fold_expr(items[idx])
+				idx is idx + 1
+		return expr
+
+	if kind is "map_lit"
+		entries is expr.get("entries")
+		if entries isnt none
+			for entry in entries
+				entry[0] is fold_expr(entry[0])
+				entry[1] is fold_expr(entry[1])
+		return expr
+
+	if kind is "member"
+		expr.set("target", fold_expr(expr.get("target")))
+		return expr
+
+	if kind is "index"
+		expr.set("target", fold_expr(expr.get("target")))
+		expr.set("index", fold_expr(expr.get("index")))
+		return expr
+
+	if kind is "lambda"
+		fold_block(expr.get("body"))
+		return expr
+
+	return expr
+
+# ─── CLI Entry Point ────────────────────────────────────────────────
+# Reads a filename from command-line args or source from stdin.
+# Compiles and prints generated LLVM IR to stdout.
+
+*main()
+	args_list is process_args()
+	# When run via lli, args include lli's own flags.
+	# The input file is the last argument that ends with ".coral"
+	path is none
+	idx is args_list.length() - 1
+	while idx >= 0
+		arg is args_list[idx]
+		suffix is string_ends_with(arg, ".coral")
+		if suffix
+			path is arg
+			idx is -1
+		else
+			idx is idx - 1
+	if path isnt none
+		result is compile_file(path)
+		if result.get("ok")
+			log(result.get("value"))
+		else
+			log('error at {result.get("stage")}: {result.get("message")}')
+	else
+		source is stdin_read_line()
+		if source isnt none
+			result is compile(source)
+			if result.get("ok")
+				log(result.get("value"))
+			else
+				log('error at {result.get("stage")}: {result.get("message")}')
+		else
+			log('usage: coral-compiler <file.coral>')

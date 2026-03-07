@@ -134,17 +134,25 @@ impl Clone for WeakRef {
     fn clone(&self) -> Self {
         let addr = self.target_addr.load(Ordering::Acquire);
         
-        if addr != 0 {
+        // Each clone gets its own unique ID and increments weak_count
+        let new_id = if addr != 0 {
             if let Ok(mut reg) = registry().lock() {
                 if let Some(target) = reg.targets.get_mut(&(addr as usize)) {
                     target.weak_count += 1;
                 }
+                let id = reg.next_id;
+                reg.next_id += 1;
+                id
+            } else {
+                0
             }
-        }
+        } else {
+            0
+        };
         
         Self {
             target_addr: AtomicU64::new(addr),
-            id: self.id,
+            id: new_id,
         }
     }
 }

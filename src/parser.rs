@@ -11,6 +11,8 @@ pub struct Parser {
     source_len: usize,
     pending_error: Option<Diagnostic>,
     layout_depth: usize,
+    /// Accumulated parse errors for multi-error recovery
+    errors: Vec<Diagnostic>,
 }
 
 impl Parser {
@@ -21,6 +23,7 @@ impl Parser {
             source_len,
             pending_error: None,
             layout_depth: 0,
+            errors: Vec::new(),
         }
     }
 
@@ -35,15 +38,105 @@ impl Parser {
                 self.advance();
                 continue;
             }
-            let item = self.parse_item()?;
-            items.push(item);
+            match self.parse_item() {
+                Ok(item) => {
+                    items.push(item);
+                }
+                Err(diag) => {
+                    self.errors.push(diag);
+                    self.synchronize_to_item();
+                }
+            }
             self.skip_newlines();
         }
         let program = Program::new(items, Span::new(0, self.source_len));
         if let Some(error) = self.pending_error {
-            Err(error)
-        } else {
+            self.errors.insert(0, error);
+        }
+        if self.errors.is_empty() {
             Ok(program)
+        } else {
+            // Return the first error for backward compatibility;
+            // all errors are accumulated in self.errors
+            Err(self.errors.remove(0))
+        }
+    }
+
+    /// Return all accumulated errors (for multi-error reporting).
+    /// Call after parse() returns Err to get additional errors.
+    pub fn parse_with_recovery(mut self) -> (Program, Vec<Diagnostic>) {
+        let mut items = Vec::new();
+
+        self.skip_newlines();
+        while !self.check(TokenKind::Eof) {
+            if self.check(TokenKind::Dedent) {
+                let span = self.current_span();
+                self.leave_layout_block(span);
+                self.advance();
+                continue;
+            }
+            match self.parse_item() {
+                Ok(item) => {
+                    items.push(item);
+                }
+                Err(diag) => {
+                    self.errors.push(diag);
+                    self.synchronize_to_item();
+                }
+            }
+            self.skip_newlines();
+        }
+        let program = Program::new(items, Span::new(0, self.source_len));
+        if let Some(error) = self.pending_error {
+            self.errors.insert(0, error);
+        }
+        (program, self.errors)
+    }
+
+    /// Skip tokens until we find a synchronization point (start of a new item).
+    /// This allows continuing parsing after an error.
+    fn synchronize_to_item(&mut self) {
+        loop {
+            match self.peek_kind() {
+                // Item-start tokens — synchronization points
+                TokenKind::Star
+                | TokenKind::KeywordType
+                | TokenKind::KeywordEnum
+                | TokenKind::KeywordStore
+                | TokenKind::KeywordPersist
+                | TokenKind::KeywordActor
+                | TokenKind::KeywordErr
+                | TokenKind::KeywordTrait
+                | TokenKind::KeywordExtern
+                | TokenKind::Eof => {
+                    return;
+                }
+                // Newline followed by a top-level construct also syncs
+                TokenKind::Newline => {
+                    self.advance();
+                    self.skip_newlines();
+                    // Check if the next token starts an item
+                    match self.peek_kind() {
+                        TokenKind::Star
+                        | TokenKind::KeywordType
+                        | TokenKind::KeywordEnum
+                        | TokenKind::KeywordStore
+                        | TokenKind::KeywordPersist
+                        | TokenKind::KeywordActor
+                        | TokenKind::KeywordErr
+                        | TokenKind::KeywordTrait
+                        | TokenKind::KeywordExtern
+                        | TokenKind::Eof
+                        | TokenKind::Identifier(_) => {
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {
+                    self.advance();
+                }
+            }
         }
     }
 
@@ -300,13 +393,13 @@ impl Parser {
             }
             
             // Check for `code is <number>`
-            if let TokenKind::Identifier(ref ident) = self.peek_kind() {
+            if let TokenKind::Identifier(ident) = self.peek_kind() {
                 let ident = ident.clone();
                 if ident == "code" {
                     self.advance();
                     self.expect(TokenKind::KeywordIs, "expected `is` after `code`")?;
                     if let TokenKind::Integer(n) = self.peek_kind() {
-                        code = Some(n);
+                        code = Some(*n);
                         end_span = self.advance().span;
                         if self.check(TokenKind::Newline) {
                             self.advance();
@@ -318,7 +411,7 @@ impl Parser {
                 } else if ident == "message" {
                     self.advance();
                     self.expect(TokenKind::KeywordIs, "expected `is` after `message`")?;
-                    if let TokenKind::String(ref s) = self.peek_kind() {
+                    if let TokenKind::String(s) = self.peek_kind() {
                         message = Some(s.clone());
                         end_span = self.advance().span;
                         if self.check(TokenKind::Newline) {
@@ -812,7 +905,7 @@ impl Parser {
         let body = self.parse_block()?;
 
         let mut elif_branches = Vec::new();
-        while self.peek_kind() == TokenKind::KeywordElif {
+        while self.check(TokenKind::KeywordElif) {
             self.advance(); // consume 'elif'
             let elif_cond = self.parse_expression()?;
             self.skip_newlines();
@@ -820,7 +913,7 @@ impl Parser {
             elif_branches.push((elif_cond, elif_body));
         }
 
-        let else_body = if self.peek_kind() == TokenKind::KeywordElse {
+        let else_body = if self.check(TokenKind::KeywordElse) {
             self.advance(); // consume 'else'
             self.skip_newlines();
             Some(self.parse_block()?)
@@ -1864,7 +1957,7 @@ impl Parser {
 
     /// Consume an identifier or keyword-as-identifier (for parameter names in extern fn).
     fn consume_identifier_or_keyword(&mut self) -> ParseResult<(String, Span)> {
-        let kind = self.peek_kind();
+        let kind = self.peek_kind().clone();
         let span = self.current_span();
         match kind {
             TokenKind::Identifier(name) => {
@@ -2077,15 +2170,16 @@ impl Parser {
         Ok(Expression::PtrLoad { address, span })
     }
 
-    fn peek_kind(&self) -> TokenKind {
+    fn peek_kind(&self) -> &TokenKind {
+        static EOF: TokenKind = TokenKind::Eof;
         self.tokens
             .get(self.index)
-            .map(|t| t.kind.clone())
-            .unwrap_or(TokenKind::Eof)
+            .map(|t| &t.kind)
+            .unwrap_or(&EOF)
     }
 
-    fn peek_next_kind(&self) -> Option<TokenKind> {
-        self.tokens.get(self.index + 1).map(|t| t.kind.clone())
+    fn peek_next_kind(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.index + 1).map(|t| &t.kind)
     }
 
     fn check(&self, kind: TokenKind) -> bool {

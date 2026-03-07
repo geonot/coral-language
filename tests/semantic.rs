@@ -240,12 +240,12 @@ fn assigns_any_to_message_data_and_actor_primitive() {
     let model = semantic::analyze(program).expect("semantic analysis should succeed");
 
     assert_eq!(
-        model.types.symbols.get("Message.data"),
+        model.types.get("Message.data"),
         Some(&TypeId::Primitive(Primitive::Any)),
         "Message.data should be forced to Any",
     );
     assert_eq!(
-        model.types.symbols.get("Worker"),
+        model.types.get("Worker"),
         Some(&TypeId::Primitive(Primitive::Actor)),
         "actor stores should register Actor primitive type",
     );

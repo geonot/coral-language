@@ -1,13 +1,83 @@
-# Network standard library - Basic networking functions
-# This is a stub implementation for development
+# Network standard library - TCP networking functions
+#
+# Provides functions for TCP socket programming:
+# - Listening for connections (server)
+# - Connecting to remote hosts (client)
+# - Reading and writing data on connections
+# - Closing connections
 
-*tcp_listen(host, port)
-    # Stub: In real implementation, this would create a TCP listener
-    err NetworkStub:'tcp_listen not implemented'
+# ─── TCP Server ──────────────────────────────────────────
 
-*tcp_connect(host, port)
-    # Stub: In real implementation, this would create a TCP connection
-    err NetworkStub:'tcp_connect not implemented'
+# Create a TCP listener bound to host:port.
+# Returns a listener handle (number), or -1 on error.
+#
+# Example:
+#   listener is tcp_listen("0.0.0.0", 8080)
+*listen(host, port)
+    tcp_listen(host, port)
 
-# Error definitions for networking
-err NetworkStub
+# Accept a connection on a listener.
+# Blocks until a client connects.
+# Returns a connection handle (number), or -1 on error.
+#
+# Example:
+#   conn is tcp_accept(listener)
+*accept(listener_handle)
+    tcp_accept(listener_handle)
+
+# ─── TCP Client ──────────────────────────────────────────
+
+# Connect to a remote host:port.
+# Returns a connection handle (number), or -1 on error.
+#
+# Example:
+#   conn is tcp_connect("example.com", 80)
+*connect(host, port)
+    tcp_connect(host, port)
+
+# ─── Data Transfer ───────────────────────────────────────
+
+# Read up to n bytes from a TCP connection.
+# Returns read data as a string, or "" on error.
+#
+# Example:
+#   data is tcp_read(conn, 1024)
+*read(conn_handle, max_bytes)
+    tcp_read(conn_handle, max_bytes)
+
+# Write data to a TCP connection.
+# Returns number of bytes written, or -1 on error.
+#
+# Example:
+#   bytes_written is tcp_write(conn, "Hello\n")
+*write(conn_handle, data)
+    tcp_write(conn_handle, data)
+
+# ─── Connection Management ───────────────────────────────
+
+# Close a TCP connection.
+# Returns unit.
+#
+# Example:
+#   tcp_close(conn)
+*close(conn_handle)
+    tcp_close(conn_handle)
+
+# ─── Convenience Functions ───────────────────────────────
+
+# Send a string followed by a newline.
+*send_line(conn_handle, line)
+    tcp_write(conn_handle, concat(line, "\n"))
+
+# Check if a handle is valid (not -1).
+*is_valid_handle(handle)
+    handle > 0 - 1
+
+# ─── Error Definitions ──────────────────────────────────
+
+err NetworkError
+    ConnectionRefused
+    BindFailed
+    Timeout
+    ReadError
+    WriteError

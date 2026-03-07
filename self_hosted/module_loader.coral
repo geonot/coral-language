@@ -1,0 +1,284 @@
+# Self-hosted Coral Module Loader
+#
+# Handles `use module_name` directives by resolving module paths,
+# reading source files, and splicing content into the caller.
+# Prevents duplicate inclusions and detects circular imports.
+#
+# This mirrors the Rust module_loader.rs behavior:
+# - `use std.X` resolves to `<std_path>/X.coral`
+# - `use name` resolves relative to current file or std paths
+# - Prelude is auto-included for non-stdlib files
+# - Circular imports produce an error
+# - Already-included modules are skipped (no duplicates)
+
+# ─── Result Helpers ─────────────────────────────────────────────────
+
+*make_loader_error(message)
+	return map("ok" is false, "message" is message)
+
+*make_loader_ok(value)
+	return map("ok" is true, "value" is value)
+
+# ─── Module Loader State ───────────────────────────────────────────
+
+*make_module_loader(std_paths)
+	return map(
+		"std_paths" is std_paths,
+		"included" is [],
+		"stack" is []
+	)
+
+# ─── Path Utilities ────────────────────────────────────────────────
+
+*path_join(base, name)
+	if base.length() is 0
+		return name
+	last is char_at(base, base.length() - 1)
+	if last is "/"
+		return '{base}{name}'
+	return '{base}/{name}'
+
+*path_parent(path)
+	idx is path.length() - 1
+	while idx >= 0
+		if char_at(path, idx) is "/"
+			return slice(path, 0, idx)
+		idx is idx - 1
+	return ""
+
+*path_filename(path)
+	idx is path.length() - 1
+	while idx >= 0
+		if char_at(path, idx) is "/"
+			return slice(path, idx + 1, path.length())
+		idx is idx - 1
+	return path
+
+# ─── Module Resolution ─────────────────────────────────────────────
+
+*resolve_module(loader, current_file, module_name)
+	# Convert dots to slashes: "std.io" -> "std/io"
+	relative is replace(module_name, ".", "/")
+	file_name is '{relative}.coral'
+
+	# Try relative to current file's directory
+	parent is path_parent(current_file)
+	if parent.length() > 0
+		candidate is path_join(parent, file_name)
+		if fs_exists(candidate)
+			return make_loader_ok(candidate)
+
+	# Try current directory
+	if fs_exists(file_name)
+		return make_loader_ok(file_name)
+
+	# Try std paths
+	std_paths is loader.get("std_paths")
+	for std_path in std_paths
+		# Try full path: std/io.coral from std_path
+		candidate is path_join(std_path, file_name)
+		if fs_exists(candidate)
+			return make_loader_ok(candidate)
+		# For "std.io" -> relative is "std/io", strip "std/" prefix and resolve
+		if starts_with(relative, "std/")
+			inner is slice(relative, 4, relative.length())
+			inner_file is '{inner}.coral'
+			candidate2 is path_join(std_path, inner_file)
+			if fs_exists(candidate2)
+				return make_loader_ok(candidate2)
+
+	return make_loader_error('module `{module_name}` not found. Ensure `{file_name}` exists in the current directory or std paths.')
+
+# ─── Use Directive Parsing ─────────────────────────────────────────
+
+*parse_use_directive(line)
+	trimmed is trim(line)
+	if !starts_with(trimmed, "use ")
+		return none
+	module is trim(slice(trimmed, 4, trimmed.length()))
+	if module.length() is 0
+		return none
+	return module
+
+# ─── Inclusion Check ───────────────────────────────────────────────
+
+*is_included(loader, path)
+	for inc in loader.get("included")
+		if inc is path
+			return true
+	return false
+
+*mark_included(loader, path)
+	loader.get("included").push(path)
+
+*is_in_stack(loader, path)
+	for s in loader.get("stack")
+		if s is path
+			return true
+	return false
+
+*push_stack(loader, path)
+	loader.get("stack").push(path)
+
+*pop_stack(loader)
+	stack is loader.get("stack")
+	if stack.length() > 0
+		# Remove last element
+		new_stack is []
+		idx is 0
+		while idx < stack.length() - 1
+			new_stack.push(stack[idx])
+			idx is idx + 1
+		loader.set("stack", new_stack)
+
+# ─── Circular Import Cycle Description ─────────────────────────────
+
+*describe_cycle(loader, path)
+	stack is loader.get("stack")
+	# Find where the cycle starts
+	start_idx is 0
+	for s in stack
+		if s is path
+			break
+		start_idx is start_idx + 1
+	# Build cycle description
+	parts is []
+	idx is start_idx
+	while idx < stack.length()
+		parts.push(path_filename(stack[idx]))
+		idx is idx + 1
+	parts.push(path_filename(path))
+	return join(parts, " -> ")
+
+# ─── Check if File is in Std Path ──────────────────────────────────
+
+*is_std_file(loader, path)
+	for std_path in loader.get("std_paths")
+		if starts_with(path, std_path)
+			return true
+	return false
+
+# ─── Main Load Entry Point ─────────────────────────────────────────
+
+*load_module(loader, entry_path)
+	# Auto-include prelude for non-std files
+	if !is_std_file(loader, entry_path)
+		prelude_result is resolve_prelude(loader)
+		if prelude_result.get("ok")
+			prelude_path is prelude_result.get("value")
+			prelude_source is load_recursive(loader, prelude_path)
+			if prelude_source.get("ok") is false
+				return prelude_source
+			user_source is load_recursive(loader, entry_path)
+			if user_source.get("ok") is false
+				return user_source
+			combined is prelude_source.get("value")
+			combined is '{combined}\n{user_source.get("value")}'
+			return make_loader_ok(combined)
+	return load_recursive(loader, entry_path)
+
+*resolve_prelude(loader)
+	for std_path in loader.get("std_paths")
+		candidate is path_join(std_path, "prelude.coral")
+		if fs_exists(candidate)
+			return make_loader_ok(candidate)
+	return make_loader_error("prelude.coral not found")
+
+# ─── Recursive Loading ─────────────────────────────────────────────
+
+*load_recursive(loader, path)
+	# Circular import detection
+	if is_in_stack(loader, path)
+		cycle_desc is describe_cycle(loader, path)
+		return make_loader_error('circular import detected: {cycle_desc}')
+
+	# Skip already-included modules
+	if is_included(loader, path)
+		return make_loader_ok("")
+
+	push_stack(loader, path)
+
+	# Read the source file
+	source is fs_read(path)
+	if source is none
+		pop_stack(loader)
+		return make_loader_error('failed to read module: {path}')
+
+	# Process line by line, expanding use directives
+	lines is split(source, "\n")
+	expanded is ""
+
+	for line in lines
+		module_name is parse_use_directive(line)
+		if module_name isnt none
+			# Resolve and load the referenced module
+			resolved is resolve_module(loader, path, module_name)
+			if resolved.get("ok") is false
+				pop_stack(loader)
+				return resolved
+			module_path is resolved.get("value")
+			module_source is load_recursive(loader, module_path)
+			if module_source.get("ok") is false
+				pop_stack(loader)
+				return module_source
+			module_text is module_source.get("value")
+			if module_text.length() > 0
+				expanded is '{expanded}{module_text}\n'
+		else
+			expanded is '{expanded}{line}\n'
+
+	pop_stack(loader)
+	mark_included(loader, path)
+	return make_loader_ok(expanded)
+
+# ─── Export Extraction (text-based, for now) ───────────────────────
+# Extracts exported symbol names from source text.
+# This is the ML1 text-based approach; Phase D should replace with AST-based.
+
+*extract_exports(source)
+	exports is []
+	lines is split(source, "\n")
+	for line in lines
+		trimmed is trim(line)
+		# Function: *name(...)
+		if starts_with(trimmed, "*")
+			paren_idx is index_of(trimmed, "(")
+			if paren_idx > 1
+				name is slice(trimmed, 1, paren_idx)
+				name is trim(name)
+				if name.length() > 0
+					exports.push(name)
+		# Type: type Name
+		if starts_with(trimmed, "type ")
+			rest is trim(slice(trimmed, 5, trimmed.length()))
+			# Extract first word
+			space_idx is index_of(rest, " ")
+			if space_idx > 0
+				exports.push(slice(rest, 0, space_idx))
+			elif rest.length() > 0
+				exports.push(rest)
+		# Store: store Name
+		if starts_with(trimmed, "store ")
+			rest is trim(slice(trimmed, 6, trimmed.length()))
+			space_idx is index_of(rest, " ")
+			if space_idx > 0
+				exports.push(slice(rest, 0, space_idx))
+			elif rest.length() > 0
+				exports.push(rest)
+		# Actor: actor Name
+		if starts_with(trimmed, "actor ")
+			rest is trim(slice(trimmed, 6, trimmed.length()))
+			space_idx is index_of(rest, " ")
+			if space_idx > 0
+				exports.push(slice(rest, 0, space_idx))
+			elif rest.length() > 0
+				exports.push(rest)
+		# Trait: trait Name
+		if starts_with(trimmed, "trait ")
+			rest is trim(slice(trimmed, 6, trimmed.length()))
+			space_idx is index_of(rest, " ")
+			if space_idx > 0
+				exports.push(slice(rest, 0, space_idx))
+			elif rest.length() > 0
+				exports.push(rest)
+	return exports

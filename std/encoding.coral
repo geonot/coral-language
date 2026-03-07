@@ -1,0 +1,19 @@
+# std/encoding.coral - Base64 and hex encoding/decoding
+#
+# Provides encoding utilities via runtime FFI.
+
+# Encode a string or bytes value to base64
+*to_base64(data)
+	base64_encode(data)
+
+# Decode a base64 string back to bytes
+*from_base64(text)
+	base64_decode(text)
+
+# Encode bytes as hexadecimal string
+*to_hex(data)
+	hex_encode(data)
+
+# Decode a hexadecimal string to bytes
+*from_hex(text)
+	hex_decode(text)

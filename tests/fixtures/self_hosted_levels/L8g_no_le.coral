@@ -1,0 +1,48 @@
+# L8_stress without <= operators
+*add(a, b)
+	return a + b
+
+*sub(a, b)
+	return a - b
+
+*mul(a, b)
+	return a * b
+
+*is_even(n)
+	return n % 2 is 0
+
+*abs_val(x)
+	if x < 0
+		return 0 - x
+	return x
+
+*max_val(a, b)
+	if a > b
+		return a
+	return b
+
+*make_pair(x, y)
+	return map("first" is x, "second" is y)
+
+*sum_list(lst)
+	total is 0
+	for item in lst
+		total is total + item
+	return total
+
+*filter_positive(lst)
+	result is []
+	for item in lst
+		if item > 0
+			result.push(item)
+	return result
+
+*main()
+	log(add(10, 20))
+	log(sub(50, 25))
+	pair is make_pair(1, 2)
+	log(pair.get("first"))
+	nums is [1, 2, 3, 4, 5]
+	log(sum_list(nums))
+	pos is filter_positive([1, 2, 3, 4, 5])
+	log(pos.length())

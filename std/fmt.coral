@@ -1,0 +1,114 @@
+# std/fmt.coral - String formatting utilities
+#
+# Pure Coral formatting functions (no FFI needed).
+
+# Pad a string on the left to reach target width
+*pad_left(s, width, ch)
+	fill is ch
+	if fill.length == 0
+		fill is " "
+	result is s
+	*loop()
+		if result.length >= width
+			result
+		else
+			result is concat(fill, result)
+			loop()
+	loop()
+
+# Pad a string on the right to reach target width
+*pad_right(s, width, ch)
+	fill is ch
+	if fill.length == 0
+		fill is " "
+	result is s
+	*loop()
+		if result.length >= width
+			result
+		else
+			result is concat(result, fill)
+			loop()
+	loop()
+
+# Center a string within a given width
+*center(s, width, ch)
+	fill is ch
+	if fill.length == 0
+		fill is " "
+	total_pad is width - s.length
+	if total_pad <= 0
+		s
+	else
+		left_pad is total_pad / 2
+		right_pad is total_pad - left_pad
+		left is ""
+		*build_left(i)
+			if i >= left_pad
+				left
+			else
+				left is concat(left, fill)
+				build_left(i + 1)
+		build_left(0)
+		right is ""
+		*build_right(i)
+			if i >= right_pad
+				right
+			else
+				right is concat(right, fill)
+				build_right(i + 1)
+		build_right(0)
+		concat(concat(left, s), right)
+
+# Convert number to string with fixed decimal places
+*fixed(n, places)
+	s is number_to_string(n)
+	dot_idx is index_of(s, ".")
+	if dot_idx < 0
+		if places > 0
+			s is concat(s, ".")
+			*add_zeros(i)
+				if i >= places
+					s
+				else
+					s is concat(s, "0")
+					add_zeros(i + 1)
+			add_zeros(0)
+		else
+			s
+	else
+		decimal_part is slice(s, dot_idx + 1, s.length)
+		if decimal_part.length >= places
+			slice(s, 0, dot_idx + 1 + places)
+		else
+			*pad(i)
+				if i >= places
+					s
+				else
+					s is concat(s, "0")
+					pad(i + 1)
+			pad(decimal_part.length)
+
+# Repeat a string n times
+*repeat(s, n)
+	result is ""
+	*loop(i)
+		if i >= n
+			result
+		else
+			result is concat(result, s)
+			loop(i + 1)
+	loop(0)
+
+# Join a list of strings with a separator
+*join_with(items, sep)
+	if items.length == 0
+		""
+	else
+		result is items.get(0)
+		*loop(i)
+			if i >= items.length
+				result
+			else
+				result is concat(concat(result, sep), items.get(i))
+				loop(i + 1)
+		loop(1)

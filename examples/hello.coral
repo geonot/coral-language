@@ -21,7 +21,7 @@
     # Lists
     fruits is ['apple', 'banana', 'cherry']
     log('Fruits: {fruits}')
-    log('First fruit: {fruits.get(0)}')
+    log('First fruit: {fruits[0]}')
     
     # Maps
     config is map(

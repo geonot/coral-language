@@ -1,0 +1,11 @@
+# Test break statement
+*test_break()
+	i is 0
+	while i < 10
+		if i is 5
+			break
+		i is i + 1
+	return i
+
+*main()
+	log(test_break())

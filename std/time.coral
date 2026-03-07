@@ -1,0 +1,59 @@
+# std/time.coral - Time and date operations
+#
+# Uses monotonic and wall-clock time via runtime FFI.
+# Timestamps are milliseconds since Unix epoch.
+
+# Get current monotonic time in milliseconds (for measuring durations)
+*now()
+	time_now()
+
+# Get current wall-clock timestamp in milliseconds since epoch
+*timestamp()
+	time_timestamp()
+
+# Format a timestamp as ISO 8601 string (e.g. "2025-01-15T10:30:00Z")
+*format_iso(ts)
+	time_format_iso(ts)
+
+# Extract year from timestamp
+*year(ts)
+	time_year(ts)
+
+# Extract month (1-12) from timestamp
+*month(ts)
+	time_month(ts)
+
+# Extract day (1-31) from timestamp
+*day(ts)
+	time_day(ts)
+
+# Extract hour (0-23) from timestamp
+*hour(ts)
+	time_hour(ts)
+
+# Extract minute (0-59) from timestamp
+*minute(ts)
+	time_minute(ts)
+
+# Extract second (0-59) from timestamp
+*second(ts)
+	time_second(ts)
+
+# Measure the duration of running a function (in ms)
+*measure(f)
+	start is now()
+	f()
+	end is now()
+	end - start
+
+# Sleep for a given number of milliseconds (blocking)
+# Note: For non-blocking delays in actors, use timer_send_after
+*sleep(ms)
+	# Uses timer internally; this is a simple busy-wait
+	start is now()
+	*loop()
+		if now() - start >= ms
+			0
+		else
+			loop()
+	loop()

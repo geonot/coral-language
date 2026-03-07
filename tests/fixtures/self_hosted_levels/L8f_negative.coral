@@ -1,0 +1,7 @@
+# L8f: negative numbers
+*main()
+	x is 0 - 5
+	log(x)
+	nums is [1, 0 - 1, 2, 0 - 3]
+	for n in nums
+		log(n)

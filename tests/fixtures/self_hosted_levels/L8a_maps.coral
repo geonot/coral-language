@@ -1,0 +1,7 @@
+# L8a: just maps and method calls
+*make_pair(x, y)
+	return map("first" is x, "second" is y)
+
+*main()
+	pair is make_pair(1, 2)
+	log(pair.get("first"))

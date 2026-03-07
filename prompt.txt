@@ -1,3 +1,0 @@
-comprehensively, critically, rigorously and unbiasedly review the complete coral codebase for the coral language, including syntax, parser, lexer, ast, compiler, codegen, runtime, type inference, memory management, and documentation. 
-
-create a comprehensive report, and create a remediation plan to resolve outstanding issues, make improvements, and complete the self-hosted compiler and coral language based runtime, actor framework, and built-in object persistence.

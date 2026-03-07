@@ -1,0 +1,24 @@
+use lexer
+use module_loader
+
+*main()
+	loader is make_module_loader([])
+	load_result is load_module(loader, "self_hosted/compiler.coral")
+	if load_result.get("ok") is false
+		log("load failed")
+		return none
+	source is load_result.get("value")
+
+	tokens is lex(source)
+
+	# Print tokens around 54700-54860 (compile_file → fold_expressions transition)
+	idx is 54700
+	while idx < 54870 and idx < tokens.length()
+		tok is tokens[idx]
+		kind is tok.get("kind")
+		val is tok.get("value")
+		log(idx)
+		log(kind)
+		log(val)
+		log("---")
+		idx is idx + 1

@@ -1,0 +1,5 @@
+# L8b: list push and length
+*main()
+	nums is [1, 2, 3]
+	nums.push(4)
+	log(nums.length())

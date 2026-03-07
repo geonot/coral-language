@@ -69,16 +69,24 @@ use std.char
 	pos is state.get("pos")
 	src is state.get("source")
 	length is state.get("len")
+	has_tabs is false
+	has_spaces is false
 	while pos < length
 		c is char_at(src, pos)
 		if c is "\t"
+			has_tabs is true
 			width is width + 4
 			pos is pos + 1
 		elif c is " "
+			has_spaces is true
 			width is width + 1
 			pos is pos + 1
 		else
 			break
+	# Warn on mixed indentation
+	if has_tabs and has_spaces
+		tokens is state.get("tokens")
+		tokens.push(make_token("warning", "mixed tabs and spaces in indentation", pos, pos))
 	state.set("pos", pos)
 	return width
 
@@ -178,11 +186,15 @@ use std.char
 	src is state.get("source")
 	length is state.get("len")
 	result is ""
+	had_template is false
 
 	while state.get("pos") < length
 		c is current_char(state)
 		if c is quote
 			advance(state)
+			# After template interpolation, don't emit trailing empty string
+			if had_template and string_length(result) is 0
+				return none
 			return make_token("string", result, start, state.get("pos"))
 		elif c is "\\"
 			advance(state)
@@ -197,9 +209,42 @@ use std.char
 				result is result + "\\"
 			elif escaped is quote
 				result is result + quote
+			elif escaped is "{"
+				result is result + "{"
 			else
 				result is result + escaped
 			advance(state)
+		elif c is "{" and quote is "'"
+			# Template string interpolation (single-quoted strings only):
+			# emit current string part, then TemplateStart, then lex the
+			# expression, then TemplateEnd
+			advance(state)
+			tokens is state.get("tokens")
+			# Emit the string prefix as template_start
+			tokens.push(make_token("template_start", result, start, state.get("pos")))
+			# Lex the interpolation expression until matching }
+			brace_depth is 1
+			expr_start is state.get("pos")
+			while state.get("pos") < length and brace_depth > 0
+				ec is current_char(state)
+				if ec is "{"
+					brace_depth is brace_depth + 1
+				elif ec is "}"
+					brace_depth is brace_depth - 1
+				if brace_depth > 0
+					advance(state)
+			expr_end is state.get("pos")
+			expr_text is slice(src, expr_start, expr_end)
+			tokens.push(make_token("template_expr", expr_text, expr_start, expr_end))
+			if state.get("pos") < length
+				advance(state)
+			# Continue collecting the rest of the string
+			tokens.push(make_token("template_end", "", state.get("pos"), state.get("pos")))
+			# Recurse: remaining string becomes a new token
+			result is ""
+			start is state.get("pos") - 1
+			had_template is true
+			continue
 		else
 			result is result + c
 			advance(state)
@@ -426,10 +471,14 @@ use std.char
 
 		# String literals
 		if c is "\""
-			tokens.push(lex_string(state, "\""))
+			str_tok is lex_string(state, "\"")
+			if str_tok isnt none
+				tokens.push(str_tok)
 			continue
 		if c is "'"
-			tokens.push(lex_string(state, "'"))
+			str_tok is lex_string(state, "'")
+			if str_tok isnt none
+				tokens.push(str_tok)
 			continue
 
 		# Placeholder
@@ -448,7 +497,8 @@ use std.char
 			tokens.push(lex_operator(state))
 			continue
 
-		# Unknown character
+		# Unknown character - emit error token and continue (error recovery)
+		tokens.push(make_token("error", "unexpected character: " + c, state.get("pos"), state.get("pos") + 1))
 		advance(state)
 
 	# Emit trailing newline if needed
@@ -479,9 +529,9 @@ use std.char
 		return slice(kind, 8, kind.length())
 	return kind
 
-# ─── Main: Lex a sample and display tokens ─────────────────────────
+# ─── Demo: Lex a sample and display tokens ─────────────────────────
 
-*main()
+*lexer_demo()
 	sample is "*main()\n\tlog(\"hello\")\n\tx is 42 + 3\n\tif x > 10\n\t\tlog(\"big\")\n"
 	tokens is lex(sample)
 	for tok in tokens

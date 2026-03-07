@@ -1,0 +1,7 @@
+# List push/length and filtering
+*main()
+	result is []
+	for n in [1, 2, 3, 4, 5]
+		if n > 3
+			result.push(n)
+	log(result.length())

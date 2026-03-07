@@ -1,0 +1,5 @@
+*main()
+	if true
+		log("yes")
+	else
+		log("no")

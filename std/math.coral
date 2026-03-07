@@ -1,13 +1,109 @@
+# std/math.coral - Mathematical functions and constants
+#
+# Most functions delegate to runtime builtins (libm FFI).
+# The builtins (sqrt, pow, sin, cos, etc.) are available as
+# free functions without import; this module re-exports them
+# with documentation and adds pure-Coral utilities.
+
+# ===== Constants =====
+
 pi is 3.141592653589793
 half_pi is pi / 2
 tau is pi * 2
 e is 2.718281828459045
+inf is 1.0 / 0.0
+neg_inf is -1.0 / 0.0
+
+# ===== Basic math (wrappers for builtins) =====
+
+*math_abs(x)
+	abs(x)
+
+*math_floor(x)
+	floor(x)
+
+*math_ceil(x)
+	ceil(x)
+
+*math_round(x)
+	round(x)
+
+*math_trunc(x)
+	trunc(x)
+
+*math_sqrt(x)
+	sqrt(x)
+
+*math_pow(base, exponent)
+	pow(base, exponent)
+
+*math_min(a, b)
+	min(a, b)
+
+*math_max(a, b)
+	max(a, b)
+
+*math_sign(x)
+	sign(x)
+
+# ===== Logarithmic / Exponential =====
+
+*math_ln(x)
+	ln(x)
+
+*math_log10(x)
+	log10(x)
+
+*math_log2(x)
+	ln(x) / ln(2)
+
+*math_exp(x)
+	exp(x)
+
+*cbrt(x)
+	pow(x, 1 / 3)
+
+# ===== Trigonometry (wrappers for builtins) =====
+
+*math_sin(x)
+	sin(x)
+
+*math_cos(x)
+	cos(x)
+
+*math_tan(x)
+	tan(x)
+
+*math_asin(x)
+	asin(x)
+
+*math_acos(x)
+	acos(x)
+
+*math_atan(x)
+	atan(x)
+
+*math_atan2(y, x)
+	atan2(y, x)
+
+*math_sinh(x)
+	sinh(x)
+
+*math_cosh(x)
+	cosh(x)
+
+*math_tanh(x)
+	tanh(x)
+
+# ===== Conversions =====
 
 *deg_to_rad(degrees)
 	degrees * (pi / 180)
 
 *rad_to_deg(radians)
 	radians * (180 / pi)
+
+# ===== Pure Coral utilities =====
 
 *average(a, b)
 	(a + b) / 2
@@ -21,11 +117,22 @@ e is 2.718281828459045
 *is_zero(x)
 	x.equals(0)
 
+*is_even(n)
+	remainder is n % 2
+	remainder.equals(0)
+
+*is_odd(n)
+	remainder is n % 2
+	remainder.not_equals(0)
+
 *clamp(value, low, high)
 	min(high, max(low, value))
 
 *lerp(a, b, t)
 	a + (b - a) * t
+
+*map_range(x, in_low, in_high, out_low, out_high)
+	out_low + (x - in_low) * (out_high - out_low) / (in_high - in_low)
 
 *squared(x)
 	x * x
@@ -44,4 +151,16 @@ e is 2.718281828459045
 
 *magnitude(x, y)
 	sqrt(pow(x, 2) + pow(y, 2))
+
+*gcd(a, b)
+	x is abs(a)
+	y is abs(b)
+	while y > 0
+		temp is y
+		y is x % y
+		x is temp
+	x
+
+*lcm(a, b)
+	abs(a * b) / gcd(a, b)
 

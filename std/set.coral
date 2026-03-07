@@ -31,3 +31,78 @@ use std.prelude
 # Create set from a single element
 *singleton(elem)
     map().set(elem, true)
+
+# Create set from a list of elements
+*from_list(lst)
+    result is empty_set()
+    for elem in lst
+        result is add(result, elem)
+    result
+
+# Remove element from set
+*remove(s, elem)
+    map_remove(s, elem)
+
+# Intersection - elements in both sets
+*intersection(a, b)
+    result is empty_set()
+    for elem in elements(a)
+        if has(b, elem)
+            result is add(result, elem)
+    result
+
+# Difference - elements in a but not in b
+*difference(a, b)
+    result is empty_set()
+    for elem in elements(a)
+        if !has(b, elem)
+            result is add(result, elem)
+    result
+
+# Symmetric difference - elements in either set but not both
+*symmetric_difference(a, b)
+    result is empty_set()
+    for elem in elements(a)
+        if !has(b, elem)
+            result is add(result, elem)
+    for elem in elements(b)
+        if !has(a, elem)
+            result is add(result, elem)
+    result
+
+# Union - all elements from both sets
+*union(a, b)
+    result is a
+    for elem in elements(b)
+        result is add(result, elem)
+    result
+
+# Check if a is a subset of b (all elements of a are in b)
+*is_subset(a, b)
+    for elem in elements(a)
+        if !has(b, elem)
+            return false
+    true
+
+# Check if a is a superset of b (all elements of b are in a)
+*is_superset(a, b)
+    is_subset(b, a)
+
+# Check if two sets are equal
+*set_equals(a, b)
+    is_subset(a, b) ? is_subset(b, a) ! false
+
+# Map a function over set elements
+*map_set(s, func)
+    result is empty_set()
+    for elem in elements(s)
+        result is add(result, func(elem))
+    result
+
+# Filter set elements by predicate
+*filter_set(s, predicate)
+    result is empty_set()
+    for elem in elements(s)
+        if predicate(elem)
+            result is add(result, elem)
+    result

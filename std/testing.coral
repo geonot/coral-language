@@ -1,0 +1,66 @@
+# std/testing.coral - Simple test framework
+#
+# Provides assertion functions for writing tests.
+
+# Assert that a condition is true
+*assert(condition, message)
+	if condition
+		0
+	else
+		log(concat("ASSERTION FAILED: ", message))
+		error("assertion_failed", message)
+
+# Assert two values are equal
+*assert_eq(actual, expected, label)
+	if actual.equals(expected)
+		0
+	else
+		msg is concat(concat(concat(concat(label, ": expected "), number_to_string(expected)), " but got "), number_to_string(actual))
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Assert two values are not equal
+*assert_ne(actual, expected, label)
+	if actual.equals(expected)
+		msg is concat(label, ": values should not be equal")
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+	else
+		0
+
+# Assert a value is truthy (not 0, not "", not unit)
+*assert_truthy(value, label)
+	if value
+		0
+	else
+		msg is concat(label, ": expected truthy value")
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Assert a value is an error
+*assert_err(value, label)
+	if is_err(value)
+		0
+	else
+		msg is concat(label, ": expected error value")
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Assert a value is ok (not an error)
+*assert_ok(value, label)
+	if is_ok(value)
+		0
+	else
+		msg is concat(label, ": expected ok value")
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Run a test function and report result
+*run_test(name, test_fn)
+	result is test_fn()
+	if is_err(result)
+		log(concat(concat("FAIL: ", name), concat(" - ", error_name(result))))
+		0
+	else
+		log(concat("PASS: ", name))
+		1

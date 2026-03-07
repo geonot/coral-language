@@ -1,0 +1,11 @@
+# Test nested scope without comparisons
+*test_scope()
+	x is 10
+	y is true
+	if y
+		z is x + 1
+		log(z)
+	return x
+
+*main()
+	log(test_scope())

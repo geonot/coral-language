@@ -1,0 +1,34 @@
+# Many functions
+*add(a, b)
+	return a + b
+
+*sub(a, b)
+	return a - b
+
+*mul(a, b)
+	return a * b
+
+*div(a, b)
+	return a / b
+
+*mod(a, b)
+	return a % b
+
+*negate(x)
+	return 0 - x
+
+*double(x)
+	return x * 2
+
+*square(x)
+	return x * x
+
+*main()
+	log(add(10, 20))
+	log(sub(50, 25))
+	log(mul(3, 4))
+	log(div(10, 2))
+	log(mod(10, 3))
+	log(negate(5))
+	log(double(7))
+	log(square(6))

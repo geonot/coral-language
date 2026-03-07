@@ -1,0 +1,44 @@
+# std/sort.coral - Sorting utilities
+#
+# Provides natural sorting via runtime FFI plus pure-Coral helpers.
+
+# Sort a list using natural ordering (numbers numerically, strings lexicographically)
+*natural(lst)
+	sort_natural(lst)
+
+# Sort a list by a key function
+*by(lst, key_fn)
+	# Create pairs of (key, original), sort, extract originals
+	pairs is []
+	*build(i)
+		if i >= lst.length
+			pairs
+		else
+			item is lst.get(i)
+			k is key_fn(item)
+			pairs.push([k, item])
+			build(i + 1)
+	build(0)
+	sorted_pairs is sort_natural(pairs)
+	# Extract second element from each pair
+	result is []
+	*extract(i)
+		if i >= sorted_pairs.length
+			result
+		else
+			pair is sorted_pairs.get(i)
+			result.push(pair.get(1))
+			extract(i + 1)
+	extract(0)
+
+# Reverse a sorted list (descending order)
+*descending(lst)
+	sorted is sort_natural(lst)
+	reversed is []
+	*rev(i)
+		if i < 0
+			reversed
+		else
+			reversed.push(sorted.get(i))
+			rev(i - 1)
+	rev(sorted.length - 1)

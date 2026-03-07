@@ -1,6 +1,9 @@
-# std/io.coral - File I/O operations
+# std/io.coral - File I/O and console operations
+#
+# File operations use runtime FFI (fs_read, fs_write, etc.).
+# Console operations use log() and stdin_read_line().
 
-use std.prelude
+# ===== File Operations =====
 
 # Read entire file contents as string
 *read(path)
@@ -39,29 +42,31 @@ use std.prelude
 	content is fs_read(path)
 	split(content, "\n")
 
-# ===== Path operations (pure string manipulation) =====
+# ===== Path Operations (pure string manipulation) =====
 
 # Get file extension (without dot)
 *extension(path)
 	parts is split(path, ".")
-	parts.length > 1 ? parts.get(parts.length - 1) ! ""
+	if parts.length > 1
+		parts[parts.length - 1]
+	else
+		""
 
 # Get filename from path
 *filename(path)
 	parts is split(path, "/")
-	parts.get(parts.length - 1)
+	parts[parts.length - 1]
 
 # Get directory part of path
 *dirname(path)
 	parts is split(path, "/")
 	if parts.length > 1
-		# Join all but last
 		result is ""
 		i is 0
 		while i < parts.length - 1
 			if i > 0
 				result is result + "/"
-			result is result + parts.get(i)
+			result is result + parts[i]
 			i is i + 1
 		result
 	else
@@ -84,8 +89,12 @@ use std.prelude
 
 # ===== Console I/O =====
 
-# Log a message
+# Print to stdout with newline
 *println(msg)
+	log(msg)
+
+# Print to stdout (alias)
+*print(msg)
 	log(msg)
 
 # Read a line from stdin

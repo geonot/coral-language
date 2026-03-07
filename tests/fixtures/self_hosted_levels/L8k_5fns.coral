@@ -1,0 +1,22 @@
+# 5 functions
+*add(a, b)
+	return a + b
+
+*sub(a, b)
+	return a - b
+
+*mul(a, b)
+	return a * b
+
+*div(a, b)
+	return a / b
+
+*mod(a, b)
+	return a % b
+
+*main()
+	log(add(10, 20))
+	log(sub(50, 25))
+	log(mul(3, 4))
+	log(div(10, 2))
+	log(mod(10, 3))

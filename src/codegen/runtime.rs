@@ -50,6 +50,8 @@ pub struct RuntimeBindings<'ctx> {
     pub map_iter: FunctionValue<'ctx>,
     pub map_iter_next: FunctionValue<'ctx>,
     pub value_length: FunctionValue<'ctx>,
+    pub value_get: FunctionValue<'ctx>,
+    pub field_or_length: FunctionValue<'ctx>,
     pub map_entry_type: StructType<'ctx>,
     pub make_closure: FunctionValue<'ctx>,
     pub closure_invoke: FunctionValue<'ctx>,
@@ -77,6 +79,9 @@ pub struct RuntimeBindings<'ctx> {
     pub timer_schedule_repeat: FunctionValue<'ctx>,
     pub timer_cancel: FunctionValue<'ctx>,
     pub timer_pending_count: FunctionValue<'ctx>,
+    // Main actor sync
+    pub main_wait: FunctionValue<'ctx>,
+    pub main_done_signal: FunctionValue<'ctx>,
     pub closure_invoke_type: FunctionType<'ctx>,
     pub closure_release_type: FunctionType<'ctx>,
     // Tagged value (ADT) operations
@@ -171,6 +176,61 @@ pub struct RuntimeBindings<'ctx> {
     pub string_ord: FunctionValue<'ctx>,
     pub string_chr: FunctionValue<'ctx>,
     pub string_compare: FunctionValue<'ctx>,
+    // Store persistence operations
+    pub store_open: FunctionValue<'ctx>,
+    pub store_close: FunctionValue<'ctx>,
+    pub store_save_all: FunctionValue<'ctx>,
+    pub store_create: FunctionValue<'ctx>,
+    pub store_get_by_index: FunctionValue<'ctx>,
+    pub store_get_by_uuid: FunctionValue<'ctx>,
+    pub store_update: FunctionValue<'ctx>,
+    pub store_soft_delete: FunctionValue<'ctx>,
+    pub store_stats: FunctionValue<'ctx>,
+    pub store_count: FunctionValue<'ctx>,
+    pub store_persist: FunctionValue<'ctx>,
+    pub store_checkpoint: FunctionValue<'ctx>,
+    pub store_all_indices: FunctionValue<'ctx>,
+    // JSON operations (SL-8)
+    pub json_parse: FunctionValue<'ctx>,
+    pub json_serialize: FunctionValue<'ctx>,
+    pub json_serialize_pretty: FunctionValue<'ctx>,
+    // Time operations (SL-9)
+    pub time_now: FunctionValue<'ctx>,
+    pub time_timestamp: FunctionValue<'ctx>,
+    pub time_format_iso: FunctionValue<'ctx>,
+    pub time_year: FunctionValue<'ctx>,
+    pub time_month: FunctionValue<'ctx>,
+    pub time_day: FunctionValue<'ctx>,
+    pub time_hour: FunctionValue<'ctx>,
+    pub time_minute: FunctionValue<'ctx>,
+    pub time_second: FunctionValue<'ctx>,
+    // String lines (SL-6 ext)
+    pub string_lines: FunctionValue<'ctx>,
+    // Sort (SL-11)
+    pub list_sort_natural: FunctionValue<'ctx>,
+    // Bytes extensions (SL-7)
+    pub bytes_from_hex: FunctionValue<'ctx>,
+    pub bytes_contains: FunctionValue<'ctx>,
+    pub bytes_find: FunctionValue<'ctx>,
+    // Encoding (SL-12)
+    pub base64_encode: FunctionValue<'ctx>,
+    pub base64_decode: FunctionValue<'ctx>,
+    pub hex_encode: FunctionValue<'ctx>,
+    pub hex_decode: FunctionValue<'ctx>,
+    // TCP networking (SL-13)
+    pub tcp_listen: FunctionValue<'ctx>,
+    pub tcp_accept: FunctionValue<'ctx>,
+    pub tcp_connect: FunctionValue<'ctx>,
+    pub tcp_read: FunctionValue<'ctx>,
+    pub tcp_write: FunctionValue<'ctx>,
+    pub tcp_close: FunctionValue<'ctx>,
+    // Actor monitoring (AC-2)
+    pub actor_monitor: FunctionValue<'ctx>,
+    pub actor_demonitor: FunctionValue<'ctx>,
+    // Graceful stop (AC-4)
+    pub actor_graceful_stop: FunctionValue<'ctx>,
+    // Range helper (Phase D)
+    pub list_range: FunctionValue<'ctx>,
 }
 
 impl<'ctx> RuntimeBindings<'ctx> {
@@ -357,6 +417,16 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let value_length = module.add_function(
             "coral_value_length",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let value_get = module.add_function(
+            "coral_value_get",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let field_or_length = module.add_function(
+            "coral_field_or_length",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let value_iter = module.add_function(
@@ -571,6 +641,18 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let timer_pending_count = module.add_function(
             "coral_timer_pending_count",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+
+        // Main actor synchronization
+        let main_wait = module.add_function(
+            "coral_main_wait",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let main_done_signal = module.add_function(
+            "coral_main_done_signal",
             value_ptr_type.fn_type(&[], false),
             None,
         );
@@ -960,6 +1042,13 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Range helper
+        let list_range = module.add_function(
+            "coral_range",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
         // Map extensions
         let map_remove = module.add_function(
             "coral_map_remove",
@@ -1036,6 +1125,266 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Store persistence operations
+        // coral_store_open(type_ptr, type_len, name_ptr, name_len, path_ptr, path_len) -> ValuePtr
+        let store_open = module.add_function(
+            "coral_store_open",
+            value_ptr_type.fn_type(
+                &[
+                    i8_ptr.into(), usize_type.into(),  // store_type
+                    i8_ptr.into(), usize_type.into(),  // store_name
+                    i8_ptr.into(), usize_type.into(),  // data_path
+                ],
+                false,
+            ),
+            None,
+        );
+        // coral_store_close(handle) -> ValuePtr
+        let store_close = module.add_function(
+            "coral_store_close",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_save_all() -> ValuePtr
+        let store_save_all = module.add_function(
+            "coral_store_save_all",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        // coral_store_create(handle, fields_map) -> ValuePtr
+        let store_create = module.add_function(
+            "coral_store_create",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_get_by_index(handle, index) -> ValuePtr
+        let store_get_by_index = module.add_function(
+            "coral_store_get_by_index",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_get_by_uuid(handle, uuid_ptr, uuid_len) -> ValuePtr
+        let store_get_by_uuid = module.add_function(
+            "coral_store_get_by_uuid",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), i8_ptr.into(), usize_type.into()],
+                false,
+            ),
+            None,
+        );
+        // coral_store_update(handle, index, fields_map) -> ValuePtr
+        let store_update = module.add_function(
+            "coral_store_update",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        // coral_store_soft_delete(handle, index) -> ValuePtr
+        let store_soft_delete = module.add_function(
+            "coral_store_soft_delete",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_stats(handle) -> ValuePtr
+        let store_stats = module.add_function(
+            "coral_store_stats",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_count(handle) -> ValuePtr
+        let store_count = module.add_function(
+            "coral_store_count",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_persist(handle) -> ValuePtr
+        let store_persist = module.add_function(
+            "coral_store_persist",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_checkpoint(handle) -> ValuePtr
+        let store_checkpoint = module.add_function(
+            "coral_store_checkpoint",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        // coral_store_all_indices(handle) -> ValuePtr
+        let store_all_indices = module.add_function(
+            "coral_store_all_indices",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // JSON operations (SL-8)
+        let json_parse = module.add_function(
+            "coral_json_parse",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let json_serialize = module.add_function(
+            "coral_json_serialize",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let json_serialize_pretty = module.add_function(
+            "coral_json_serialize_pretty",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Time operations (SL-9)
+        let time_now = module.add_function(
+            "coral_time_now",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let time_timestamp = module.add_function(
+            "coral_time_timestamp",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let time_format_iso = module.add_function(
+            "coral_time_format_iso",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let time_year = module.add_function(
+            "coral_time_year",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let time_month = module.add_function(
+            "coral_time_month",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let time_day = module.add_function(
+            "coral_time_day",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let time_hour = module.add_function(
+            "coral_time_hour",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let time_minute = module.add_function(
+            "coral_time_minute",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let time_second = module.add_function(
+            "coral_time_second",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // String lines
+        let string_lines = module.add_function(
+            "coral_string_lines",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Sort
+        let list_sort_natural = module.add_function(
+            "coral_list_sort_natural",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Bytes extensions
+        let bytes_from_hex = module.add_function(
+            "coral_bytes_from_hex",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let bytes_contains = module.add_function(
+            "coral_bytes_contains",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let bytes_find = module.add_function(
+            "coral_bytes_find",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
+        // Encoding
+        let base64_encode = module.add_function(
+            "coral_base64_encode",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let base64_decode = module.add_function(
+            "coral_base64_decode",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let hex_encode = module.add_function(
+            "coral_hex_encode",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let hex_decode = module.add_function(
+            "coral_hex_decode",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // TCP networking
+        let tcp_listen = module.add_function(
+            "coral_tcp_listen",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let tcp_accept = module.add_function(
+            "coral_tcp_accept",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let tcp_connect = module.add_function(
+            "coral_tcp_connect",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let tcp_read = module.add_function(
+            "coral_tcp_read",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let tcp_write = module.add_function(
+            "coral_tcp_write",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let tcp_close = module.add_function(
+            "coral_tcp_close",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Actor monitoring (AC-2)
+        let actor_monitor = module.add_function(
+            "coral_actor_monitor",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let actor_demonitor = module.add_function(
+            "coral_actor_demonitor",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        // Graceful stop (AC-4)
+        let actor_graceful_stop = module.add_function(
+            "coral_actor_graceful_stop",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         Self {
             value_ptr_type,
             make_number,
@@ -1073,6 +1422,8 @@ impl<'ctx> RuntimeBindings<'ctx> {
             map_iter,
             map_iter_next,
             value_length,
+            value_get,
+            field_or_length,
             make_map,
             make_map_hinted,
             map_entry_type,
@@ -1100,6 +1451,8 @@ impl<'ctx> RuntimeBindings<'ctx> {
             timer_schedule_repeat,
             timer_cancel,
             timer_pending_count,
+            main_wait,
+            main_done_signal,
             closure_invoke_type,
             closure_release_type,
             make_tagged,
@@ -1181,6 +1534,50 @@ impl<'ctx> RuntimeBindings<'ctx> {
             string_ord,
             string_chr,
             string_compare,
+            store_open,
+            store_close,
+            store_save_all,
+            store_create,
+            store_get_by_index,
+            store_get_by_uuid,
+            store_update,
+            store_soft_delete,
+            store_stats,
+            store_count,
+            store_persist,
+            store_checkpoint,
+            store_all_indices,
+            json_parse,
+            json_serialize,
+            json_serialize_pretty,
+            time_now,
+            time_timestamp,
+            time_format_iso,
+            time_year,
+            time_month,
+            time_day,
+            time_hour,
+            time_minute,
+            time_second,
+            string_lines,
+            list_sort_natural,
+            bytes_from_hex,
+            bytes_contains,
+            bytes_find,
+            base64_encode,
+            base64_decode,
+            hex_encode,
+            hex_decode,
+            tcp_listen,
+            tcp_accept,
+            tcp_connect,
+            tcp_read,
+            tcp_write,
+            tcp_close,
+            actor_monitor,
+            actor_demonitor,
+            actor_graceful_stop,
+            list_range,
         }
     }
 }

@@ -2439,3 +2439,43 @@ fn e2e_guard_multiple_conditions() {
         &["fizzbuzz", "fizz", "buzz", "none"],
     );
 }
+
+// ─── Phase D: range() builtin ─────────────────────────────────────────
+
+#[test]
+fn e2e_range_one_arg() {
+    assert_output(
+        r#"
+*main()
+    items is range(5)
+    for i in items
+        log(i)
+"#,
+        &["0", "1", "2", "3", "4"],
+    );
+}
+
+#[test]
+fn e2e_range_two_args() {
+    assert_output(
+        r#"
+*main()
+    items is range(2, 6)
+    for i in items
+        log(i)
+"#,
+        &["2", "3", "4", "5"],
+    );
+}
+
+#[test]
+fn e2e_range_empty() {
+    assert_output(
+        r#"
+*main()
+    items is range(5, 3)
+    log(items.length())
+"#,
+        &["0"],
+    );
+}

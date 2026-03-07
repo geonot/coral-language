@@ -1,0 +1,11 @@
+# L8e: while with <=
+*factorial(n)
+	result is 1
+	i is 1
+	while i <= n
+		result is result * i
+		i is i + 1
+	return result
+
+*main()
+	log(factorial(5))

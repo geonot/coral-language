@@ -1,0 +1,1737 @@
+//! Builtin function dispatch for Coral runtime.
+//!
+//! Contains emit_builtin_call (the largest function in codegen),
+//! plus member expression/call dispatch and IO calls.
+
+use super::*;
+
+impl<'ctx> CodeGenerator<'ctx> {
+    pub(super) fn build_message_value(
+        &mut self,
+        name_value: PointerValue<'ctx>,
+        payload_value: PointerValue<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let entry_ptr_type = self.runtime.map_entry_type.ptr_type(AddressSpace::default());
+        let array_type = self.runtime.map_entry_type.array_type(2);
+        let mut temp_array = array_type.get_undef();
+
+        let name_key = self.emit_string_literal("name");
+        let data_key = self.emit_string_literal("data");
+
+        let mut name_entry = self.runtime.map_entry_type.get_undef();
+        name_entry = self
+            .builder
+            .build_insert_value(name_entry, name_key, 0, "msg_key")
+            .unwrap()
+            .into_struct_value();
+        name_entry = self
+            .builder
+            .build_insert_value(name_entry, name_value, 1, "msg_value")
+            .unwrap()
+            .into_struct_value();
+
+        let mut data_entry = self.runtime.map_entry_type.get_undef();
+        data_entry = self
+            .builder
+            .build_insert_value(data_entry, data_key, 0, "msg_key")
+            .unwrap()
+            .into_struct_value();
+        data_entry = self
+            .builder
+            .build_insert_value(data_entry, payload_value, 1, "msg_value")
+            .unwrap()
+            .into_struct_value();
+
+        temp_array = self
+            .builder
+            .build_insert_value(temp_array, name_entry, 0, "msg_entry_name")
+            .unwrap()
+            .into_array_value();
+        temp_array = self
+            .builder
+            .build_insert_value(temp_array, data_entry, 1, "msg_entry_data")
+            .unwrap()
+            .into_array_value();
+
+        let alloca = self.builder.build_alloca(array_type, "message_literal").unwrap();
+        self.builder.build_store(alloca, temp_array).unwrap();
+        let ptr = self
+            .builder
+            .build_pointer_cast(alloca, entry_ptr_type, "message_ptr")
+            .unwrap();
+        let len_value = self.usize_type.const_int(2, false);
+        let args = &[ptr.into(), len_value.into()];
+        self.call_map_with_hint(args, None)
+    }
+
+
+    pub(super) fn emit_member_expression(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        property: &str,
+        _span: Span,
+    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        // For 'self' target (store instance), always use map lookup for field access
+        if let Expression::Identifier(name, _) = target {
+            if name == "self" {
+                let target_value = self.emit_expression(ctx, target)?;
+                let key_value = self.emit_string_literal(property);
+                return Ok(self.call_runtime_ptr(
+                    self.runtime.map_get,
+                    &[target_value.into(), key_value.into()],
+                    "map_get_property",
+                ));
+            }
+        }
+        let target_value = self.emit_expression(ctx, target)?;
+        match property {
+            "length" | "count" if !self.store_field_names.contains(property) => Ok(self.call_runtime_ptr(
+                self.runtime.value_length,
+                &[target_value.into()],
+                "value_length",
+            )),
+            "length" | "count" => {
+                // If any store defines a field with this name, use field_or_length
+                // to dispatch at runtime: maps/stores → field lookup, else → length.
+                let key_value = self.emit_string_literal(property);
+                Ok(self.call_runtime_ptr(
+                    self.runtime.field_or_length,
+                    &[target_value.into(), key_value.into()],
+                    "field_or_length",
+                ))
+            }
+            "size" => Ok(self.call_runtime_ptr(
+                self.runtime.map_length,
+                &[target_value.into()],
+                "map_length",
+            )),
+            "err" => {
+                // x.err - returns true if x is an error value
+                let is_err = self.builder
+                    .build_call(self.runtime.is_err, &[target_value.into()], "is_err_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_err_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_err,
+                    self.context.i8_type().const_zero(),
+                    "is_err_bool",
+                ).unwrap();
+                Ok(self.wrap_bool(is_err_bool))
+            }
+            _ => {
+                let key_value = self.emit_string_literal(property);
+                Ok(self.call_runtime_ptr(
+                    self.runtime.map_get,
+                    &[target_value.into(), key_value.into()],
+                    "map_get_property",
+                ))
+            }
+        }
+    }
+
+
+    pub(super) fn emit_member_call(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        property: &str,
+        args: &[Expression],
+        span: Span,
+    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        if let Expression::Identifier(namespace, _) = target {
+            if namespace == "io" {
+                return self.emit_io_call(ctx, property, args, span);
+            }
+        }
+        match property {
+            // x.equals(y) - value equality comparison
+            "equals" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("equals expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_equals,
+                    &[target_value.into(), arg_value.into()],
+                    "value_equals",
+                ))
+            }
+            // x.not_equals(y) - value inequality comparison
+            "not_equals" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("not_equals expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_not_equals,
+                    &[target_value.into(), arg_value.into()],
+                    "value_not_equals",
+                ))
+            }
+            // x.not() - boolean negation
+            "not" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("not does not take arguments", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let bool_val = self.value_to_bool(target_value);
+                let inverted = self.builder.build_not(bool_val, "not").unwrap();
+                Ok(self.wrap_bool(inverted))
+            }
+            "iter" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("iter does not take arguments", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_iter,
+                    &[target_value.into()],
+                    "value_iter",
+                ))
+            }
+            "keys" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("keys does not take arguments", span));
+                }
+                let map_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.map_keys,
+                    &[map_value.into()],
+                    "map_keys",
+                ))
+            }
+            "map" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list.map expects a single function", span));
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let func_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_map,
+                    &[list_value.into(), func_value.into()],
+                    "list_map",
+                ))
+            }
+            "filter" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list.filter expects a predicate", span));
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let func_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_filter,
+                    &[list_value.into(), func_value.into()],
+                    "list_filter",
+                ))
+            }
+            "reduce" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(Diagnostic::new(
+                        "list.reduce expects a function and optional seed",
+                        span,
+                    ));
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let (seed_arg, func_value) = if args.len() == 1 {
+                    (self.runtime.value_ptr_type.const_null(), self.emit_expression(ctx, &args[0])?)
+                } else {
+                    (self.emit_expression(ctx, &args[0])?, self.emit_expression(ctx, &args[1])?)
+                };
+                let seed_meta: BasicMetadataValueEnum<'ctx> = seed_arg.into();
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_reduce,
+                    &[list_value.into(), seed_meta, func_value.into()],
+                    "list_reduce",
+                ))
+            }
+            "push" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "list.push expects exactly one argument",
+                        span,
+                    ));
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_push,
+                    &[list_value.into(), arg_value.into()],
+                    "list_push",
+                ))
+            }
+            "pop" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "list.pop does not take arguments",
+                        span,
+                    ));
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_pop,
+                    &[list_value.into()],
+                    "list_pop",
+                ))
+            }
+            "get" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        ".get() expects exactly one argument",
+                        span,
+                    ));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let key_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_get,
+                    &[target_value.into(), key_value.into()],
+                    "value_get_method",
+                ))
+            }
+            "set" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "map.set expects exactly two arguments",
+                        span,
+                    ));
+                }
+                let map_value = self.emit_expression(ctx, target)?;
+                let key_value = self.emit_expression(ctx, &args[0])?;
+                let new_value = self.emit_expression(ctx, &args[1])?;
+                
+                // For self.field = value on stores with reference fields, handle retain/release
+                if let Expression::Identifier(name, _) = target {
+                    if name == "self" {
+                        // Extract field name from key if it's a string literal
+                        if let Expression::String(field_name, _) = &args[0] {
+                            // Check all stores to see if any have this as a reference field
+                            // Since we don't track the current store context, check if field is a reference in ANY store
+                            let is_ref = self.reference_fields.iter().any(|(_, f)| f == field_name);
+                            
+                            if is_ref {
+                                // Get old value before setting
+                                let old_value = self.call_runtime_ptr(
+                                    self.runtime.map_get,
+                                    &[map_value.into(), key_value.into()],
+                                    "get_old_ref",
+                                );
+                                // Retain new value
+                                self.call_runtime_void(self.runtime.value_retain, &[new_value.into()], "retain_new_ref");
+                                // Set the field
+                                let result = self.call_runtime_ptr(
+                                    self.runtime.map_set,
+                                    &[map_value.into(), key_value.into(), new_value.into()],
+                                    "map_set_method",
+                                );
+                                // Release old value
+                                self.call_runtime_void(self.runtime.value_release, &[old_value.into()], "release_old_ref");
+                                return Ok(result);
+                            }
+                        }
+                    }
+                }
+                
+                Ok(self.call_runtime_ptr(
+                    self.runtime.map_set,
+                    &[map_value.into(), key_value.into(), new_value.into()],
+                    "map_set_method",
+                ))
+            }
+            "at" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "list.at expects exactly one argument",
+                        span,
+                    ));
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let index_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.list_get,
+                    &[list_value.into(), index_value.into()],
+                    "list_get",
+                ))
+            }
+            "length" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("length does not take arguments", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.value_length,
+                    &[target_value.into()],
+                    "value_length",
+                ))
+            }
+            _ => {
+                // Check if this is a store method call
+                if let Some((store_name, param_count)) = self.store_methods.get(property).cloned() {
+                    // Verify argument count
+                    if args.len() != param_count {
+                        return Err(Diagnostic::new(
+                            format!("method `{}` expects {} argument(s), but {} were provided", 
+                                    property, param_count, args.len()),
+                            span,
+                        ));
+                    }
+                    // Emit target (the store instance)
+                    let target_value = self.emit_expression(ctx, target)?;
+                    // Build arguments: self (target) + user args as CoralValue* pointers
+                    let mut call_args: Vec<BasicMetadataValueEnum> = vec![target_value.into()];
+                    for arg in args {
+                        let arg_val = self.emit_expression(ctx, arg)?;
+                        // Pass as pointer (CoralValue*), not as number
+                        call_args.push(arg_val.into());
+                    }
+                    // Build the mangled function name and look up function
+                    let mangled = format!("{}_{}", store_name, property);
+                    let store_method = *self.functions.get(&mangled)
+                        .ok_or_else(|| Diagnostic::new(
+                            format!("internal error: store method {} not found", mangled),
+                            span,
+                        ))?;
+                    // Call the store method (returns ptr, not f64)
+                    let result = self.builder.build_call(store_method, &call_args, "store_method_call")
+                        .unwrap()
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap()
+                        .into_pointer_value();
+                    // Return the ptr directly (CoralValue*)
+                    Ok(result)
+                } else {
+                    Err(Diagnostic::new(
+                        format!("method `{property}` not supported yet"),
+                        span,
+                    ))
+                }
+            }
+        }
+    }
+
+    pub(super) fn emit_io_call(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        method: &str,
+        args: &[Expression],
+        span: Span,
+    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+        match method {
+            "read" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("io.read expects path", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(self.runtime.fs_read, &[path.into()], "io_read"))
+            }
+            "write" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("io.write expects path and data", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                let data = self.emit_expression(ctx, &args[1])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.fs_write,
+                    &[path.into(), data.into()],
+                    "io_write",
+                ))
+            }
+            "exists" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("io.exists expects path", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_runtime_ptr(
+                    self.runtime.fs_exists,
+                    &[path.into()],
+                    "io_exists",
+                ))
+            }
+            _ => Err(Diagnostic::new(
+                format!("namespace `io` has no method `{method}`"),
+                span,
+            )),
+        }
+    }
+
+    pub(super) fn emit_builtin_call(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        ctx: &mut FunctionContext<'ctx>,
+        span: Span,
+    ) -> Result<Option<PointerValue<'ctx>>, Diagnostic> {
+        match name {
+            "log" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "log expects exactly one argument",
+                        span,
+                    ));
+                }
+                let value = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.log,
+                    &[value.into()],
+                    "log_call",
+                )))
+            }
+            "concat" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "concat expects exactly two arguments",
+                        span,
+                    ));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.value_add,
+                    &[a.into(), b.into()],
+                    "concat_call",
+                )))
+            }
+            "fs_read" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "fs_read expects exactly one argument",
+                        span,
+                    ));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_read,
+                    &[path.into()],
+                    "fs_read_call",
+                )))
+            }
+            "fs_write" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "fs_write expects path and data",
+                        span,
+                    ));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                let data = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_write,
+                    &[path.into(), data.into()],
+                    "fs_write_call",
+                )))
+            }
+            "fs_exists" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "fs_exists expects exactly one argument",
+                        span,
+                    ));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_exists,
+                    &[path.into()],
+                    "fs_exists_call",
+                )))
+            }
+            "bit_and" | "bit_or" | "bit_xor" | "bit_shl" | "bit_shr" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "bitwise helpers expect two arguments",
+                        span,
+                    ));
+                }
+                let lhs = self.emit_expression(ctx, &args[0])?;
+                let rhs = self.emit_expression(ctx, &args[1])?;
+                let func = match name {
+                    "bit_and" => self.runtime.value_bitand,
+                    "bit_or" => self.runtime.value_bitor,
+                    "bit_xor" => self.runtime.value_bitxor,
+                    "bit_shl" => self.runtime.value_shift_left,
+                    _ => self.runtime.value_shift_right,
+                };
+                Ok(Some(self.call_runtime_ptr(func, &[lhs.into(), rhs.into()], "bit_call")))
+            }
+            "bit_not" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "bit_not expects one argument",
+                        span,
+                    ));
+                }
+                let value = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.value_bitnot,
+                    &[value.into()],
+                    "bit_not_call",
+                )))
+            }
+            "actor_send" => {
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(Diagnostic::new("actor_send expects actor, name, optional payload", span));
+                }
+                let actor = self.emit_expression(ctx, &args[0])?;
+                let name = self.emit_expression(ctx, &args[1])?;
+                let payload = if args.len() == 3 {
+                    self.emit_expression(ctx, &args[2])?
+                } else {
+                    self.wrap_unit()
+                };
+                let message = self.build_message_value(name, payload);
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.actor_send,
+                    &[actor.into(), message.into()],
+                    "actor_send_builtin",
+                )))
+            }
+            "actor_self" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("actor_self expects no arguments", span));
+                }
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.actor_self,
+                    &[],
+                    "actor_self_builtin",
+                )))
+            }
+            // String operations
+            "string_slice" | "slice" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("string_slice expects string, start, end", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let start = self.emit_expression(ctx, &args[1])?;
+                let end = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_slice,
+                    &[s.into(), start.into(), end.into()],
+                    "string_slice_call",
+                )))
+            }
+            "string_char_at" | "char_at" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_char_at expects string, index", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let idx = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_char_at,
+                    &[s.into(), idx.into()],
+                    "string_char_at_call",
+                )))
+            }
+            "string_index_of" | "index_of" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_index_of expects haystack, needle", span));
+                }
+                let haystack = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_index_of,
+                    &[haystack.into(), needle.into()],
+                    "string_index_of_call",
+                )))
+            }
+            "string_split" | "split" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_split expects string, delimiter", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let delim = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_split,
+                    &[s.into(), delim.into()],
+                    "string_split_call",
+                )))
+            }
+            "string_to_chars" | "chars" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_to_chars expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_to_chars,
+                    &[s.into()],
+                    "string_to_chars_call",
+                )))
+            }
+            "string_starts_with" | "starts_with" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_starts_with expects string, prefix", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let prefix = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_starts_with,
+                    &[s.into(), prefix.into()],
+                    "string_starts_with_call",
+                )))
+            }
+            "string_ends_with" | "ends_with" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_ends_with expects string, suffix", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let suffix = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_ends_with,
+                    &[s.into(), suffix.into()],
+                    "string_ends_with_call",
+                )))
+            }
+            "string_trim" | "trim" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_trim expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_trim,
+                    &[s.into()],
+                    "string_trim_call",
+                )))
+            }
+            "string_to_upper" | "to_upper" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_to_upper expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_to_upper,
+                    &[s.into()],
+                    "string_to_upper_call",
+                )))
+            }
+            "string_to_lower" | "to_lower" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_to_lower expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_to_lower,
+                    &[s.into()],
+                    "string_to_lower_call",
+                )))
+            }
+            "string_replace" | "replace" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("string_replace expects string, old, new", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let old = self.emit_expression(ctx, &args[1])?;
+                let new = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_replace,
+                    &[s.into(), old.into(), new.into()],
+                    "string_replace_call",
+                )))
+            }
+            "string_contains" | "contains" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_contains expects haystack, needle", span));
+                }
+                let haystack = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_contains,
+                    &[haystack.into(), needle.into()],
+                    "string_contains_call",
+                )))
+            }
+            "string_parse_number" | "parse_number" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_parse_number expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_parse_number,
+                    &[s.into()],
+                    "string_parse_number_call",
+                )))
+            }
+            "string_length" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_length expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.value_length,
+                    &[s.into()],
+                    "string_length_call",
+                )))
+            }
+            "number_to_string" | "to_string" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("number_to_string expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.number_to_string,
+                    &[n.into()],
+                    "number_to_string_call",
+                )))
+            }
+            // Math functions - unary
+            "abs" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("abs expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_abs,
+                    &[n.into()],
+                    "math_abs_call",
+                )))
+            }
+            "sqrt" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sqrt expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sqrt,
+                    &[n.into()],
+                    "math_sqrt_call",
+                )))
+            }
+            "floor" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("floor expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_floor,
+                    &[n.into()],
+                    "math_floor_call",
+                )))
+            }
+            "ceil" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("ceil expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_ceil,
+                    &[n.into()],
+                    "math_ceil_call",
+                )))
+            }
+            "round" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("round expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_round,
+                    &[n.into()],
+                    "math_round_call",
+                )))
+            }
+            "sin" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sin expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sin,
+                    &[n.into()],
+                    "math_sin_call",
+                )))
+            }
+            "cos" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("cos expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_cos,
+                    &[n.into()],
+                    "math_cos_call",
+                )))
+            }
+            "tan" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("tan expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_tan,
+                    &[n.into()],
+                    "math_tan_call",
+                )))
+            }
+            "ln" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("ln expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_ln,
+                    &[n.into()],
+                    "math_ln_call",
+                )))
+            }
+            "log10" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("log10 expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_log10,
+                    &[n.into()],
+                    "math_log10_call",
+                )))
+            }
+            "exp" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("exp expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_exp,
+                    &[n.into()],
+                    "math_exp_call",
+                )))
+            }
+            "asin" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("asin expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_asin,
+                    &[n.into()],
+                    "math_asin_call",
+                )))
+            }
+            "acos" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("acos expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_acos,
+                    &[n.into()],
+                    "math_acos_call",
+                )))
+            }
+            "atan" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("atan expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_atan,
+                    &[n.into()],
+                    "math_atan_call",
+                )))
+            }
+            "sinh" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sinh expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sinh,
+                    &[n.into()],
+                    "math_sinh_call",
+                )))
+            }
+            "cosh" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("cosh expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_cosh,
+                    &[n.into()],
+                    "math_cosh_call",
+                )))
+            }
+            "tanh" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("tanh expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_tanh,
+                    &[n.into()],
+                    "math_tanh_call",
+                )))
+            }
+            "trunc" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("trunc expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_trunc,
+                    &[n.into()],
+                    "math_trunc_call",
+                )))
+            }
+            "sign" | "signum" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sign expects one argument", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_sign,
+                    &[n.into()],
+                    "math_sign_call",
+                )))
+            }
+            // Math functions - binary
+            "pow" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("pow expects two arguments (base, exponent)", span));
+                }
+                let base = self.emit_expression(ctx, &args[0])?;
+                let exp = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_pow,
+                    &[base.into(), exp.into()],
+                    "math_pow_call",
+                )))
+            }
+            "min" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("min expects two arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_min,
+                    &[a.into(), b.into()],
+                    "math_min_call",
+                )))
+            }
+            "max" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("max expects two arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_max,
+                    &[a.into(), b.into()],
+                    "math_max_call",
+                )))
+            }
+            "atan2" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("atan2 expects two arguments (y, x)", span));
+                }
+                let y = self.emit_expression(ctx, &args[0])?;
+                let x = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.math_atan2,
+                    &[y.into(), x.into()],
+                    "math_atan2_call",
+                )))
+            }
+            // Process/environment
+            "process_args" | "args" => {
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.process_args,
+                    &[],
+                    "process_args_call",
+                )))
+            }
+            "process_exit" | "exit" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("exit expects one argument (exit code)", span));
+                }
+                let code = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.process_exit,
+                    &[code.into()],
+                    "process_exit_call",
+                )))
+            }
+            "env_get" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("env_get expects one argument", span));
+                }
+                let name_val = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.env_get,
+                    &[name_val.into()],
+                    "env_get_call",
+                )))
+            }
+            "env_set" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("env_set expects two arguments (name, value)", span));
+                }
+                let name_val = self.emit_expression(ctx, &args[0])?;
+                let val = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.env_set,
+                    &[name_val.into(), val.into()],
+                    "env_set_call",
+                )))
+            }
+            // File I/O extensions
+            "fs_append" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("fs_append expects path and data", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                let data = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_append,
+                    &[path.into(), data.into()],
+                    "fs_append_call",
+                )))
+            }
+            "fs_read_dir" | "read_dir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_read_dir expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_read_dir,
+                    &[path.into()],
+                    "fs_read_dir_call",
+                )))
+            }
+            "fs_mkdir" | "mkdir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_mkdir expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_mkdir,
+                    &[path.into()],
+                    "fs_mkdir_call",
+                )))
+            }
+            "fs_delete" | "delete" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_delete expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_delete,
+                    &[path.into()],
+                    "fs_delete_call",
+                )))
+            }
+            "fs_is_dir" | "is_dir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_is_dir expects one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.fs_is_dir,
+                    &[path.into()],
+                    "fs_is_dir_call",
+                )))
+            }
+            "stdin_read_line" | "read_line" => {
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.stdin_read_line,
+                    &[],
+                    "stdin_read_line_call",
+                )))
+            }
+            // List extensions
+            "list_contains" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_contains expects list and value", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_contains,
+                    &[list.into(), needle.into()],
+                    "list_contains_call",
+                )))
+            }
+            "list_index_of" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_index_of expects list and value", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let needle = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_index_of,
+                    &[list.into(), needle.into()],
+                    "list_index_of_call",
+                )))
+            }
+            "list_reverse" | "reverse" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list_reverse expects one argument", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_reverse,
+                    &[list.into()],
+                    "list_reverse_call",
+                )))
+            }
+            "list_slice" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("list_slice expects list, start, end", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let start = self.emit_expression(ctx, &args[1])?;
+                let end = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_slice,
+                    &[list.into(), start.into(), end.into()],
+                    "list_slice_call",
+                )))
+            }
+            "list_sort" | "sort" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list_sort expects one argument", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_sort,
+                    &[list.into()],
+                    "list_sort_call",
+                )))
+            }
+            "list_join" | "join" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_join expects list and separator", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let sep = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_join,
+                    &[list.into(), sep.into()],
+                    "list_join_call",
+                )))
+            }
+            "list_concat" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("list_concat expects two lists", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.list_concat,
+                    &[a.into(), b.into()],
+                    "list_concat_call",
+                )))
+            }
+            // Map extensions
+            "map_keys" | "keys" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("map_keys expects one argument", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_keys,
+                    &[map.into()],
+                    "map_keys_call",
+                )))
+            }
+            "map_remove" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("map_remove expects map and key", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                let key = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_remove,
+                    &[map.into(), key.into()],
+                    "map_remove_call",
+                )))
+            }
+            "map_values" | "values" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("map_values expects one argument", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_values,
+                    &[map.into()],
+                    "map_values_call",
+                )))
+            }
+            "map_entries" | "entries" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("map_entries expects one argument", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_entries,
+                    &[map.into()],
+                    "map_entries_call",
+                )))
+            }
+            "map_has_key" | "has_key" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("map_has_key expects map and key", span));
+                }
+                let map = self.emit_expression(ctx, &args[0])?;
+                let key = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_has_key,
+                    &[map.into(), key.into()],
+                    "map_has_key_call",
+                )))
+            }
+            "map_merge" | "merge" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("map_merge expects two maps", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.map_merge,
+                    &[a.into(), b.into()],
+                    "map_merge_call",
+                )))
+            }
+            // Bytes extensions
+            "bytes_get" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("bytes_get expects bytes and index", span));
+                }
+                let b = self.emit_expression(ctx, &args[0])?;
+                let idx = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_get,
+                    &[b.into(), idx.into()],
+                    "bytes_get_call",
+                )))
+            }
+            "bytes_from_string" | "to_bytes" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("bytes_from_string expects one argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_from_string,
+                    &[s.into()],
+                    "bytes_from_string_call",
+                )))
+            }
+            "bytes_to_string" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("bytes_to_string expects one argument", span));
+                }
+                let b = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_to_string,
+                    &[b.into()],
+                    "bytes_to_string_call",
+                )))
+            }
+            "bytes_slice" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("bytes_slice expects bytes, start, end", span));
+                }
+                let b = self.emit_expression(ctx, &args[0])?;
+                let start = self.emit_expression(ctx, &args[1])?;
+                let end = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.bytes_slice_val,
+                    &[b.into(), start.into(), end.into()],
+                    "bytes_slice_call",
+                )))
+            }
+            // Type reflection
+            "type_of" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("type_of expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.type_of,
+                    &[v.into()],
+                    "type_of_call",
+                )))
+            }
+            // Character operations
+            "ord" | "string_ord" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("ord expects one string argument", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_ord,
+                    &[s.into()],
+                    "ord_call",
+                )))
+            }
+            "chr" | "string_chr" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("chr expects one number argument", span));
+                }
+                let code = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_chr,
+                    &[code.into()],
+                    "chr_call",
+                )))
+            }
+            "string_compare" | "strcmp" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_compare expects two string arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.string_compare,
+                    &[a.into(), b.into()],
+                    "strcmp_call",
+                )))
+            }
+            // Error checking builtins
+            "is_err" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("is_err expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let is_err = self.builder
+                    .build_call(self.runtime.is_err, &[v.into()], "is_err_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_err_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_err,
+                    self.context.i8_type().const_zero(),
+                    "is_err_bool",
+                ).unwrap();
+                Ok(Some(self.wrap_bool(is_err_bool)))
+            }
+            "is_ok" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("is_ok expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let is_ok = self.builder
+                    .build_call(self.runtime.is_ok, &[v.into()], "is_ok_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_ok_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_ok,
+                    self.context.i8_type().const_zero(),
+                    "is_ok_bool",
+                ).unwrap();
+                Ok(Some(self.wrap_bool(is_ok_bool)))
+            }
+            "is_absent" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("is_absent expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let is_absent = self.builder
+                    .build_call(self.runtime.is_absent, &[v.into()], "is_absent_check")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let is_absent_bool = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    is_absent,
+                    self.context.i8_type().const_zero(),
+                    "is_absent_bool",
+                ).unwrap();
+                Ok(Some(self.wrap_bool(is_absent_bool)))
+            }
+            "error_name" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("error_name expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(
+                    self.runtime.error_name,
+                    &[v.into()],
+                    "error_name_call",
+                )))
+            }
+            "error_code" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("error_code expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                let code_i32 = self.builder
+                    .build_call(self.runtime.error_code, &[v.into()], "error_code_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                // Convert i32 to f64 for wrap_number
+                let code_f64 = self.builder.build_signed_int_to_float(
+                    code_i32,
+                    self.context.f64_type(),
+                    "code_f64",
+                ).unwrap();
+                Ok(Some(self.wrap_number(code_f64)))
+            }
+            // JSON operations (SL-8)
+            "json_parse" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("json_parse expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.json_parse, &[v.into()], "json_parse_call")))
+            }
+            "json_serialize" | "json_stringify" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("json_serialize expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.json_serialize, &[v.into()], "json_serialize_call")))
+            }
+            "json_serialize_pretty" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("json_serialize_pretty expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.json_serialize_pretty, &[v.into()], "json_pretty_call")))
+            }
+            // Time operations (SL-9)
+            "time_now" => {
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_now, &[], "time_now_call")))
+            }
+            "time_timestamp" => {
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_timestamp, &[], "time_ts_call")))
+            }
+            "time_format_iso" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_format_iso expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_format_iso, &[v.into()], "time_fmt_call")))
+            }
+            "time_year" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_year expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_year, &[v.into()], "time_year_call")))
+            }
+            "time_month" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_month expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_month, &[v.into()], "time_month_call")))
+            }
+            "time_day" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_day expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_day, &[v.into()], "time_day_call")))
+            }
+            "time_hour" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_hour expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_hour, &[v.into()], "time_hour_call")))
+            }
+            "time_minute" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_minute expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_minute, &[v.into()], "time_min_call")))
+            }
+            "time_second" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_second expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.time_second, &[v.into()], "time_sec_call")))
+            }
+            // String lines
+            "string_lines" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_lines expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.string_lines, &[v.into()], "str_lines_call")))
+            }
+            // Sort
+            "sort_natural" | "list_sort_natural" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sort_natural expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.list_sort_natural, &[v.into()], "sort_nat_call")))
+            }
+            // Bytes extensions
+            "bytes_from_hex" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("bytes_from_hex expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.bytes_from_hex, &[v.into()], "bytes_hex_call")))
+            }
+            "bytes_contains" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("bytes_contains expects two arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.bytes_contains, &[a.into(), b.into()], "bytes_contains_call")))
+            }
+            "bytes_find" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("bytes_find expects two arguments", span));
+                }
+                let a = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.bytes_find, &[a.into(), b.into()], "bytes_find_call")))
+            }
+            // Encoding
+            "base64_encode" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("base64_encode expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.base64_encode, &[v.into()], "b64_enc_call")))
+            }
+            "base64_decode" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("base64_decode expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.base64_decode, &[v.into()], "b64_dec_call")))
+            }
+            "hex_encode" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("hex_encode expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.hex_encode, &[v.into()], "hex_enc_call")))
+            }
+            "hex_decode" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("hex_decode expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.hex_decode, &[v.into()], "hex_dec_call")))
+            }
+            // TCP networking
+            "tcp_listen" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("tcp_listen expects two arguments (host, port)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let p = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_listen, &[h.into(), p.into()], "tcp_listen_call")))
+            }
+            "tcp_accept" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("tcp_accept expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_accept, &[v.into()], "tcp_accept_call")))
+            }
+            "tcp_connect" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("tcp_connect expects two arguments (host, port)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let p = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_connect, &[h.into(), p.into()], "tcp_connect_call")))
+            }
+            "tcp_read" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("tcp_read expects two arguments (conn, n)", span));
+                }
+                let c = self.emit_expression(ctx, &args[0])?;
+                let n = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_read, &[c.into(), n.into()], "tcp_read_call")))
+            }
+            "tcp_write" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("tcp_write expects two arguments (conn, data)", span));
+                }
+                let c = self.emit_expression(ctx, &args[0])?;
+                let d = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_write, &[c.into(), d.into()], "tcp_write_call")))
+            }
+            "tcp_close" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("tcp_close expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_close, &[v.into()], "tcp_close_call")))
+            }
+            // Actor monitoring (AC-2)
+            "monitor" | "actor_monitor" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("monitor expects two arguments (watcher, watched)", span));
+                }
+                let w = self.emit_expression(ctx, &args[0])?;
+                let t = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.actor_monitor, &[w.into(), t.into()], "monitor_call")))
+            }
+            "demonitor" | "actor_demonitor" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("demonitor expects two arguments (watcher, watched)", span));
+                }
+                let w = self.emit_expression(ctx, &args[0])?;
+                let t = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.actor_demonitor, &[w.into(), t.into()], "demonitor_call")))
+            }
+            // Graceful stop (AC-4)
+            "graceful_stop" | "actor_graceful_stop" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("graceful_stop expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_runtime_ptr(self.runtime.actor_graceful_stop, &[v.into()], "graceful_stop_call")))
+            }
+            // Range helper (Phase D)
+            "range" => {
+                match args.len() {
+                    1 => {
+                        let zero_f64 = self.f64_type.const_float(0.0);
+                        let zero = self.wrap_number(zero_f64);
+                        let n = self.emit_expression(ctx, &args[0])?;
+                        Ok(Some(self.call_runtime_ptr(self.runtime.list_range, &[zero.into(), n.into()], "range_call")))
+                    }
+                    2 => {
+                        let start = self.emit_expression(ctx, &args[0])?;
+                        let end = self.emit_expression(ctx, &args[1])?;
+                        Ok(Some(self.call_runtime_ptr(self.runtime.list_range, &[start.into(), end.into()], "range_call")))
+                    }
+                    _ => Err(Diagnostic::new("range expects 1 or 2 arguments", span)),
+                }
+            }
+            _ => {
+                // Check if it's a store/actor constructor (not arbitrary make_* functions)
+                if self.store_constructors.contains(name) {
+                    let ctor_fn = self.functions[name];
+                    let call = self.builder.build_call(ctor_fn, &[], "actor_ctor").unwrap();
+                    let handle = call.try_as_basic_value().left()
+                        .ok_or_else(|| Diagnostic::new("actor constructor produced no value", span))?
+                        .into_pointer_value();
+                    Ok(Some(handle))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}

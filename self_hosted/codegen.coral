@@ -1,0 +1,2301 @@
+qq# Self-hosted Coral LLVM IR Text Emitter
+#
+# Emits LLVM IR (.ll) text from a SemanticModel.
+# All Coral values are %CoralValue* (boxed, tagged).
+# Runtime functions handle all complex operations.
+#
+# Architecture:
+#   - IRBuilder accumulates text lines
+#   - String constants pool for dedup
+#   - Basic block management for control flow + phi nodes
+#   - All expressions return a register name (%N)
+#
+# Input: SemanticModel from semantic.coral
+# Output: LLVM IR text string (.ll file content)
+
+# ─── IRBuilder State ───────────────────────────────────────────────
+
+*make_builder()
+	return map(
+		"lines" is [],
+		"next_reg" is 0,
+		"next_str" is 0,
+		"next_bb" is 0,
+		"next_lambda" is 0,
+		"strings" is map(),
+		"string_decls" is [],
+		"globals" is [],
+		"current_fn" is "",
+		"current_bb" is "",
+		"variables" is map(),
+		"loop_stack" is [],
+		"indent" is "  "
+	)
+
+*fresh_reg(b)
+	n is b.get("next_reg")
+	b.set("next_reg", n + 1)
+	return '%{n}'
+
+*fresh_bb(b, prefix)
+	n is b.get("next_bb")
+	b.set("next_bb", n + 1)
+	return '{prefix}_{n}'
+
+*fresh_lambda(b)
+	n is b.get("next_lambda")
+	b.set("next_lambda", n + 1)
+	return n
+
+*emit(b, line)
+	b.get("lines").push(line)
+
+*emit_indent(b, line)
+	b.get("lines").push('{b.get("indent")}{line}')
+
+# ─── Deferred Alloca Helpers ──────────────────────────────────────
+# LLVM requires alloca instructions in the entry basic block so they
+# dominate all uses.  We defer allocas created inside conditionals
+# and splice them into the entry block at function end.
+# We use LLVM named registers (%da.N) to avoid disrupting the
+# sequential numbered-register sequence used by the rest of the body.
+
+*init_alloca_buf(b)
+	b.set("alloca_lines", [])
+	b.set("alloca_insert_idx", b.get("lines").length())
+	b.set("next_da", 0)
+
+*fresh_da_reg(b)
+	n is b.get("next_da")
+	b.set("next_da", n + 1)
+	return '%da.{n}'
+
+*emit_deferred_alloca(b)
+	reg is fresh_da_reg(b)
+	indent is b.get("indent")
+	b.get("alloca_lines").push('{indent}{reg} = alloca %CoralValue*')
+	return reg
+
+*flush_deferred_allocas(b)
+	alloca_buf is b.get("alloca_lines")
+	if alloca_buf is none
+		return none
+	if alloca_buf.length() is 0
+		return none
+	insert_idx is b.get("alloca_insert_idx")
+	old_lines is b.get("lines")
+	new_lines is []
+	idx is 0
+	while idx < insert_idx
+		new_lines.push(old_lines[idx])
+		idx is idx + 1
+	a_idx is 0
+	while a_idx < alloca_buf.length()
+		new_lines.push(alloca_buf[a_idx])
+		a_idx is a_idx + 1
+	while idx < old_lines.length()
+		new_lines.push(old_lines[idx])
+		idx is idx + 1
+	b.set("lines", new_lines)
+
+*begin_bb(b, name)
+	b.set("current_bb", name)
+	emit(b, '{name}:')
+
+*emit_br(b, target)
+	emit_indent(b, 'br label %{target}')
+
+*emit_br_cond(b, cond, true_bb, false_bb)
+	emit_indent(b, 'br i1 {cond}, label %{true_bb}, label %{false_bb}')
+
+# ─── String Constant Pool ─────────────────────────────────────────
+
+*intern_string(b, s)
+	existing is b.get("strings").get(s)
+	if existing isnt none
+		return existing
+	idx is b.get("next_str")
+	b.set("next_str", idx + 1)
+	name is '@str_{idx}'
+	b.get("strings").set(s, name)
+	# Escape string for LLVM IR
+	escaped is escape_llvm_string(s)
+	slen is s.length() + 1
+	b.get("string_decls").push('{name} = private unnamed_addr constant [{slen} x i8] c"{escaped}\\00"')
+	return name
+
+*escape_llvm_string(s)
+	result is ""
+	idx is 0
+	while idx < s.length()
+		ch is char_at(s, idx)
+		if ch is "\\"
+			result is '{result}\\5C'
+		elif ch is "\""
+			result is '{result}\\22'
+		elif ch is "\n"
+			result is '{result}\\0A'
+		elif ch is "\r"
+			result is '{result}\\0D'
+		elif ch is "\t"
+			result is '{result}\\09'
+		else
+			result is '{result}{ch}'
+		idx is idx + 1
+	return result
+
+# ─── Type Strings ──────────────────────────────────────────────────
+
+*val_t()
+	return "%CoralValue*"
+
+*val_tt()
+	return "%CoralValue**"
+
+*void_t()
+	return "void"
+
+*i8_t()
+	return "i8"
+
+*i8p_t()
+	return "i8*"
+
+*i1_t()
+	return "i1"
+
+*i32_t()
+	return "i32"
+
+*i64_t()
+	return "i64"
+
+*double_t()
+	return "double"
+
+# ─── Runtime Declarations ──────────────────────────────────────────
+
+*emit_type_defs(b)
+	emit(b, "%CoralValue = type { i8, i8, i16, i64, i32, i32, [16 x i8] }")
+	emit(b, "%MapEntry = type { %CoralValue*, %CoralValue* }")
+	emit(b, "")
+
+*emit_runtime_declarations(b)
+	# Value constructors
+	decl(b, "coral_make_number", "double", val_t())
+	decl(b, "coral_make_bool", "i8", val_t())
+	decl2(b, "coral_make_string", "i8*", "i64", val_t())
+	decl2(b, "coral_make_bytes", "i8*", "i64", val_t())
+	decl0(b, "coral_make_unit", val_t())
+	decl2(b, "coral_make_list", "%CoralValue**", "i64", val_t())
+	decl3(b, "coral_make_list_hinted", "%CoralValue**", "i64", "i8", val_t())
+	decl2(b, "coral_make_map", "%MapEntry*", "i64", val_t())
+	decl3(b, "coral_make_map_hinted", "%MapEntry*", "i64", "i8", val_t())
+	decl3(b, "coral_make_closure", "i8*", "i8*", "i8*", val_t())
+	decl4(b, "coral_make_tagged", "i8*", "i64", "%CoralValue**", "i64", val_t())
+	decl3(b, "coral_make_error", "i32", "i8*", "i64", val_t())
+	decl0(b, "coral_make_absent", val_t())
+	# Value accessors
+	decl(b, "coral_value_as_number", val_t(), "double")
+	decl(b, "coral_value_as_bool", val_t(), "i8")
+	decl(b, "coral_is_err", val_t(), "i8")
+	decl(b, "coral_is_absent", val_t(), "i8")
+	decl(b, "coral_is_ok", val_t(), "i8")
+	decl(b, "coral_value_hash", val_t(), "i64")
+	# Memory management
+	decl_void1(b, "coral_value_retain", val_t())
+	decl_void1(b, "coral_value_release", val_t())
+	decl(b, "coral_heap_alloc", "i64", "i8*")
+	decl_void1(b, "coral_heap_free", "i8*")
+	# Closure ops
+	decl3(b, "coral_closure_invoke", val_t(), "%CoralValue**", "i64", val_t())
+	# Value ops
+	decl2(b, "coral_value_add", val_t(), val_t(), val_t())
+	decl2(b, "coral_value_equals", val_t(), val_t(), val_t())
+	decl2(b, "coral_value_not_equals", val_t(), val_t(), val_t())
+	decl(b, "coral_value_length", val_t(), val_t())
+	decl2(b, "coral_value_get", val_t(), val_t(), val_t())
+	decl(b, "coral_value_iter", val_t(), val_t())
+	decl(b, "coral_value_iter_next", val_t(), val_t())
+	decl2(b, "coral_value_or", val_t(), val_t(), val_t())
+	decl2(b, "coral_field_or_length", val_t(), val_t(), val_t())
+	# Bitwise
+	decl2(b, "coral_value_bitand", val_t(), val_t(), val_t())
+	decl2(b, "coral_value_bitor", val_t(), val_t(), val_t())
+	decl2(b, "coral_value_bitxor", val_t(), val_t(), val_t())
+	decl(b, "coral_value_bitnot", val_t(), val_t())
+	decl2(b, "coral_value_shift_left", val_t(), val_t(), val_t())
+	decl2(b, "coral_value_shift_right", val_t(), val_t(), val_t())
+	# List ops
+	decl2(b, "coral_list_push", val_t(), val_t(), val_t())
+	decl2(b, "coral_list_get", val_t(), val_t(), val_t())
+	decl(b, "coral_list_pop", val_t(), val_t())
+	decl(b, "coral_list_iter", val_t(), val_t())
+	decl(b, "coral_list_iter_next", val_t(), val_t())
+	decl2(b, "coral_list_map", val_t(), val_t(), val_t())
+	decl2(b, "coral_list_filter", val_t(), val_t(), val_t())
+	decl3(b, "coral_list_reduce", val_t(), val_t(), val_t(), val_t())
+	decl2(b, "coral_list_contains", val_t(), val_t(), val_t())
+	decl2(b, "coral_list_index_of", val_t(), val_t(), val_t())
+	decl(b, "coral_list_reverse", val_t(), val_t())
+	decl3(b, "coral_list_slice", val_t(), val_t(), val_t(), val_t())
+	decl(b, "coral_list_sort", val_t(), val_t())
+	decl(b, "coral_list_sort_natural", val_t(), val_t())
+	decl2(b, "coral_list_join", val_t(), val_t(), val_t())
+	decl2(b, "coral_list_concat", val_t(), val_t(), val_t())
+	decl2(b, "coral_range", val_t(), val_t(), val_t())
+	# Map ops
+	decl2(b, "coral_map_get", val_t(), val_t(), val_t())
+	decl3(b, "coral_map_set", val_t(), val_t(), val_t(), val_t())
+	decl(b, "coral_map_length", val_t(), val_t())
+	decl(b, "coral_map_keys", val_t(), val_t())
+	decl(b, "coral_map_iter", val_t(), val_t())
+	decl(b, "coral_map_iter_next", val_t(), val_t())
+	decl2(b, "coral_map_remove", val_t(), val_t(), val_t())
+	decl(b, "coral_map_values", val_t(), val_t())
+	decl(b, "coral_map_entries", val_t(), val_t())
+	decl2(b, "coral_map_has_key", val_t(), val_t(), val_t())
+	decl2(b, "coral_map_merge", val_t(), val_t(), val_t())
+	# String ops
+	decl3(b, "coral_string_slice", val_t(), val_t(), val_t(), val_t())
+	decl2(b, "coral_string_char_at", val_t(), val_t(), val_t())
+	decl2(b, "coral_string_index_of", val_t(), val_t(), val_t())
+	decl2(b, "coral_string_split", val_t(), val_t(), val_t())
+	decl(b, "coral_string_to_chars", val_t(), val_t())
+	decl2(b, "coral_string_starts_with", val_t(), val_t(), val_t())
+	decl2(b, "coral_string_ends_with", val_t(), val_t(), val_t())
+	decl(b, "coral_string_trim", val_t(), val_t())
+	decl(b, "coral_string_to_upper", val_t(), val_t())
+	decl(b, "coral_string_to_lower", val_t(), val_t())
+	decl3(b, "coral_string_replace", val_t(), val_t(), val_t(), val_t())
+	decl2(b, "coral_string_contains", val_t(), val_t(), val_t())
+	decl(b, "coral_string_parse_number", val_t(), val_t())
+	decl(b, "coral_string_lines", val_t(), val_t())
+	decl(b, "coral_string_ord", val_t(), val_t())
+	decl(b, "coral_string_chr", val_t(), val_t())
+	decl2(b, "coral_string_compare", val_t(), val_t(), val_t())
+	decl(b, "coral_number_to_string", val_t(), val_t())
+	# Tagged/ADT ops
+	decl3(b, "coral_tagged_is_tag", val_t(), "i8*", "i64", val_t())
+	decl2(b, "coral_tagged_get_field", val_t(), "i64", val_t())
+	# IO ops
+	decl(b, "coral_log", val_t(), val_t())
+	decl(b, "coral_fs_read", val_t(), val_t())
+	decl(b, "coral_fs_write", val_t(), val_t())
+	decl(b, "coral_fs_exists", val_t(), val_t())
+	decl2(b, "coral_fs_append", val_t(), val_t(), val_t())
+	decl(b, "coral_fs_read_dir", val_t(), val_t())
+	decl(b, "coral_fs_mkdir", val_t(), val_t())
+	decl(b, "coral_fs_delete", val_t(), val_t())
+	decl(b, "coral_fs_is_dir", val_t(), val_t())
+	decl0(b, "coral_stdin_read_line", val_t())
+	decl0(b, "coral_process_args", val_t())
+	decl(b, "coral_process_exit", val_t(), void_t())
+	decl(b, "coral_env_get", val_t(), val_t())
+	decl2(b, "coral_env_set", val_t(), val_t(), val_t())
+	# Actor system
+	decl(b, "coral_actor_spawn", val_t(), val_t())
+	decl2(b, "coral_actor_send", val_t(), val_t(), val_t())
+	decl(b, "coral_actor_stop", val_t(), val_t())
+	decl0(b, "coral_actor_self", val_t())
+	decl2(b, "coral_actor_spawn_named", val_t(), val_t(), val_t())
+	decl(b, "coral_actor_lookup", val_t(), val_t())
+	decl(b, "coral_actor_register", val_t(), val_t())
+	decl(b, "coral_actor_unregister", val_t(), val_t())
+	decl2(b, "coral_actor_send_named", val_t(), val_t(), val_t())
+	decl0(b, "coral_actor_list_named", val_t())
+	decl2(b, "coral_actor_monitor", val_t(), val_t(), val_t())
+	decl(b, "coral_actor_demonitor", val_t(), val_t())
+	decl(b, "coral_actor_graceful_stop", val_t(), val_t())
+	# Timers
+	decl3(b, "coral_timer_send_after", val_t(), val_t(), val_t(), val_t())
+	decl3(b, "coral_timer_schedule_repeat", val_t(), val_t(), val_t(), val_t())
+	decl(b, "coral_timer_cancel", val_t(), val_t())
+	decl0(b, "coral_timer_pending_count", val_t())
+	# Main actor sync
+	decl0(b, "coral_main_wait", val_t())
+	decl0(b, "coral_main_done_signal", val_t())
+	# Math
+	decl(b, "coral_math_abs", val_t(), val_t())
+	decl(b, "coral_math_sqrt", val_t(), val_t())
+	decl(b, "coral_math_floor", val_t(), val_t())
+	decl(b, "coral_math_ceil", val_t(), val_t())
+	decl(b, "coral_math_round", val_t(), val_t())
+	decl(b, "coral_math_sin", val_t(), val_t())
+	decl(b, "coral_math_cos", val_t(), val_t())
+	decl(b, "coral_math_tan", val_t(), val_t())
+	decl(b, "coral_math_ln", val_t(), val_t())
+	decl(b, "coral_math_log10", val_t(), val_t())
+	decl(b, "coral_math_exp", val_t(), val_t())
+	decl2(b, "coral_math_pow", val_t(), val_t(), val_t())
+	decl2(b, "coral_math_min", val_t(), val_t(), val_t())
+	decl2(b, "coral_math_max", val_t(), val_t(), val_t())
+	# JSON
+	decl(b, "coral_json_parse", val_t(), val_t())
+	decl(b, "coral_json_serialize", val_t(), val_t())
+	decl(b, "coral_json_serialize_pretty", val_t(), val_t())
+	# Time
+	decl0(b, "coral_time_now", val_t())
+	decl0(b, "coral_time_timestamp", val_t())
+	decl(b, "coral_time_format_iso", val_t(), val_t())
+	# Encoding
+	decl(b, "coral_base64_encode", val_t(), val_t())
+	decl(b, "coral_base64_decode", val_t(), val_t())
+	decl(b, "coral_hex_encode", val_t(), val_t())
+	decl(b, "coral_hex_decode", val_t(), val_t())
+	# TCP
+	decl(b, "coral_tcp_listen", val_t(), val_t())
+	decl(b, "coral_tcp_accept", val_t(), val_t())
+	decl(b, "coral_tcp_connect", val_t(), val_t())
+	decl(b, "coral_tcp_read", val_t(), val_t())
+	decl2(b, "coral_tcp_write", val_t(), val_t(), val_t())
+	decl(b, "coral_tcp_close", val_t(), val_t())
+	# Store persistence
+	decl3(b, "coral_store_open", val_t(), val_t(), val_t(), val_t())
+	decl2(b, "coral_store_create", val_t(), val_t(), val_t())
+	decl0(b, "coral_store_save_all", val_t())
+	decl(b, "coral_type_of", val_t(), val_t())
+	decl(b, "coral_error_name", val_t(), val_t())
+	# Random
+	decl0(b, "coral_random", val_t())
+	decl2(b, "coral_random_int", val_t(), val_t(), val_t())
+	# Sleep
+	decl(b, "coral_sleep", val_t(), val_t())
+	emit(b, "")
+
+# Declaration helpers with 0-4 params
+*decl0(b, name, ret)
+	emit(b, 'declare {ret} @{name}()')
+
+*decl(b, name, p1, ret)
+	emit(b, 'declare {ret} @{name}({p1})')
+
+*decl2(b, name, p1, p2, ret)
+	emit(b, 'declare {ret} @{name}({p1}, {p2})')
+
+*decl3(b, name, p1, p2, p3, ret)
+	emit(b, 'declare {ret} @{name}({p1}, {p2}, {p3})')
+
+*decl4(b, name, p1, p2, p3, p4, ret)
+	emit(b, 'declare {ret} @{name}({p1}, {p2}, {p3}, {p4})')
+
+*decl_void1(b, name, p1)
+	emit(b, 'declare void @{name}({p1})')
+
+# ─── Main Entry: generate ──────────────────────────────────────────
+
+*generate(model)
+	b is make_builder()
+	# Module header
+	emit(b, '; Coral LLVM IR — generated by self-hosted compiler')
+	emit(b, 'target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"')
+	emit(b, 'target triple = "x86_64-unknown-linux-gnu"')
+	emit(b, "")
+	# Type definitions
+	emit_type_defs(b)
+	# Runtime declarations
+	emit_runtime_declarations(b)
+
+	# Collect items from model
+	globals is model.get("globals")
+	functions is model.get("functions")
+	extern_fns is model.get("extern_functions")
+	stores is model.get("stores")
+	type_defs is model.get("type_defs")
+
+	# Emit extern function declarations
+	if extern_fns isnt none
+		for ef in extern_fns
+			emit_extern_function(b, ef)
+		emit(b, "")
+
+	# Emit global variables
+	if globals isnt none and globals.length() > 0
+		emit_globals(b, globals)
+
+	# Emit type constructors and methods
+	if type_defs isnt none
+		for td in type_defs
+			emit_type_def(b, td)
+
+	# Emit store constructors and methods
+	if stores isnt none
+		for st in stores
+			emit_store_def(b, st)
+
+	# Emit user functions
+	if functions isnt none
+		for func in functions
+			emit_function(b, func)
+
+	# Emit main
+	emit_main_function(b, globals)
+
+	# Assemble output: header/functions first, then string constants at end
+	# (LLVM IR resolves forward references to globals, so this works)
+	result_lines is []
+	for line in b.get("lines")
+		result_lines.push(line)
+	if b.get("string_decls").length() > 0
+		result_lines.push("")
+		for sd in b.get("string_decls")
+			result_lines.push(sd)
+
+	return join(result_lines, "\n")
+
+# ─── Extern Functions ──────────────────────────────────────────────
+
+*emit_extern_function(b, ef)
+	name is ef.get("name")
+	params is ef.get("params")
+	# Build param types from annotations, default to double
+	param_strs is []
+	if params isnt none
+		for p in params
+			ty_ann is p.get("type")
+			if ty_ann isnt none
+				param_strs.push(map_extern_type(ty_ann))
+			else
+				param_strs.push("double")
+	ret_ty is "double"
+	ret_ann is ef.get("return_type")
+	if ret_ann isnt none
+		ret_ty is map_extern_type(ret_ann)
+	emit(b, 'declare {ret_ty} @{name}({join(param_strs, ", ")})')
+
+*map_extern_type(ty_name)
+	if ty_name is "f64" or ty_name is "Float"
+		return "double"
+	if ty_name is "i64" or ty_name is "Int"
+		return "i64"
+	if ty_name is "i32"
+		return "i32"
+	if ty_name is "i16"
+		return "i16"
+	if ty_name is "i8"
+		return "i8"
+	if ty_name is "bool" or ty_name is "Bool"
+		return "i1"
+	if ty_name is "usize"
+		return "i64"
+	if ty_name is "void"
+		return "void"
+	return "double"
+
+# ─── Global Variables ──────────────────────────────────────────────
+
+*emit_globals(b, globals)
+	# Declare global pointers
+	for g in globals
+		name is g.get("name")
+		emit(b, '@coral_global_{name} = global %CoralValue* null')
+	emit(b, '@__coral_globals_initialized = global i1 false')
+	emit(b, "")
+	# Init function
+	emit(b, 'define void @__coral_init_globals() \{')
+	begin_bb(b, "entry")
+	check is fresh_reg(b)
+	emit_indent(b, '{check} = load i1, i1* @__coral_globals_initialized')
+	done_bb is fresh_bb(b, "done")
+	init_bb is fresh_bb(b, "init")
+	emit_br_cond(b, check, done_bb, init_bb)
+	begin_bb(b, init_bb)
+	emit_indent(b, 'store i1 true, i1* @__coral_globals_initialized')
+	for g in globals
+		name is g.get("name")
+		val is g.get("value")
+		if val isnt none
+			reg is emit_expression(b, val)
+			emit_indent(b, 'store %CoralValue* {reg}, %CoralValue** @coral_global_{name}')
+		else
+			unit_reg is fresh_reg(b)
+			emit_indent(b, '{unit_reg} = call %CoralValue* @coral_make_unit()')
+			emit_indent(b, 'store %CoralValue* {unit_reg}, %CoralValue** @coral_global_{name}')
+	emit_br(b, done_bb)
+	begin_bb(b, done_bb)
+	emit_indent(b, 'ret void')
+	emit(b, '}')
+	emit(b, "")
+
+# ─── User Functions ────────────────────────────────────────────────
+
+*emit_function(b, func)
+	name is func.get("name")
+	fn_name is name
+	if name is "main"
+		fn_name is "__user_main"
+	params is func.get("params")
+	# Build param list
+	param_strs is []
+	b.set("variables", map())
+	if params isnt none
+		idx is 0
+		for p in params
+			p_name is p.get("name")
+			param_strs.push('%CoralValue* %param_{p_name}')
+			idx is idx + 1
+	emit(b, 'define %CoralValue* @{fn_name}({join(param_strs, ", ")}) \{')
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	begin_bb(b, "entry")
+	# Alloca for each param
+	if params isnt none
+		for p in params
+			p_name is p.get("name")
+			alloca_reg is fresh_reg(b)
+			emit_indent(b, '{alloca_reg} = alloca %CoralValue*')
+			emit_indent(b, 'store %CoralValue* %param_{p_name}, %CoralValue** {alloca_reg}')
+			b.get("variables").set(p_name, alloca_reg)
+	# Mark insertion point for deferred allocas (after param allocas)
+	init_alloca_buf(b)
+	# Emit body
+	body is func.get("body")
+	result_reg is emit_block(b, body)
+	# Flush deferred allocas into entry block
+	flush_deferred_allocas(b)
+	emit_indent(b, 'ret %CoralValue* {result_reg}')
+	emit(b, '}')
+	emit(b, "")
+
+# ─── Type Definitions ──────────────────────────────────────────────
+
+*emit_type_def(b, td)
+	name is td.get("name")
+	# Emit variant constructors
+	variants is td.get("variants")
+	if variants isnt none
+		for v in variants
+			emit_variant_constructor(b, name, v)
+	# Emit methods
+	methods is td.get("methods")
+	if methods isnt none
+		for method in methods
+			emit_method(b, name, method)
+
+*emit_variant_constructor(b, type_name, variant)
+	v_name is variant.get("name")
+	if v_name is none
+		return none
+	fields is variant.get("fields")
+	tag_str is intern_string(b, v_name)
+	tag_len is v_name.length()
+	if fields is none or fields.length() is 0
+		# Nullary constructor
+		emit(b, 'define %CoralValue* @{v_name}() \{')
+		b.set("next_reg", 0)
+		b.set("next_bb", 0)
+		begin_bb(b, "entry")
+		tag_ptr is fresh_reg(b)
+		tag_arr is tag_len + 1
+		emit_indent(b, '{tag_ptr} = getelementptr [{tag_arr} x i8], [{tag_arr} x i8]* {tag_str}, i64 0, i64 0')
+		result is fresh_reg(b)
+		emit_indent(b, '{result} = call %CoralValue* @coral_make_tagged(i8* {tag_ptr}, i64 {tag_len}, %CoralValue** null, i64 0)')
+		emit_indent(b, 'ret %CoralValue* {result}')
+		emit(b, '}')
+		emit(b, "")
+	else
+		# Constructor with fields
+		nfields is fields.length()
+		param_strs is []
+		idx is 0
+		while idx < nfields
+			param_strs.push('%CoralValue* %field_{idx}')
+			idx is idx + 1
+		emit(b, 'define %CoralValue* @{v_name}({join(param_strs, ", ")}) \{')
+		b.set("next_reg", 0)
+		b.set("next_bb", 0)
+		begin_bb(b, "entry")
+		# Alloca array of fields
+		arr is fresh_reg(b)
+		emit_indent(b, '{arr} = alloca [{nfields} x %CoralValue*]')
+		idx is 0
+		while idx < nfields
+			gep is fresh_reg(b)
+			emit_indent(b, '{gep} = getelementptr [{nfields} x %CoralValue*], [{nfields} x %CoralValue*]* {arr}, i64 0, i64 {idx}')
+			emit_indent(b, 'store %CoralValue* %field_{idx}, %CoralValue** {gep}')
+			idx is idx + 1
+		p_reg is fresh_reg(b)
+		emit_indent(b, '{p_reg} = bitcast [{nfields} x %CoralValue*]* {arr} to %CoralValue**')
+		tag_ptr is fresh_reg(b)
+		tag_arr is tag_len + 1
+		emit_indent(b, '{tag_ptr} = getelementptr [{tag_arr} x i8], [{tag_arr} x i8]* {tag_str}, i64 0, i64 0')
+		result is fresh_reg(b)
+		emit_indent(b, '{result} = call %CoralValue* @coral_make_tagged(i8* {tag_ptr}, i64 {tag_len}, %CoralValue** {p_reg}, i64 {nfields})')
+		emit_indent(b, 'ret %CoralValue* {result}')
+		emit(b, '}')
+		emit(b, "")
+
+# ─── Store Definitions ─────────────────────────────────────────────
+
+*emit_store_def(b, st)
+	name is st.get("name")
+	is_actor is st.get("is_actor")
+	fields is st.get("fields")
+	methods is st.get("methods")
+	if is_actor
+		emit_actor_constructor(b, name, fields, methods)
+	else
+		emit_store_constructor(b, name, fields)
+	# Emit methods
+	if methods isnt none
+		for method in methods
+			emit_method(b, name, method)
+
+*emit_store_constructor(b, name, fields)
+	emit(b, 'define %CoralValue* @make_{name}() \{')
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	b.set("variables", map())
+	begin_bb(b, "entry")
+	# Create empty map
+	m is fresh_reg(b)
+	emit_indent(b, '{m} = call %CoralValue* @coral_make_map(%MapEntry* null, i64 0)')
+	# Set __type__
+	type_str is emit_string_value(b, name)
+	type_key is emit_string_value(b, "__type__")
+	r1 is fresh_reg(b)
+	emit_indent(b, '{r1} = call %CoralValue* @coral_map_set(%CoralValue* {m}, %CoralValue* {type_key}, %CoralValue* {type_str})')
+	# Set field defaults
+	if fields isnt none
+		for f in fields
+			f_name is f.get("name")
+			f_key is emit_string_value(b, f_name)
+			f_val is emit_field_default(b, f.get("default"))
+			set_reg is fresh_reg(b)
+			emit_indent(b, '{set_reg} = call %CoralValue* @coral_map_set(%CoralValue* {m}, %CoralValue* {f_key}, %CoralValue* {f_val})')
+	emit_indent(b, 'ret %CoralValue* {m}')
+	emit(b, '}')
+	emit(b, "")
+
+*emit_field_default(b, f_default)
+	if f_default isnt none
+		return emit_expression(b, f_default)
+	val is fresh_reg(b)
+	emit_indent(b, '{val} = call %CoralValue* @coral_make_number(double 0.0)')
+	return val
+
+*emit_actor_constructor(b, name, fields, methods)
+	# Actor constructor creates state map, handler closure, spawns
+	emit(b, 'define %CoralValue* @make_{name}() \{')
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	b.set("variables", map())
+	begin_bb(b, "entry")
+	# Create state map
+	m is fresh_reg(b)
+	emit_indent(b, '{m} = call %CoralValue* @coral_make_map(%MapEntry* null, i64 0)')
+	type_str is emit_string_value(b, name)
+	type_key is emit_string_value(b, "__type__")
+	r1 is fresh_reg(b)
+	emit_indent(b, '{r1} = call %CoralValue* @coral_map_set(%CoralValue* {m}, %CoralValue* {type_key}, %CoralValue* {type_str})')
+	if fields isnt none
+		for f in fields
+			f_name is f.get("name")
+			f_key is emit_string_value(b, f_name)
+			f_val is emit_field_default(b, f.get("default"))
+			set_reg is fresh_reg(b)
+			emit_indent(b, '{set_reg} = call %CoralValue* @coral_map_set(%CoralValue* {m}, %CoralValue* {f_key}, %CoralValue* {f_val})')
+	# Create handler closure
+	handler_ptr is fresh_reg(b)
+	emit_indent(b, '{handler_ptr} = bitcast void (i8*, %CoralValue**, i64, %CoralValue**)* @__{name}_handler_invoke to i8*')
+	release_ptr is fresh_reg(b)
+	emit_indent(b, '{release_ptr} = bitcast void (i8*)* @__{name}_handler_release to i8*')
+	env_ptr is fresh_reg(b)
+	emit_indent(b, '{env_ptr} = bitcast %CoralValue* {m} to i8*')
+	closure is fresh_reg(b)
+	emit_indent(b, '{closure} = call %CoralValue* @coral_make_closure(i8* {handler_ptr}, i8* {release_ptr}, i8* {env_ptr})')
+	actor_reg is fresh_reg(b)
+	emit_indent(b, '{actor_reg} = call %CoralValue* @coral_actor_spawn(%CoralValue* {closure})')
+	emit_indent(b, 'ret %CoralValue* {actor_reg}')
+	emit(b, '}')
+	emit(b, "")
+	# Emit handler invoke function
+	emit_actor_handler(b, name, methods)
+
+*emit_actor_handler(b, name, methods)
+	emit(b, 'define void @__{name}_handler_invoke(i8* %env, %CoralValue** %args, i64 %nargs, %CoralValue** %out) \{')
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	begin_bb(b, "entry")
+	state is fresh_reg(b)
+	emit_indent(b, '{state} = bitcast i8* %env to %CoralValue*')
+	# Get message from args[1]
+	msg_ptr is fresh_reg(b)
+	emit_indent(b, '{msg_ptr} = getelementptr %CoralValue*, %CoralValue** %args, i64 1')
+	msg is fresh_reg(b)
+	emit_indent(b, '{msg} = load %CoralValue*, %CoralValue** {msg_ptr}')
+	# Get msg.name
+	name_key is emit_string_value(b, "name")
+	msg_name is fresh_reg(b)
+	emit_indent(b, '{msg_name} = call %CoralValue* @coral_map_get(%CoralValue* {msg}, %CoralValue* {name_key})')
+	# Get msg.data
+	data_key is emit_string_value(b, "data")
+	msg_data is fresh_reg(b)
+	emit_indent(b, '{msg_data} = call %CoralValue* @coral_map_get(%CoralValue* {msg}, %CoralValue* {data_key})')
+	# Dispatch to handlers (only @message methods)
+	if methods isnt none
+		dispatch_bb is fresh_bb(b, "dispatch_done")
+		for method in methods
+			if method.get("func_kind") is "message"
+				m_name is method.get("name")
+				next_bb is fresh_bb(b, "check")
+				handler_name_val is emit_string_value(b, m_name)
+				cmp is fresh_reg(b)
+				emit_indent(b, '{cmp} = call %CoralValue* @coral_value_equals(%CoralValue* {msg_name}, %CoralValue* {handler_name_val})')
+				cmp_bool is fresh_reg(b)
+				emit_indent(b, '{cmp_bool} = call i8 @coral_value_as_bool(%CoralValue* {cmp})')
+				cmp_i1 is fresh_reg(b)
+				emit_indent(b, '{cmp_i1} = trunc i8 {cmp_bool} to i1')
+				handler_bb is fresh_bb(b, "handle")
+				emit_br_cond(b, cmp_i1, handler_bb, next_bb)
+				begin_bb(b, handler_bb)
+				result is fresh_reg(b)
+				emit_indent(b, '{result} = call %CoralValue* @{name}_{m_name}(%CoralValue* {state}, %CoralValue* {msg_data})')
+				emit_br(b, dispatch_bb)
+				begin_bb(b, next_bb)
+		emit_br(b, dispatch_bb)
+		begin_bb(b, dispatch_bb)
+	# Store result (unit)
+	unit is fresh_reg(b)
+	emit_indent(b, '{unit} = call %CoralValue* @coral_make_unit()')
+	emit_indent(b, 'store %CoralValue* {unit}, %CoralValue** %out')
+	emit_indent(b, 'ret void')
+	emit(b, '}')
+	emit(b, "")
+	# Handler release
+	emit(b, 'define void @__{name}_handler_release(i8* %env) \{')
+	b.set("next_reg", 0)
+	begin_bb(b, "entry")
+	st is fresh_reg(b)
+	emit_indent(b, '{st} = bitcast i8* %env to %CoralValue*')
+	emit_indent(b, 'call void @coral_value_release(%CoralValue* {st})')
+	emit_indent(b, 'ret void')
+	emit(b, '}')
+	emit(b, "")
+
+# ─── Method Emission ───────────────────────────────────────────────
+
+*emit_method(b, owner_name, method)
+	m_name is method.get("name")
+	fn_name is '{owner_name}_{m_name}'
+	params is method.get("params")
+	param_strs is ['%CoralValue* %param_self']
+	b.set("variables", map())
+	if params isnt none
+		for p in params
+			p_name is p.get("name")
+			param_strs.push('%CoralValue* %param_{p_name}')
+	emit(b, 'define %CoralValue* @{fn_name}({join(param_strs, ", ")}) \{')
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	begin_bb(b, "entry")
+	# Alloca self
+	self_alloca is fresh_reg(b)
+	emit_indent(b, '{self_alloca} = alloca %CoralValue*')
+	emit_indent(b, 'store %CoralValue* %param_self, %CoralValue** {self_alloca}')
+	b.get("variables").set("self", self_alloca)
+	# Alloca params
+	if params isnt none
+		for p in params
+			p_name is p.get("name")
+			alloca_reg is fresh_reg(b)
+			emit_indent(b, '{alloca_reg} = alloca %CoralValue*')
+			emit_indent(b, 'store %CoralValue* %param_{p_name}, %CoralValue** {alloca_reg}')
+			b.get("variables").set(p_name, alloca_reg)
+	# Mark insertion point for deferred allocas
+	init_alloca_buf(b)
+	body is method.get("body")
+	result_reg is emit_block(b, body)
+	# Flush deferred allocas into entry block
+	flush_deferred_allocas(b)
+	emit_indent(b, 'ret %CoralValue* {result_reg}')
+	emit(b, '}')
+	emit(b, "")
+
+# ─── Main Function ─────────────────────────────────────────────────
+
+*emit_main_function(b, globals)
+	emit(b, 'define i32 @main() \{')
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	begin_bb(b, "entry")
+	# Init globals
+	if globals isnt none and globals.length() > 0
+		emit_indent(b, 'call void @__coral_init_globals()')
+	# Call __user_main via actor spawn pattern
+	# Create trampoline closure
+	tramp_ptr is fresh_reg(b)
+	emit_indent(b, '{tramp_ptr} = bitcast %CoralValue* (%CoralValue*)* @__coral_main_tramp to i8*')
+	closure is fresh_reg(b)
+	emit_indent(b, '{closure} = call %CoralValue* @coral_make_closure(i8* {tramp_ptr}, i8* null, i8* null)')
+	actor_reg is fresh_reg(b)
+	emit_indent(b, '{actor_reg} = call %CoralValue* @coral_actor_spawn(%CoralValue* {closure})')
+	unit is fresh_reg(b)
+	emit_indent(b, '{unit} = call %CoralValue* @coral_make_unit()')
+	r1 is fresh_reg(b)
+	emit_indent(b, '{r1} = call %CoralValue* @coral_actor_send(%CoralValue* {actor_reg}, %CoralValue* {unit})')
+	# Wait for main actor to complete
+	wait_reg is fresh_reg(b)
+	emit_indent(b, '{wait_reg} = call %CoralValue* @coral_main_wait()')
+	emit_indent(b, 'ret i32 0')
+	emit(b, '}')
+	emit(b, "")
+	# Trampoline function
+	emit(b, 'define %CoralValue* @__coral_main_tramp(%CoralValue* %msg) \{')
+	b.set("next_reg", 0)
+	begin_bb(b, "entry")
+	result is fresh_reg(b)
+	emit_indent(b, '{result} = call %CoralValue* @__user_main()')
+	# Signal main done
+	sig_reg is fresh_reg(b)
+	emit_indent(b, '{sig_reg} = call %CoralValue* @coral_main_done_signal()')
+	emit_indent(b, 'ret %CoralValue* {result}')
+	emit(b, '}')
+
+# ─── Block Emission ────────────────────────────────────────────────
+
+*emit_block(b, block)
+	if block is none
+		unit is fresh_reg(b)
+		emit_indent(b, '{unit} = call %CoralValue* @coral_make_unit()')
+		return unit
+	stmts is block.get("statements")
+	if stmts isnt none
+		for stmt in stmts
+			emit_statement(b, stmt)
+	val is block.get("value")
+	if val isnt none
+		return emit_expression(b, val)
+	unit is fresh_reg(b)
+	emit_indent(b, '{unit} = call %CoralValue* @coral_make_unit()')
+	return unit
+
+# ─── Statement Emission ───────────────────────────────────────────
+
+*emit_statement(b, stmt)
+	kind is stmt.get("kind")
+	if kind is "binding"
+		return emit_binding_stmt(b, stmt)
+	if kind is "expression_stmt"
+		return emit_expression(b, stmt.get("expr"))
+	if kind is "return"
+		val is emit_expression(b, stmt.get("expr"))
+		emit_indent(b, 'ret %CoralValue* {val}')
+		# Start unreachable block for following code
+		unreachable_bb is fresh_bb(b, "unreachable")
+		begin_bb(b, unreachable_bb)
+		return val
+	if kind is "if"
+		return emit_if_stmt(b, stmt)
+	if kind is "while"
+		return emit_while_stmt(b, stmt)
+	if kind is "for"
+		return emit_for_stmt(b, stmt)
+	if kind is "field_assign"
+		return emit_field_assign(b, stmt)
+	if kind is "break"
+		loop_info is get_current_loop(b)
+		if loop_info isnt none
+			emit_br(b, loop_info.get("exit"))
+		after_bb is fresh_bb(b, "after_break")
+		begin_bb(b, after_bb)
+		return none
+	if kind is "continue"
+		loop_info is get_current_loop(b)
+		if loop_info isnt none
+			emit_br(b, loop_info.get("header"))
+		after_bb is fresh_bb(b, "after_continue")
+		begin_bb(b, after_bb)
+		return none
+	if kind is "guard"
+		return emit_guard_stmt(b, stmt)
+	return none
+
+*get_current_loop(b)
+	stack is b.get("loop_stack")
+	if stack.length() is 0
+		return none
+	return stack[stack.length() - 1]
+
+*emit_binding_stmt(b, stmt)
+	name is stmt.get("name")
+	val is emit_expression(b, stmt.get("value"))
+	existing is b.get("variables").get(name)
+	if existing isnt none
+		# Rebind: just store
+		emit_indent(b, 'store %CoralValue* {val}, %CoralValue** {existing}')
+	else
+		# New variable: alloca (deferred to entry block)
+		alloca_reg is emit_deferred_alloca(b)
+		emit_indent(b, 'store %CoralValue* {val}, %CoralValue** {alloca_reg}')
+		b.get("variables").set(name, alloca_reg)
+	return val
+
+*emit_if_stmt(b, stmt)
+	cond is emit_expression(b, stmt.get("condition"))
+	cond_bool is value_to_bool(b, cond)
+	then_bb is fresh_bb(b, "then")
+	else_bb is fresh_bb(b, "else")
+	cont_bb is fresh_bb(b, "if_cont")
+	# Check for elif branches
+	elifs is stmt.get("elif_branches")
+	else_body is stmt.get("else_body")
+	has_else is else_body isnt none
+	if elifs isnt none and elifs.length() > 0
+		first_elif_bb is fresh_bb(b, "elif")
+		emit_br_cond(b, cond_bool, then_bb, first_elif_bb)
+		# Then
+		begin_bb(b, then_bb)
+		emit_block(b, stmt.get("body"))
+		emit_br(b, cont_bb)
+		# Elif chain — carry cur_bb across iterations so labels match
+		idx is 0
+		cur_bb is first_elif_bb
+		while idx < elifs.length()
+			begin_bb(b, cur_bb)
+			elif_cond is emit_expression(b, elifs[idx].get("condition"))
+			elif_bool is value_to_bool(b, elif_cond)
+			elif_body_bb is fresh_bb(b, "elif_body")
+			# Where to branch if this elif condition is false
+			next_bb is cont_bb
+			if idx + 1 < elifs.length()
+				next_bb is fresh_bb(b, "elif")
+			elif has_else
+				next_bb is else_bb
+			emit_br_cond(b, elif_bool, elif_body_bb, next_bb)
+			begin_bb(b, elif_body_bb)
+			emit_block(b, elifs[idx].get("body"))
+			emit_br(b, cont_bb)
+			cur_bb is next_bb
+			idx is idx + 1
+	else
+		target_else is else_bb
+		if !has_else
+			target_else is cont_bb
+		emit_br_cond(b, cond_bool, then_bb, target_else)
+		begin_bb(b, then_bb)
+		emit_block(b, stmt.get("body"))
+		emit_br(b, cont_bb)
+	# Else
+	if has_else
+		begin_bb(b, else_bb)
+		emit_block(b, else_body)
+		emit_br(b, cont_bb)
+	begin_bb(b, cont_bb)
+	return none
+
+*emit_while_stmt(b, stmt)
+	header_bb is fresh_bb(b, "while_header")
+	body_bb is fresh_bb(b, "while_body")
+	exit_bb is fresh_bb(b, "while_exit")
+	# Push loop
+	b.get("loop_stack").push(map("header" is header_bb, "exit" is exit_bb))
+	emit_br(b, header_bb)
+	begin_bb(b, header_bb)
+	cond is emit_expression(b, stmt.get("condition"))
+	cond_bool is value_to_bool(b, cond)
+	emit_br_cond(b, cond_bool, body_bb, exit_bb)
+	begin_bb(b, body_bb)
+	emit_block(b, stmt.get("body"))
+	emit_br(b, header_bb)
+	begin_bb(b, exit_bb)
+	# Pop loop
+	pop_loop(b)
+	return none
+
+*emit_for_stmt(b, stmt)
+	var_name is stmt.get("variable")
+	iterable is emit_expression(b, stmt.get("iterable"))
+	iter is fresh_reg(b)
+	emit_indent(b, '{iter} = call %CoralValue* @coral_value_iter(%CoralValue* {iterable})')
+	header_bb is fresh_bb(b, "for_header")
+	body_bb is fresh_bb(b, "for_body")
+	exit_bb is fresh_bb(b, "for_exit")
+	b.get("loop_stack").push(map("header" is header_bb, "exit" is exit_bb))
+	emit_br(b, header_bb)
+	begin_bb(b, header_bb)
+	elem is fresh_reg(b)
+	emit_indent(b, '{elem} = call %CoralValue* @coral_value_iter_next(%CoralValue* {iter})')
+	# Check tag byte for done (tag == 7 means Unit → end)
+	tag_ptr is fresh_reg(b)
+	emit_indent(b, '{tag_ptr} = bitcast %CoralValue* {elem} to i8*')
+	tag_val is fresh_reg(b)
+	emit_indent(b, '{tag_val} = load i8, i8* {tag_ptr}')
+	done is fresh_reg(b)
+	emit_indent(b, '{done} = icmp eq i8 {tag_val}, 7')
+	emit_br_cond(b, done, exit_bb, body_bb)
+	begin_bb(b, body_bb)
+	# Bind loop variable
+	existing is b.get("variables").get(var_name)
+	if existing isnt none
+		emit_indent(b, 'store %CoralValue* {elem}, %CoralValue** {existing}')
+	else
+		alloca_reg is emit_deferred_alloca(b)
+		emit_indent(b, 'store %CoralValue* {elem}, %CoralValue** {alloca_reg}')
+		b.get("variables").set(var_name, alloca_reg)
+	emit_block(b, stmt.get("body"))
+	emit_br(b, header_bb)
+	begin_bb(b, exit_bb)
+	# Release iterator
+	emit_indent(b, 'call void @coral_value_release(%CoralValue* {iter})')
+	pop_loop(b)
+	return none
+
+*emit_field_assign(b, stmt)
+	target is stmt.get("target")
+	val is emit_expression(b, stmt.get("value"))
+	# target is a member expression: obj.field
+	if target.get("kind") is "member"
+		obj is emit_expression(b, target.get("target"))
+		prop is target.get("property")
+		key is emit_string_value(b, prop)
+		result is fresh_reg(b)
+		emit_indent(b, '{result} = call %CoralValue* @coral_map_set(%CoralValue* {obj}, %CoralValue* {key}, %CoralValue* {val})')
+		return result
+	# target is an index: obj[idx]
+	if target.get("kind") is "index"
+		obj is emit_expression(b, target.get("target"))
+		idx is emit_expression(b, target.get("index"))
+		# Use list push at index or map set
+		result is fresh_reg(b)
+		emit_indent(b, '{result} = call %CoralValue* @coral_map_set(%CoralValue* {obj}, %CoralValue* {idx}, %CoralValue* {val})')
+		return result
+	return val
+
+*emit_guard_stmt(b, stmt)
+	cond is emit_expression(b, stmt.get("condition"))
+	cond_bool is value_to_bool(b, cond)
+	guard_body_bb is fresh_bb(b, "guard_body")
+	guard_cont_bb is fresh_bb(b, "guard_cont")
+	# Guard triggers body when condition is FALSE (like `unless`)
+	emit_br_cond(b, cond_bool, guard_cont_bb, guard_body_bb)
+	begin_bb(b, guard_body_bb)
+	emit_block(b, stmt.get("body"))
+	emit_br(b, guard_cont_bb)
+	begin_bb(b, guard_cont_bb)
+	return none
+
+*pop_loop(b)
+	stack is b.get("loop_stack")
+	new_stack is []
+	idx is 0
+	while idx < stack.length() - 1
+		new_stack.push(stack[idx])
+		idx is idx + 1
+	b.set("loop_stack", new_stack)
+
+# ─── Expression Emission ──────────────────────────────────────────
+
+*emit_expression(b, expr)
+	if expr is none
+		unit is fresh_reg(b)
+		emit_indent(b, '{unit} = call %CoralValue* @coral_make_unit()')
+		return unit
+	kind is expr.get("kind")
+	if kind is "integer"
+		val is expr.get("value")
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_number(double {val}.0)')
+		return r
+	if kind is "float"
+		val is expr.get("value")
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_number(double {val})')
+		return r
+	if kind is "bool"
+		val is expr.get("value")
+		bval is 0
+		if val
+			bval is 1
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_bool(i8 {bval})')
+		return r
+	if kind is "string_lit"
+		return emit_string_value(b, expr.get("value"))
+	if kind is "unit"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')
+		return r
+	if kind is "none"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_absent()')
+		return r
+	if kind is "identifier"
+		return emit_identifier(b, expr)
+	if kind is "binary"
+		return emit_binary(b, expr)
+	if kind is "unary"
+		return emit_unary(b, expr)
+	if kind is "call"
+		return emit_call(b, expr)
+	if kind is "member"
+		return emit_member(b, expr)
+	if kind is "index"
+		return emit_index(b, expr)
+	if kind is "ternary"
+		return emit_ternary(b, expr)
+	if kind is "pipeline"
+		return emit_pipeline(b, expr)
+	if kind is "lambda"
+		return emit_lambda(b, expr)
+	if kind is "match"
+		return emit_match(b, expr)
+	if kind is "list"
+		return emit_list(b, expr)
+	if kind is "map_lit"
+		return emit_map_lit(b, expr)
+	if kind is "throw"
+		return emit_expression(b, expr.get("value"))
+	if kind is "error_propagate"
+		return emit_error_propagate(b, expr)
+	if kind is "error_value"
+		return emit_error_value(b, expr)
+	# Fallback
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')
+	return r
+
+# ─── Identifier ────────────────────────────────────────────────────
+
+*emit_identifier(b, expr)
+	name is expr.get("name")
+	# Check local variable
+	var_ptr is b.get("variables").get(name)
+	if var_ptr isnt none
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = load %CoralValue*, %CoralValue** {var_ptr}')
+		return r
+	# Check if it's a known function → return function-as-closure thunk
+	# For now, treat as global
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = load %CoralValue*, %CoralValue** @coral_global_{name}')
+	return r
+
+# ─── Binary Expressions ───────────────────────────────────────────
+
+*emit_binary(b, expr)
+	op is expr.get("op")
+	# Short-circuit for And/Or
+	if op is "And"
+		return emit_short_circuit_and(b, expr)
+	if op is "Or"
+		return emit_short_circuit_or(b, expr)
+	left is emit_expression(b, expr.get("left"))
+	right is emit_expression(b, expr.get("right"))
+	# Dispatch by operation
+	if op is "Add"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_add(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "Sub" or op is "Mul" or op is "Div" or op is "Mod"
+		return emit_arithmetic(b, op, left, right)
+	if op is "Equals"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_equals(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "NotEquals"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_not_equals(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "Less" or op is "LessEq" or op is "Greater" or op is "GreaterEq"
+		return emit_comparison(b, op, left, right)
+	if op is "BitAnd"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_bitand(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "BitOr"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_bitor(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "BitXor"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_bitxor(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "ShiftLeft"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_shift_left(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	if op is "ShiftRight"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_shift_right(%CoralValue* {left}, %CoralValue* {right})')
+		return r
+	# Fallback: add
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_value_add(%CoralValue* {left}, %CoralValue* {right})')
+	return r
+
+*emit_arithmetic(b, op, left, right)
+	l_num is fresh_reg(b)
+	emit_indent(b, '{l_num} = call double @coral_value_as_number(%CoralValue* {left})')
+	r_num is fresh_reg(b)
+	emit_indent(b, '{r_num} = call double @coral_value_as_number(%CoralValue* {right})')
+	result is fresh_reg(b)
+	if op is "Sub"
+		emit_indent(b, '{result} = fsub double {l_num}, {r_num}')
+	elif op is "Mul"
+		emit_indent(b, '{result} = fmul double {l_num}, {r_num}')
+	elif op is "Div"
+		emit_indent(b, '{result} = fdiv double {l_num}, {r_num}')
+	elif op is "Mod"
+		emit_indent(b, '{result} = frem double {l_num}, {r_num}')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_number(double {result})')
+	return r
+
+*emit_comparison(b, op, left, right)
+	l_num is fresh_reg(b)
+	emit_indent(b, '{l_num} = call double @coral_value_as_number(%CoralValue* {left})')
+	r_num is fresh_reg(b)
+	emit_indent(b, '{r_num} = call double @coral_value_as_number(%CoralValue* {right})')
+	cmp is fresh_reg(b)
+	if op is "Less"
+		emit_indent(b, '{cmp} = fcmp olt double {l_num}, {r_num}')
+	elif op is "LessEq"
+		emit_indent(b, '{cmp} = fcmp ole double {l_num}, {r_num}')
+	elif op is "Greater"
+		emit_indent(b, '{cmp} = fcmp ogt double {l_num}, {r_num}')
+	elif op is "GreaterEq"
+		emit_indent(b, '{cmp} = fcmp oge double {l_num}, {r_num}')
+	ext is fresh_reg(b)
+	emit_indent(b, '{ext} = zext i1 {cmp} to i8')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_bool(i8 {ext})')
+	return r
+
+*emit_short_circuit_and(b, expr)
+	left is emit_expression(b, expr.get("left"))
+	left_bool is value_to_bool(b, left)
+	rhs_bb is fresh_bb(b, "and_rhs")
+	cont_bb is fresh_bb(b, "and_cont")
+	left_bb is b.get("current_bb")
+	emit_br_cond(b, left_bool, rhs_bb, cont_bb)
+	begin_bb(b, rhs_bb)
+	right is emit_expression(b, expr.get("right"))
+	right_bool is value_to_bool(b, right)
+	rhs_end_bb is b.get("current_bb")
+	emit_br(b, cont_bb)
+	begin_bb(b, cont_bb)
+	phi is fresh_reg(b)
+	emit_indent(b, '{phi} = phi i1 [ false, %{left_bb} ], [ {right_bool}, %{rhs_end_bb} ]')
+	ext is fresh_reg(b)
+	emit_indent(b, '{ext} = zext i1 {phi} to i8')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_bool(i8 {ext})')
+	return r
+
+*emit_short_circuit_or(b, expr)
+	left is emit_expression(b, expr.get("left"))
+	left_bool is value_to_bool(b, left)
+	rhs_bb is fresh_bb(b, "or_rhs")
+	cont_bb is fresh_bb(b, "or_cont")
+	left_bb is b.get("current_bb")
+	emit_br_cond(b, left_bool, cont_bb, rhs_bb)
+	begin_bb(b, rhs_bb)
+	right is emit_expression(b, expr.get("right"))
+	right_bool is value_to_bool(b, right)
+	rhs_end_bb is b.get("current_bb")
+	emit_br(b, cont_bb)
+	begin_bb(b, cont_bb)
+	phi is fresh_reg(b)
+	emit_indent(b, '{phi} = phi i1 [ true, %{left_bb} ], [ {right_bool}, %{rhs_end_bb} ]')
+	ext is fresh_reg(b)
+	emit_indent(b, '{ext} = zext i1 {phi} to i8')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_bool(i8 {ext})')
+	return r
+
+# ─── Unary Expressions ────────────────────────────────────────────
+
+*emit_unary(b, expr)
+	op is expr.get("op")
+	inner is emit_expression(b, expr.get("expr"))
+	if op is "Neg"
+		d is fresh_reg(b)
+		emit_indent(b, '{d} = call double @coral_value_as_number(%CoralValue* {inner})')
+		neg is fresh_reg(b)
+		emit_indent(b, '{neg} = fneg double {d}')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_number(double {neg})')
+		return r
+	if op is "Not"
+		bool_val is fresh_reg(b)
+		emit_indent(b, '{bool_val} = call i8 @coral_value_as_bool(%CoralValue* {inner})')
+		trunc is fresh_reg(b)
+		emit_indent(b, '{trunc} = trunc i8 {bool_val} to i1')
+		inv is fresh_reg(b)
+		emit_indent(b, '{inv} = xor i1 {trunc}, true')
+		ext is fresh_reg(b)
+		emit_indent(b, '{ext} = zext i1 {inv} to i8')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_bool(i8 {ext})')
+		return r
+	if op is "BitNot"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_bitnot(%CoralValue* {inner})')
+		return r
+	return inner
+
+# ─── Call Expressions ──────────────────────────────────────────────
+
+*emit_call(b, expr)
+	callee is expr.get("callee")
+	args is expr.get("args")
+	# Method call: callee is member expression
+	if callee.get("kind") is "member"
+		return emit_method_call(b, callee, args)
+	# Named function call
+	if callee.get("kind") is "identifier"
+		return emit_named_call(b, callee.get("name"), args)
+	# Closure call
+	callee_val is emit_expression(b, callee)
+	return emit_closure_invoke(b, callee_val, args)
+
+*emit_named_call(b, name, args)
+	# Builtin functions → dispatch to runtime
+	if name is "log" or name is "println"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_log(%CoralValue* {arg})')
+		return r
+	if name is "print"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_log(%CoralValue* {arg})')
+		return r
+	if name is "len"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_length(%CoralValue* {arg})')
+		return r
+	if name is "str" or name is "to_string"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_number_to_string(%CoralValue* {arg})')
+		return r
+	if name is "int" or name is "float"
+		return emit_expression(b, args[0])
+	if name is "type_of"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_type_of(%CoralValue* {arg})')
+		return r
+	if name is "range"
+		return emit_range_call(b, args)
+	if name is "abs"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_abs(%CoralValue* {arg})')
+		return r
+	if name is "sqrt"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_sqrt(%CoralValue* {arg})')
+		return r
+	if name is "min"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_min(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "max"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_max(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "pow"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_pow(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "floor"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_floor(%CoralValue* {arg})')
+		return r
+	if name is "ceil"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_ceil(%CoralValue* {arg})')
+		return r
+	if name is "round"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_math_round(%CoralValue* {arg})')
+		return r
+	if name is "random"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_random()')
+		return r
+	if name is "random_int"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_random_int(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "spawn"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_actor_spawn(%CoralValue* {arg})')
+		return r
+	if name is "send"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_actor_send(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "sleep"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_sleep(%CoralValue* {arg})')
+		return r
+	if name is "exit_process"
+		arg is emit_expression(b, args[0])
+		emit_indent(b, 'call void @coral_process_exit(%CoralValue* {arg})')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')
+		return r
+	if name is "json_parse"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_json_parse(%CoralValue* {arg})')
+		return r
+	if name is "json_serialize"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_json_serialize(%CoralValue* {arg})')
+		return r
+	# ─── String builtins ───────────────────────────────────────
+	if name is "char_at"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_char_at(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "chr"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_chr(%CoralValue* {arg})')
+		return r
+	if name is "ord"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_ord(%CoralValue* {arg})')
+		return r
+	if name is "slice"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		d is emit_expression(b, args[2])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_slice(%CoralValue* {a}, %CoralValue* {c}, %CoralValue* {d})')
+		return r
+	if name is "index_of"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_index_of(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "split"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_split(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "starts_with"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_starts_with(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "string_ends_with"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_ends_with(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "contains"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_contains(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "replace"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		d is emit_expression(b, args[2])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_replace(%CoralValue* {a}, %CoralValue* {c}, %CoralValue* {d})')
+		return r
+	if name is "trim"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_trim(%CoralValue* {arg})')
+		return r
+	if name is "string_length"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_length(%CoralValue* {arg})')
+		return r
+	if name is "parse_number"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_parse_number(%CoralValue* {arg})')
+		return r
+	if name is "join"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_join(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	# ─── IO / Process builtins ─────────────────────────────────
+	if name is "fs_read"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_fs_read(%CoralValue* {arg})')
+		return r
+	if name is "fs_exists"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_fs_exists(%CoralValue* {arg})')
+		return r
+	if name is "stdin_read_line"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_stdin_read_line()')
+		return r
+	if name is "process_args"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_process_args()')
+		return r
+	if name is "env_get"
+		arg is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_env_get(%CoralValue* {arg})')
+		return r
+	if name is "env_set"
+		a is emit_expression(b, args[0])
+		c is emit_expression(b, args[1])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_env_set(%CoralValue* {a}, %CoralValue* {c})')
+		return r
+	if name is "exit"
+		arg is emit_expression(b, args[0])
+		emit_indent(b, 'call void @coral_process_exit(%CoralValue* {arg})')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')
+		return r
+	if name is "assert" or name is "assert_eq"
+		# Pass through as user function call
+		pass is none
+	# General named call: assume it's a user-defined or known function
+	arg_regs is []
+	if args isnt none
+		for arg in args
+			arg_regs.push(emit_expression(b, arg))
+	arg_strs is []
+	for ar in arg_regs
+		arg_strs.push('%CoralValue* {ar}')
+	fn_name is name
+	if name is "main"
+		fn_name is "__user_main"
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @{fn_name}({join(arg_strs, ", ")})')
+	return r
+
+*emit_range_call(b, args)
+	if args.length() is 1
+		# range(n) → range(0, n)
+		zero is fresh_reg(b)
+		emit_indent(b, '{zero} = call %CoralValue* @coral_make_number(double 0.0)')
+		n is emit_expression(b, args[0])
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_range(%CoralValue* {zero}, %CoralValue* {n})')
+		return r
+	start is emit_expression(b, args[0])
+	end is emit_expression(b, args[1])
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_range(%CoralValue* {start}, %CoralValue* {end})')
+	return r
+
+# ─── Method Calls ──────────────────────────────────────────────────
+
+*emit_method_call(b, callee, args)
+	target is emit_expression(b, callee.get("target"))
+	prop is callee.get("property")
+	# Emit all args
+	arg_regs is []
+	if args isnt none
+		for arg in args
+			arg_regs.push(emit_expression(b, arg))
+	# Dispatch known methods
+	if prop is "push"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_push(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "pop"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_pop(%CoralValue* {target})')
+		return r
+	if prop is "length"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_length(%CoralValue* {target})')
+		return r
+	if prop is "get"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_get(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "set"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_set(%CoralValue* {target}, %CoralValue* {arg_regs[0]}, %CoralValue* {arg_regs[1]})')
+		return r
+	if prop is "keys"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_keys(%CoralValue* {target})')
+		return r
+	if prop is "values"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_values(%CoralValue* {target})')
+		return r
+	if prop is "entries"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_entries(%CoralValue* {target})')
+		return r
+	if prop is "has_key" or prop is "contains_key"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_has_key(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "contains"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_contains(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "remove"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_map_remove(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "reverse"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_reverse(%CoralValue* {target})')
+		return r
+	if prop is "sort"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_sort(%CoralValue* {target})')
+		return r
+	if prop is "join"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_join(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "map"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_map(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "filter"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_filter(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "reduce"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_list_reduce(%CoralValue* {target}, %CoralValue* {arg_regs[0]}, %CoralValue* {arg_regs[1]})')
+		return r
+	if prop is "split"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_split(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "trim"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_trim(%CoralValue* {target})')
+		return r
+	if prop is "starts_with"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_starts_with(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "ends_with"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_ends_with(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "to_upper" or prop is "upper"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_to_upper(%CoralValue* {target})')
+		return r
+	if prop is "to_lower" or prop is "lower"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_to_lower(%CoralValue* {target})')
+		return r
+	if prop is "replace"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_replace(%CoralValue* {target}, %CoralValue* {arg_regs[0]}, %CoralValue* {arg_regs[1]})')
+		return r
+	if prop is "char_at"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_char_at(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "index_of"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_index_of(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "substring" or prop is "slice"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_string_slice(%CoralValue* {target}, %CoralValue* {arg_regs[0]}, %CoralValue* {arg_regs[1]})')
+		return r
+	if prop is "to_string"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_number_to_string(%CoralValue* {target})')
+		return r
+	if prop is "equals"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_equals(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	if prop is "not_equals"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_not_equals(%CoralValue* {target}, %CoralValue* {arg_regs[0]})')
+		return r
+	# Unknown method: try as type method call {Type}_{method}(self, ...)
+	all_args is ['%CoralValue* {target}']
+	for ar in arg_regs
+		all_args.push('%CoralValue* {ar}')
+	r is fresh_reg(b)
+	# Fallback: use coral_value_get for field access
+	key is emit_string_value(b, prop)
+	emit_indent(b, '{r} = call %CoralValue* @coral_map_get(%CoralValue* {target}, %CoralValue* {key})')
+	return r
+
+# ─── Member Access ─────────────────────────────────────────────────
+
+*emit_member(b, expr)
+	target is emit_expression(b, expr.get("target"))
+	prop is expr.get("property")
+	if prop is "length"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_value_length(%CoralValue* {target})')
+		return r
+	key is emit_string_value(b, prop)
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_map_get(%CoralValue* {target}, %CoralValue* {key})')
+	return r
+
+# ─── Index Access ──────────────────────────────────────────────────
+
+*emit_index(b, expr)
+	target is emit_expression(b, expr.get("target"))
+	index is emit_expression(b, expr.get("index"))
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_list_get(%CoralValue* {target}, %CoralValue* {index})')
+	return r
+
+# ─── Ternary Expression ───────────────────────────────────────────
+
+*emit_ternary(b, expr)
+	cond is emit_expression(b, expr.get("condition"))
+	cond_bool is value_to_bool(b, cond)
+	then_bb is fresh_bb(b, "tern_then")
+	else_bb is fresh_bb(b, "tern_else")
+	cont_bb is fresh_bb(b, "tern_cont")
+	emit_br_cond(b, cond_bool, then_bb, else_bb)
+	begin_bb(b, then_bb)
+	then_val is emit_expression(b, expr.get("then_branch"))
+	then_end_bb is b.get("current_bb")
+	emit_br(b, cont_bb)
+	begin_bb(b, else_bb)
+	else_val is emit_expression(b, expr.get("else_branch"))
+	else_end_bb is b.get("current_bb")
+	emit_br(b, cont_bb)
+	begin_bb(b, cont_bb)
+	phi is fresh_reg(b)
+	emit_indent(b, '{phi} = phi %CoralValue* [ {then_val}, %{then_end_bb} ], [ {else_val}, %{else_end_bb} ]')
+	return phi
+
+# ─── Pipeline ──────────────────────────────────────────────────────
+
+*make_call_node(callee, args, span)
+	node is map("kind" is "call", "callee" is callee, "args" is args, "span" is span)
+	wrapper is [node]
+	return wrapper[0]
+
+*emit_pipeline(b, expr)
+	# a ~ f → f(a) or a ~ f(b) → f(a, b)
+	left is expr.get("left")
+	right is expr.get("right")
+	if right.get("kind") is "call"
+		# Insert left as first arg
+		new_args is [left]
+		old_args is right.get("args")
+		if old_args isnt none
+			for a in old_args
+				new_args.push(a)
+		desugared is make_call_node(right.get("callee"), new_args, expr.get("span"))
+		return emit_call(b, desugared)
+	else
+		desugared is make_call_node(right, [left], expr.get("span"))
+		return emit_call(b, desugared)
+
+# ─── Lambda ────────────────────────────────────────────────────────
+
+*emit_lambda(b, expr)
+	lam_id is fresh_lambda(b)
+	invoke_name is 'lambda_invoke_{lam_id}'
+	release_name is 'lambda_release_{lam_id}'
+	params is expr.get("params")
+	body is expr.get("body")
+	# Capture analysis: find free variables
+	captures is find_captures(expr, b.get("variables"))
+	n_captures is captures.length()
+	# Save builder state
+	saved_vars is b.get("variables")
+	saved_lines is b.get("lines")
+	saved_reg is b.get("next_reg")
+	saved_bb is b.get("next_bb")
+	saved_fn is b.get("current_fn")
+	# Emit invoke function into separate buffer
+	invoke_lines is []
+	b.set("lines", invoke_lines)
+	b.set("next_reg", 0)
+	b.set("next_bb", 0)
+	b.set("variables", map())
+	emit(b, 'define void @{invoke_name}(i8* %env, %CoralValue** %args, i64 %nargs, %CoralValue** %out) \{')
+	begin_bb(b, "entry")
+	# Load captures from env
+	if n_captures > 0
+		env_ptr is fresh_reg(b)
+		emit_indent(b, '{env_ptr} = bitcast i8* %env to %CoralValue**')
+		cap_idx is 0
+		for cap_name in captures
+			gep is fresh_reg(b)
+			emit_indent(b, '{gep} = getelementptr %CoralValue*, %CoralValue** {env_ptr}, i64 {cap_idx}')
+			loaded is fresh_reg(b)
+			emit_indent(b, '{loaded} = load %CoralValue*, %CoralValue** {gep}')
+			alloca_r is fresh_reg(b)
+			emit_indent(b, '{alloca_r} = alloca %CoralValue*')
+			emit_indent(b, 'store %CoralValue* {loaded}, %CoralValue** {alloca_r}')
+			b.get("variables").set(cap_name, alloca_r)
+			cap_idx is cap_idx + 1
+	# Load params from args array
+	if params isnt none
+		p_idx is 0
+		for p in params
+			p_name is p.get("name")
+			arg_gep is fresh_reg(b)
+			emit_indent(b, '{arg_gep} = getelementptr %CoralValue*, %CoralValue** %args, i64 {p_idx}')
+			arg_val is fresh_reg(b)
+			emit_indent(b, '{arg_val} = load %CoralValue*, %CoralValue** {arg_gep}')
+			alloca_r is fresh_reg(b)
+			emit_indent(b, '{alloca_r} = alloca %CoralValue*')
+			emit_indent(b, 'store %CoralValue* {arg_val}, %CoralValue** {alloca_r}')
+			b.get("variables").set(p_name, alloca_r)
+			p_idx is p_idx + 1
+	# Mark insertion point for deferred allocas
+	init_alloca_buf(b)
+	# Emit body
+	result_reg is emit_block(b, body)
+	# Flush deferred allocas into entry block
+	flush_deferred_allocas(b)
+	# Store to out
+	emit_indent(b, 'store %CoralValue* {result_reg}, %CoralValue** %out')
+	emit_indent(b, 'ret void')
+	emit(b, '}')
+	emit(b, "")
+	# Emit release function
+	emit(b, 'define void @{release_name}(i8* %env) \{')
+	b.set("next_reg", 0)
+	begin_bb(b, "entry")
+	if n_captures > 0
+		env_ptr is fresh_reg(b)
+		emit_indent(b, '{env_ptr} = bitcast i8* %env to %CoralValue**')
+		cap_idx is 0
+		for cap_name in captures
+			gep is fresh_reg(b)
+			emit_indent(b, '{gep} = getelementptr %CoralValue*, %CoralValue** {env_ptr}, i64 {cap_idx}')
+			loaded is fresh_reg(b)
+			emit_indent(b, '{loaded} = load %CoralValue*, %CoralValue** {gep}')
+			emit_indent(b, 'call void @coral_value_release(%CoralValue* {loaded})')
+			cap_idx is cap_idx + 1
+		emit_indent(b, 'call void @coral_heap_free(i8* %env)')
+	emit_indent(b, 'ret void')
+	emit(b, '}')
+	# Restore builder state and prepend lambda functions
+	lambda_text is invoke_lines
+	b.set("lines", saved_lines)
+	b.set("next_reg", saved_reg)
+	b.set("next_bb", saved_bb)
+	b.set("variables", saved_vars)
+	b.set("current_fn", saved_fn)
+	# Append lambda functions at end (they'll be collected)
+	for line in lambda_text
+		emit(b, line)
+	# Now emit closure construction in current function
+	if n_captures > 0
+		total_size is n_captures * 8
+		env_mem is fresh_reg(b)
+		emit_indent(b, '{env_mem} = call i8* @coral_heap_alloc(i64 {total_size})')
+		env_cast is fresh_reg(b)
+		emit_indent(b, '{env_cast} = bitcast i8* {env_mem} to %CoralValue**')
+		cap_idx is 0
+		for cap_name in captures
+			var_ptr is saved_vars.get(cap_name)
+			if var_ptr isnt none
+				val is fresh_reg(b)
+				emit_indent(b, '{val} = load %CoralValue*, %CoralValue** {var_ptr}')
+				emit_indent(b, 'call void @coral_value_retain(%CoralValue* {val})')
+				gep is fresh_reg(b)
+				emit_indent(b, '{gep} = getelementptr %CoralValue*, %CoralValue** {env_cast}, i64 {cap_idx}')
+				emit_indent(b, 'store %CoralValue* {val}, %CoralValue** {gep}')
+			cap_idx is cap_idx + 1
+		invoke_ptr is fresh_reg(b)
+		emit_indent(b, '{invoke_ptr} = bitcast void (i8*, %CoralValue**, i64, %CoralValue**)* @{invoke_name} to i8*')
+		release_ptr is fresh_reg(b)
+		emit_indent(b, '{release_ptr} = bitcast void (i8*)* @{release_name} to i8*')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_closure(i8* {invoke_ptr}, i8* {release_ptr}, i8* {env_mem})')
+		return r
+	else
+		invoke_ptr is fresh_reg(b)
+		emit_indent(b, '{invoke_ptr} = bitcast void (i8*, %CoralValue**, i64, %CoralValue**)* @{invoke_name} to i8*')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_closure(i8* {invoke_ptr}, i8* null, i8* null)')
+		return r
+
+*find_captures(expr, outer_vars)
+	# Walk lambda body and collect names that exist in outer_vars
+	# but are not lambda params
+	captures is []
+	seen is map()
+	params is expr.get("params")
+	param_names is map()
+	if params isnt none
+		for p in params
+			param_names.set(p.get("name"), true)
+	body is expr.get("body")
+	if body isnt none
+		collect_free_vars(body, param_names, outer_vars, captures, seen)
+	return captures
+
+*collect_free_vars(node, local_names, outer_vars, captures, seen)
+	if node is none
+		return none
+	kind is node.get("kind")
+	if kind is "identifier"
+		name is node.get("name")
+		if local_names.get(name) is none and outer_vars.get(name) isnt none and seen.get(name) is none
+			captures.push(name)
+			seen.set(name, true)
+		return none
+	# Recurse into sub-nodes
+	if kind is "binary"
+		collect_free_vars(node.get("left"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("right"), local_names, outer_vars, captures, seen)
+	elif kind is "unary"
+		collect_free_vars(node.get("expr"), local_names, outer_vars, captures, seen)
+	elif kind is "call"
+		collect_free_vars(node.get("callee"), local_names, outer_vars, captures, seen)
+		args is node.get("args")
+		if args isnt none
+			for arg in args
+				collect_free_vars(arg, local_names, outer_vars, captures, seen)
+	elif kind is "member"
+		collect_free_vars(node.get("target"), local_names, outer_vars, captures, seen)
+	elif kind is "index"
+		collect_free_vars(node.get("target"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("index"), local_names, outer_vars, captures, seen)
+	elif kind is "ternary"
+		collect_free_vars(node.get("condition"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("then_branch"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("else_branch"), local_names, outer_vars, captures, seen)
+	elif kind is "list"
+		items is node.get("items")
+		if items isnt none
+			for item in items
+				collect_free_vars(item, local_names, outer_vars, captures, seen)
+	elif kind is "map_lit"
+		entries is node.get("entries")
+		if entries isnt none
+			for entry in entries
+				collect_free_vars(entry[0], local_names, outer_vars, captures, seen)
+				collect_free_vars(entry[1], local_names, outer_vars, captures, seen)
+	# Block: recurse statements
+	stmts is node.get("statements")
+	if stmts isnt none
+		for stmt in stmts
+			collect_free_vars(stmt, local_names, outer_vars, captures, seen)
+	val is node.get("value")
+	if val isnt none
+		collect_free_vars(val, local_names, outer_vars, captures, seen)
+	# Statement sub-nodes
+	if kind is "binding"
+		collect_free_vars(node.get("value"), local_names, outer_vars, captures, seen)
+		local_names.set(node.get("name"), true)
+	elif kind is "expression_stmt"
+		collect_free_vars(node.get("expr"), local_names, outer_vars, captures, seen)
+	elif kind is "return"
+		collect_free_vars(node.get("expr"), local_names, outer_vars, captures, seen)
+	elif kind is "if"
+		collect_free_vars(node.get("condition"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("body"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("else_body"), local_names, outer_vars, captures, seen)
+	elif kind is "while"
+		collect_free_vars(node.get("condition"), local_names, outer_vars, captures, seen)
+		collect_free_vars(node.get("body"), local_names, outer_vars, captures, seen)
+	elif kind is "for"
+		collect_free_vars(node.get("iterable"), local_names, outer_vars, captures, seen)
+		local_names.set(node.get("variable"), true)
+		collect_free_vars(node.get("body"), local_names, outer_vars, captures, seen)
+
+# ─── Closure Invoke ────────────────────────────────────────────────
+
+*emit_closure_invoke(b, closure_val, args)
+	arg_regs is []
+	if args isnt none
+		for arg in args
+			arg_regs.push(emit_expression(b, arg))
+	nargs is arg_regs.length()
+	if nargs > 0
+		arr is fresh_reg(b)
+		emit_indent(b, '{arr} = alloca [{nargs} x %CoralValue*]')
+		idx is 0
+		for ar in arg_regs
+			gep is fresh_reg(b)
+			emit_indent(b, '{gep} = getelementptr [{nargs} x %CoralValue*], [{nargs} x %CoralValue*]* {arr}, i64 0, i64 {idx}')
+			emit_indent(b, 'store %CoralValue* {ar}, %CoralValue** {gep}')
+			idx is idx + 1
+		p_reg is fresh_reg(b)
+		emit_indent(b, '{p_reg} = bitcast [{nargs} x %CoralValue*]* {arr} to %CoralValue**')
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_closure_invoke(%CoralValue* {closure_val}, %CoralValue** {p_reg}, i64 {nargs})')
+		return r
+	else
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_closure_invoke(%CoralValue* {closure_val}, %CoralValue** null, i64 0)')
+		return r
+
+# ─── Match Expression ──────────────────────────────────────────────
+
+*emit_match(b, expr)
+	match_val is emit_expression(b, expr.get("value"))
+	cont_bb is fresh_bb(b, "match_cont")
+	arms is expr.get("arms")
+	default is expr.get("default")
+	phi_entries is []
+
+	if arms isnt none
+		idx is 0
+		while idx < arms.length()
+			arm is arms[idx]
+			check_bb is fresh_bb(b, "match_check")
+			body_bb is fresh_bb(b, "match_body")
+			next_bb is fresh_bb(b, "match_next")
+			if idx > 0
+				none
+			else
+				emit_br(b, check_bb)
+			begin_bb(b, check_bb)
+			# Emit pattern check
+			pattern is arm.get("pattern")
+			cond_reg is emit_pattern_check(b, pattern, match_val)
+			emit_br_cond(b, cond_reg, body_bb, next_bb)
+			begin_bb(b, body_bb)
+			# Bind pattern vars
+			emit_pattern_bind(b, pattern, match_val)
+			body_result is emit_block(b, arm.get("body"))
+			body_end_bb is b.get("current_bb")
+			phi_entries.push(map("val" is body_result, "bb" is body_end_bb))
+			emit_br(b, cont_bb)
+			begin_bb(b, next_bb)
+			idx is idx + 1
+
+	# Default arm
+	if default isnt none
+		default_result is emit_block(b, default)
+		default_end_bb is b.get("current_bb")
+		phi_entries.push(map("val" is default_result, "bb" is default_end_bb))
+		emit_br(b, cont_bb)
+	else
+		# No default: emit unit
+		fallthrough is fresh_reg(b)
+		emit_indent(b, '{fallthrough} = call %CoralValue* @coral_make_unit()')
+		fallthrough_bb is b.get("current_bb")
+		phi_entries.push(map("val" is fallthrough, "bb" is fallthrough_bb))
+		emit_br(b, cont_bb)
+
+	begin_bb(b, cont_bb)
+	if phi_entries.length() is 1
+		return phi_entries[0].get("val")
+	# Build phi
+	phi is fresh_reg(b)
+	phi_parts is []
+	for entry in phi_entries
+		phi_parts.push('[ {entry.get("val")}, %{entry.get("bb")} ]')
+	emit_indent(b, '{phi} = phi %CoralValue* {join(phi_parts, ", ")}')
+	return phi
+
+*emit_pattern_check(b, pattern, val)
+	if pattern is none
+		return "true"
+	kind is pattern.get("kind")
+	if kind is "wildcard" or kind is "identifier"
+		return "true"
+	if kind is "integer"
+		lit is fresh_reg(b)
+		emit_indent(b, '{lit} = call %CoralValue* @coral_make_number(double {pattern.get("value")}.0)')
+		eq is fresh_reg(b)
+		emit_indent(b, '{eq} = call %CoralValue* @coral_value_equals(%CoralValue* {val}, %CoralValue* {lit})')
+		return value_to_bool(b, eq)
+	if kind is "float"
+		lit is fresh_reg(b)
+		emit_indent(b, '{lit} = call %CoralValue* @coral_make_number(double {pattern.get("value")})')
+		eq is fresh_reg(b)
+		emit_indent(b, '{eq} = call %CoralValue* @coral_value_equals(%CoralValue* {val}, %CoralValue* {lit})')
+		return value_to_bool(b, eq)
+	if kind is "bool"
+		bval is 0
+		if pattern.get("value")
+			bval is 1
+		lit is fresh_reg(b)
+		emit_indent(b, '{lit} = call %CoralValue* @coral_make_bool(i8 {bval})')
+		eq is fresh_reg(b)
+		emit_indent(b, '{eq} = call %CoralValue* @coral_value_equals(%CoralValue* {val}, %CoralValue* {lit})')
+		return value_to_bool(b, eq)
+	if kind is "string"
+		lit is emit_string_value(b, pattern.get("value"))
+		eq is fresh_reg(b)
+		emit_indent(b, '{eq} = call %CoralValue* @coral_value_equals(%CoralValue* {val}, %CoralValue* {lit})')
+		return value_to_bool(b, eq)
+	if kind is "constructor"
+		tag_name is pattern.get("name")
+		tag_str is intern_string(b, tag_name)
+		tag_len is tag_name.length()
+		tag_arr is tag_len + 1
+		tag_ptr is fresh_reg(b)
+		emit_indent(b, '{tag_ptr} = getelementptr [{tag_arr} x i8], [{tag_arr} x i8]* {tag_str}, i64 0, i64 0')
+		is_tag is fresh_reg(b)
+		emit_indent(b, '{is_tag} = call %CoralValue* @coral_tagged_is_tag(%CoralValue* {val}, i8* {tag_ptr}, i64 {tag_len})')
+		return value_to_bool(b, is_tag)
+	return "true"
+
+*emit_pattern_bind(b, pattern, val)
+	if pattern is none
+		return none
+	kind is pattern.get("kind")
+	if kind is "identifier"
+		name is pattern.get("name")
+		existing is b.get("variables").get(name)
+		if existing isnt none
+			emit_indent(b, 'store %CoralValue* {val}, %CoralValue** {existing}')
+		else
+			alloca_r is emit_deferred_alloca(b)
+			emit_indent(b, 'store %CoralValue* {val}, %CoralValue** {alloca_r}')
+			b.get("variables").set(name, alloca_r)
+	elif kind is "constructor"
+		fields is pattern.get("fields")
+		if fields isnt none
+			idx is 0
+			for f in fields
+				field_val is fresh_reg(b)
+				idx_val is fresh_reg(b)
+				emit_indent(b, '{idx_val} = call %CoralValue* @coral_make_number(double {idx}.0)')
+				emit_indent(b, '{field_val} = call %CoralValue* @coral_tagged_get_field(%CoralValue* {val}, %CoralValue* {idx_val})')
+				emit_pattern_bind(b, f, field_val)
+				idx is idx + 1
+
+# ─── List / Map Literals ──────────────────────────────────────────
+
+*emit_list(b, expr)
+	items is expr.get("items")
+	if items is none or items.length() is 0
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_list(%CoralValue** null, i64 0)')
+		return r
+	# Emit each item
+	item_regs is []
+	for item in items
+		item_regs.push(emit_expression(b, item))
+	n is item_regs.length()
+	arr is fresh_reg(b)
+	emit_indent(b, '{arr} = alloca [{n} x %CoralValue*]')
+	idx is 0
+	for ir in item_regs
+		gep is fresh_reg(b)
+		emit_indent(b, '{gep} = getelementptr [{n} x %CoralValue*], [{n} x %CoralValue*]* {arr}, i64 0, i64 {idx}')
+		emit_indent(b, 'store %CoralValue* {ir}, %CoralValue** {gep}')
+		idx is idx + 1
+	p_reg is fresh_reg(b)
+	emit_indent(b, '{p_reg} = bitcast [{n} x %CoralValue*]* {arr} to %CoralValue**')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_list(%CoralValue** {p_reg}, i64 {n})')
+	return r
+
+*emit_map_lit(b, expr)
+	entries is expr.get("entries")
+	if entries is none or entries.length() is 0
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_map(%MapEntry* null, i64 0)')
+		return r
+	n is entries.length()
+	arr is fresh_reg(b)
+	emit_indent(b, '{arr} = alloca [{n} x %MapEntry]')
+	idx is 0
+	for entry in entries
+		key is emit_expression(b, entry[0])
+		val is emit_expression(b, entry[1])
+		gep_key is fresh_reg(b)
+		emit_indent(b, '{gep_key} = getelementptr [{n} x %MapEntry], [{n} x %MapEntry]* {arr}, i64 0, i64 {idx}, i32 0')
+		emit_indent(b, 'store %CoralValue* {key}, %CoralValue** {gep_key}')
+		gep_val is fresh_reg(b)
+		emit_indent(b, '{gep_val} = getelementptr [{n} x %MapEntry], [{n} x %MapEntry]* {arr}, i64 0, i64 {idx}, i32 1')
+		emit_indent(b, 'store %CoralValue* {val}, %CoralValue** {gep_val}')
+		idx is idx + 1
+	p_reg is fresh_reg(b)
+	emit_indent(b, '{p_reg} = bitcast [{n} x %MapEntry]* {arr} to %MapEntry*')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_map(%MapEntry* {p_reg}, i64 {n})')
+	return r
+
+# ─── Error Handling ────────────────────────────────────────────────
+
+*emit_error_propagate(b, expr)
+	val is emit_expression(b, expr.get("expr"))
+	is_err is fresh_reg(b)
+	emit_indent(b, '{is_err} = call i8 @coral_is_err(%CoralValue* {val})')
+	is_err_i1 is fresh_reg(b)
+	emit_indent(b, '{is_err_i1} = trunc i8 {is_err} to i1')
+	err_bb is fresh_bb(b, "err_propagate")
+	ok_bb is fresh_bb(b, "err_ok")
+	emit_br_cond(b, is_err_i1, err_bb, ok_bb)
+	begin_bb(b, err_bb)
+	emit_indent(b, 'ret %CoralValue* {val}')
+	begin_bb(b, ok_bb)
+	return val
+
+*emit_error_value(b, expr)
+	path is expr.get("path")
+	name is "Error"
+	if path isnt none
+		if path.length() > 0
+			name is path[0]
+			idx is 1
+			while idx < path.length()
+				name is name + "." + path[idx]
+				idx is idx + 1
+	str_global is intern_string(b, name)
+	name_len is name.length()
+	name_arr is name_len + 1
+	name_ptr is fresh_reg(b)
+	emit_indent(b, '{name_ptr} = getelementptr [{name_arr} x i8], [{name_arr} x i8]* {str_global}, i64 0, i64 0')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_error(i32 0, i8* {name_ptr}, i64 {name_len})')
+	return r
+
+# ─── Helpers ───────────────────────────────────────────────────────
+
+*emit_string_value(b, s)
+	str_global is intern_string(b, s)
+	slen is s.length()
+	sarr is slen + 1
+	p_reg is fresh_reg(b)
+	emit_indent(b, '{p_reg} = getelementptr [{sarr} x i8], [{sarr} x i8]* {str_global}, i64 0, i64 0')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_make_string(i8* {p_reg}, i64 {slen})')
+	return r
+
+*value_to_bool(b, val)
+	raw is fresh_reg(b)
+	emit_indent(b, '{raw} = call i8 @coral_value_as_bool(%CoralValue* {val})')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = trunc i8 {raw} to i1')
+	return r

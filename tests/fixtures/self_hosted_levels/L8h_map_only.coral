@@ -1,0 +1,4 @@
+# Just map creation and get
+*main()
+	pair is map("first" is 1, "second" is 2)
+	log(pair.get("first"))

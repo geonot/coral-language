@@ -1,0 +1,10 @@
+# Test nested scope access
+*test_scope()
+	x is 10
+	if x > 5
+		y is x + 1
+		log(y)
+	return x
+
+*main()
+	log(test_scope())

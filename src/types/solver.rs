@@ -234,12 +234,22 @@ pub fn solve_constraints(
             ConstraintKind::NumericAt(ty, span) => enforce_numeric(ty.clone(), graph, *span),
             ConstraintKind::BooleanAt(ty, span) => enforce_boolean(ty.clone(), graph, *span),
             ConstraintKind::IterableAt(container, elem, span) => {
-                unify(
-                    container.clone(),
-                    TypeId::List(Box::new(elem.clone())),
-                    graph,
-                    *span,
-                )
+                let resolved_container = resolve(container.clone(), graph);
+                match &resolved_container {
+                    // For maps, iterating yields keys
+                    TypeId::Map(key, _val) => unify(elem.clone(), *key.clone(), graph, *span),
+                    // For Any/Unknown, the element type is also Any/Unknown
+                    TypeId::Primitive(Primitive::Any) | TypeId::Unknown => {
+                        unify(elem.clone(), resolved_container.clone(), graph, *span)
+                    }
+                    // For lists or anything else, default to List(elem)
+                    _ => unify(
+                        container.clone(),
+                        TypeId::List(Box::new(elem.clone())),
+                        graph,
+                        *span,
+                    ),
+                }
             }
             ConstraintKind::CallableAt(func, args, ret, span) => {
                 solve_callable(func, args, ret, graph, *span)
@@ -249,12 +259,19 @@ pub fn solve_constraints(
             ConstraintKind::Numeric(ty) => enforce_numeric(ty.clone(), graph, dummy),
             ConstraintKind::Boolean(ty) => enforce_boolean(ty.clone(), graph, dummy),
             ConstraintKind::Iterable(container, elem) => {
-                unify(
-                    container.clone(),
-                    TypeId::List(Box::new(elem.clone())),
-                    graph,
-                    dummy,
-                )
+                let resolved_container = resolve(container.clone(), graph);
+                match &resolved_container {
+                    TypeId::Map(key, _val) => unify(elem.clone(), *key.clone(), graph, dummy),
+                    TypeId::Primitive(Primitive::Any) | TypeId::Unknown => {
+                        unify(elem.clone(), resolved_container.clone(), graph, dummy)
+                    }
+                    _ => unify(
+                        container.clone(),
+                        TypeId::List(Box::new(elem.clone())),
+                        graph,
+                        dummy,
+                    ),
+                }
             }
             ConstraintKind::Callable(func, args, ret) => {
                 solve_callable(func, args, ret, graph, dummy)
@@ -364,6 +381,13 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
         // Any unifies with everything (dynamic typing escape hatch).
         (TypeId::Primitive(Primitive::Any), _) | (_, TypeId::Primitive(Primitive::Any)) => Ok(()),
 
+        // None unifies with Unit (both represent absence of value).
+        (TypeId::Primitive(Primitive::None), TypeId::Primitive(Primitive::Unit))
+        | (TypeId::Primitive(Primitive::Unit), TypeId::Primitive(Primitive::None)) => Ok(()),
+
+        // None unifies with any type (nullable/option-like semantics for dynamic language).
+        (TypeId::Primitive(Primitive::None), _) | (_, TypeId::Primitive(Primitive::None)) => Ok(()),
+
         // Unknown is permissive (for forward compatibility with untyped constructs).
         (TypeId::Unknown, _) | (_, TypeId::Unknown) => Ok(()),
 
@@ -377,10 +401,20 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
             }
         }
 
-        // ADT unification: same name unifies.
-        (TypeId::Adt(a_name), TypeId::Adt(b_name)) => {
+        // ADT unification: same name + recursively unify type arguments.
+        (TypeId::Adt(a_name, a_args), TypeId::Adt(b_name, b_args)) => {
             if a_name == b_name {
-                Ok(())
+                // If one side has no type args (non-parameterized usage), accept it
+                if a_args.is_empty() || b_args.is_empty() {
+                    Ok(())
+                } else if a_args.len() != b_args.len() {
+                    Err(TypeError::mismatch(&ra, &rb, span))
+                } else {
+                    for (aa, ba) in a_args.iter().zip(b_args.iter()) {
+                        unify(aa.clone(), ba.clone(), graph, span)?;
+                    }
+                    Ok(())
+                }
             } else {
                 Err(TypeError::mismatch(&ra, &rb, span))
             }
@@ -431,7 +465,8 @@ fn occurs(var: TypeVarId, ty: &TypeId, graph: &mut TypeGraph) -> bool {
         TypeId::Func(args, ret) => {
             args.iter().any(|a| occurs(var, a, graph)) || occurs(var, &ret, graph)
         }
-        TypeId::Adt(_) | _ => false,
+        TypeId::Adt(_, args) => args.iter().any(|a| occurs(var, a, graph)),
+        _ => false,
     }
 }
 
@@ -454,6 +489,10 @@ pub fn resolve(ty: TypeId, graph: &mut TypeGraph) -> TypeId {
         TypeId::Func(args, ret) => {
             let args_r: Vec<TypeId> = args.into_iter().map(|a| resolve(a, graph)).collect();
             TypeId::Func(args_r, Box::new(resolve(*ret, graph)))
+        }
+        TypeId::Adt(name, args) => {
+            let args_r: Vec<TypeId> = args.into_iter().map(|a| resolve(a, graph)).collect();
+            TypeId::Adt(name, args_r)
         }
         other => other,
     }

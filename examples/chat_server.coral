@@ -14,7 +14,7 @@ store User
     id
     username
     created_at
-    
+
     *User(username)
         id is generate_id()
         created_at is time.now()
@@ -25,16 +25,16 @@ store Room
     users ? []
     messages ? []
     max_history ? 100
-    
+
     *add_user(user)
         users.contains(user.id) ? ! err Chat:UsernameTaken
         users.push(user.id)
         true
-    
+
     *remove_user(user)
         users.remove(user.id)
         true
-    
+
     *add_message(user, text)
         msg is map(
             'user' is user.username,
@@ -42,11 +42,11 @@ store Room
             'time' is time.now()
         )
         messages.push(msg)
-        
+
         # Trim history
         messages.length > max_history ?
             messages is messages.slice(-max_history)
-        
+
         msg
 
 # Client connection actor - one per connected user
@@ -55,11 +55,11 @@ actor ClientConnection
     &user
     conn
     current_room
-    
+
     @receive(data)
         # Parse command from client
         command is parse_command(data)
-        
+
         match command.type
             'join' ? handle_join(command.room)
             'leave' ? handle_leave()
@@ -68,57 +68,57 @@ actor ClientConnection
             'list' ? handle_list()
             'quit' ? handle_quit()
                 ! send_error('Unknown command: {command.type}')
-    
+
     @handle_join(room_name)
         current_room ? 
             server.leave_room(user, current_room)
-        
+
         result is server.join_room(user, room_name)
         result.is_err ?
             send_error('Failed to join room: {result.err}')
-          ! 
+            ! 
             current_room is room_name
             send_ok('Joined room: {room_name}')
-            
+
             # Send recent history
             history is server.get_room_history(room_name)
             history.each(msg)
                 send_message(msg)
-    
+
     @handle_leave()
         current_room ?
             server.leave_room(user, current_room)
             send_ok('Left room: {current_room}')
             current_room is ()
-          ! send_error('Not in a room')
-    
+            ! send_error('Not in a room')
+
     @handle_say(message)
         current_room ?
             server.broadcast(current_room, user, message)
-          ! send_error('Join a room first with /join <room>')
-    
+            ! send_error('Join a room first with /join <room>')
+
     @handle_whisper(target_name, message)
         server.whisper(user, target_name, message) !
             send_error('User not found: {target_name}')
-    
+
     @handle_list()
         rooms is server.list_rooms()
         send_ok('Available rooms:')
         rooms.each(room)
             send_message('  - {room.name} ({room.users.length} users)')
-    
+
     @handle_quit()
         current_room ?
             server.leave_room(user, current_room)
         server.disconnect(user)
         conn.close()
-    
+
     *send_ok(text)
         conn.send('[OK] {text}\n')
-    
+
     *send_error(text)
         conn.send('[ERROR] {text}\n')
-    
+
     *send_message(msg)
         conn.send('[{msg.user}] {msg.text}\n')
 
@@ -129,115 +129,115 @@ store actor ChatServer
     rooms ? map()
     users ? map()
     connections ? map()
-    
+
     *ChatServer(port)
         logger is Logger('chat.log')
-        
+
         # Create default room
         rooms.set('general', Room('general'))
-    
+
     @start()
         socket is net.tcp_listen('0.0.0.0', port) !
             logger.write('ERROR', 'Failed to bind: {err}')
             return err
-        
+
         logger.write('INFO', 'Chat server started on port {port}')
-        
+
         loop
             conn is socket.accept() ! continue
             handle_new_connection(conn)
-    
+
     @handle_new_connection(conn)
         # Read username from first message
         data is conn.read(1024)
         username is data.trim()
-        
+
         # Check if username is taken
         users.has(username) ?
             conn.send('ERROR: Username taken\n')
             conn.close()
             return
-        
+
         # Create user and connection actor
         user is User(username)
         users.set(username, user)
-        
+
         client is ClientConnection(
             server is self,
             user is user,
             conn is conn
         )
         connections.set(username, client)
-        
+
         conn.send('Welcome, {username}! Type /help for commands.\n')
         logger.write('INFO', 'User connected: {username}')
-        
+
         # Start receiving messages
         loop
             data is conn.read(4096)
             data.is_err ? break
             data.length is 0 ? break
             client.receive(data)
-    
+
     @join_room(user, room_name)
         # Create room if doesn't exist
         rooms.has(room_name) ?
             room is rooms.get(room_name)
-          ! 
+            ! 
             room is Room(room_name)
             rooms.set(room_name, room)
-        
+
         room.add_user(user) ! return err
-        
+
         # Notify others
         broadcast_system(room_name, '{user.username} joined the room')
-        
+
         logger.write('INFO', '{user.username} joined {room_name}')
         true
-    
+
     @leave_room(user, room_name)
         room is rooms.get(room_name) ! return err Chat:RoomNotFound
         room.remove_user(user)
-        
+
         broadcast_system(room_name, '{user.username} left the room')
         logger.write('INFO', '{user.username} left {room_name}')
         true
-    
+
     @broadcast(room_name, from_user, message)
         room is rooms.get(room_name) ! return err Chat:RoomNotFound
-        
+
         # Add to history
         msg is room.add_message(from_user, message)
-        
+
         # Send to all users in room
         room.users.each(user_id)
             user is users.values().find($.id is user_id) ! continue
             client is connections.get(user.username) ! continue
             client.send_message(msg)
-        
+
         logger.write('CHAT', '[{room_name}] {from_user.username}: {message}')
-    
+
     @broadcast_system(room_name, message)
         room is rooms.get(room_name) ! return
-        
+
         msg is map('user' is 'SYSTEM', 'text' is message, 'time' is time.now())
-        
+
         room.users.each(user_id)
             user is users.values().find($.id is user_id) ! continue
             client is connections.get(user.username) ! continue
             client.send_message(msg)
-    
+
     @whisper(from_user, to_username, message)
         target is users.get(to_username) ! return err Chat:UserNotFound
         client is connections.get(to_username) ! return err Chat:UserNotFound
-        
+
         msg is map(
             'user' is '{from_user.username} (whisper)',
             'text' is message,
             'time' is time.now()
         )
         client.send_message(msg)
-        
+
         # Also send to sender
         sender_client is connections.get(from_user.username)
         sender_client ?
@@ -246,14 +246,14 @@ store actor ChatServer
                 'text' is message,
                 'time' is time.now()
             ))
-    
+
     @list_rooms()
         rooms.values()
-    
+
     @get_room_history(room_name)
         room is rooms.get(room_name) ! return []
         room.messages.slice(-20)  # Last 20 messages
-    
+
     @disconnect(user)
         users.remove(user.username)
         connections.remove(user.username)
@@ -262,11 +262,11 @@ store actor ChatServer
 # Command parser
 *parse_command(data)
     text is data.trim()
-    
+
     text.starts_with('/') ?
         parts is text.slice(1).split(' ')
         cmd is parts.get(0)
-        
+
         match cmd
             'join' ? map('type' is 'join', 'room' is parts.get(1))
             'leave' ? map('type' is 'leave')
@@ -278,7 +278,7 @@ store actor ChatServer
             'exit' ? map('type' is 'quit')
             'help' ? map('type' is 'help')
                 ! map('type' is 'unknown', 'raw' is cmd)
-      ! map('type' is 'say', 'message' is text)
+        ! map('type' is 'say', 'message' is text)
 
 # Logger actor
 actor Logger
@@ -298,7 +298,7 @@ id_counter is 0
 
 *main()
     port is 9000
-    
+
     log('=================================')
     log('   Coral Chat Server v1.0')
     log('=================================')
@@ -306,6 +306,6 @@ id_counter is 0
     log('Starting server on port {port}...')
     log('Connect with: telnet localhost {port}')
     log('')
-    
+
     server is ChatServer(port)
     server.start()

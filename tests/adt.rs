@@ -18,7 +18,19 @@ fn expect_compile_error(source: &str, expected_substring: &str) {
     let result = compiler.compile_to_ir(source);
 
     match result {
-        Ok(_) => panic!("Expected compile error containing '{}', but compilation succeeded", expected_substring),
+        Ok(_) => {
+            // TS-9: Exhaustiveness is now a warning, not an error.
+            // Check if warnings contain the expected substring via compile_with_warnings.
+            let (_, warnings) = compiler.compile_to_ir_with_warnings(source)
+                .expect("Should compile (checking warnings)");
+            let has_warning = warnings.iter().any(|w| w.contains(expected_substring));
+            if !has_warning {
+                panic!(
+                    "Expected compile error or warning containing '{}', but compilation succeeded with no matching warning. Warnings: {:?}",
+                    expected_substring, warnings
+                );
+            }
+        }
         Err(e) => {
             let msg = format!("{:?}", e);
             assert!(

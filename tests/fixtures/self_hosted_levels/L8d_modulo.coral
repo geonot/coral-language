@@ -1,0 +1,7 @@
+# L8d: modulo and less-than-or-equal
+*is_even(n)
+	return n % 2 is 0
+
+*main()
+	log(is_even(4))
+	log(is_even(3))

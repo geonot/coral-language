@@ -1,0 +1,665 @@
+# Self-hosted Coral Lowering Pass
+#
+# Desugars placeholder expressions ($, $1, $2, ...) into lambda expressions.
+# This mirrors the Rust lower.rs pass: when a call argument contains a
+# placeholder, it wraps that argument into a lambda.
+#
+# Input:  AST (program map from parser)
+# Output: AST (same shape, placeholders replaced with lambdas)
+#
+# Convention: AST nodes are maps with a "kind" field.
+# Spans are maps with "start" and "end" fields.
+
+# ─── Error Helper ───────────────────────────────────────────────────
+
+*make_error(message, span)
+	return map("ok" is false, "message" is message, "span" is span)
+
+*make_ok(value)
+	return map("ok" is true, "value" is value)
+
+# ─── Placeholder Info ───────────────────────────────────────────────
+# Tracks which placeholder indices appear in an expression subtree.
+
+*make_placeholder_info(index, span)
+	normalized is normalize_index(index)
+	return map("indexes" is [normalized], "occurrences" is [[normalized, span]], "span" is span)
+
+*normalize_index(index)
+	if index is 0
+		return 1
+	return index
+
+*merge_placeholder_info(a, b)
+	if a is none and b is none
+		return none
+	if a is none
+		return b
+	if b is none
+		return a
+	# Merge indexes (simple list-based set)
+	merged_indexes is []
+	for idx in a.get("indexes")
+		merged_indexes.push(idx)
+	for idx in b.get("indexes")
+		found is false
+		for existing in merged_indexes
+			if existing is idx
+				found is true
+				break
+		if !found
+			merged_indexes.push(idx)
+	# Merge occurrences
+	merged_occ is []
+	for occ in a.get("occurrences")
+		merged_occ.push(occ)
+	for occ in b.get("occurrences")
+		merged_occ.push(occ)
+	# Merge spans
+	a_span is a.get("span")
+	b_span is b.get("span")
+	start is a_span.get("start")
+	end is b_span.get("end")
+	if b_span.get("start") < start
+		start is b_span.get("start")
+	if a_span.get("end") > end
+		end is a_span.get("end")
+	merged_span is map("start" is start, "end" is end)
+	return map("indexes" is merged_indexes, "occurrences" is merged_occ, "span" is merged_span)
+
+*placeholder_param_count(info)
+	max_idx is 0
+	for idx in info.get("indexes")
+		if idx > max_idx
+			max_idx is idx
+	return max_idx
+
+*validate_placeholders(info)
+	max_idx is placeholder_param_count(info)
+	if max_idx is 0
+		return make_error("invalid placeholder usage", info.get("span"))
+	# Check contiguous: all indices 1..max must exist
+	idx is 1
+	while idx <= max_idx
+		found is false
+		for existing in info.get("indexes")
+			if existing is idx
+				found is true
+				break
+		if !found
+			return make_error('missing placeholder ${idx} (placeholders must be contiguous from $ or $1)', info.get("span"))
+		idx is idx + 1
+	return make_ok(none)
+
+# ─── Expression Lowering Result ─────────────────────────────────────
+# Wraps an expression and optional placeholder info that bubbles up.
+
+*make_lowering(expr, placeholder)
+	return map("expr" is expr, "placeholder" is placeholder)
+
+*expect_no_placeholders(lowering, message)
+	if lowering.get("placeholder") is none
+		return make_ok(lowering.get("expr"))
+	return make_error(message, lowering.get("placeholder").get("span"))
+
+PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call arguments"
+
+# ─── Main Entry Point ───────────────────────────────────────────────
+
+*lower(program)
+	return lower_program(program)
+
+*lower_program(program)
+	items is program.get("items")
+	lowered_items is []
+	for item in items
+		result is lower_item(item)
+		if result.get("ok") is false
+			return result
+		lowered_items.push(result.get("value"))
+	return make_ok(map("kind" is "program", "items" is lowered_items, "span" is program.get("span")))
+
+# ─── Item Lowering ──────────────────────────────────────────────────
+
+*lower_item(item)
+	kind is item.get("kind")
+	if kind is "binding"
+		return lower_binding_item(item)
+	if kind is "function"
+		return lower_function_item(item)
+	if kind is "type_def"
+		return lower_type_item(item)
+	if kind is "store_def"
+		return lower_store_item(item)
+	if kind is "extern_function"
+		return make_ok(item)
+	if kind is "error_def"
+		return make_ok(item)
+	if kind is "trait_def"
+		return make_ok(item)
+	if kind is "expression_stmt"
+		lowered is lower_expression(item.get("expr"))
+		if lowered.get("ok") is false
+			return lowered
+		lr is lowered.get("value")
+		result is expect_no_placeholders(lr, PLACEHOLDER_MSG)
+		if result.get("ok") is false
+			return result
+		return make_ok(map("kind" is "expression_stmt", "expr" is result.get("value")))
+	# Unknown item kinds pass through
+	return make_ok(item)
+
+*lower_binding_item(binding)
+	lowered is lower_expression(binding.get("value"))
+	if lowered.get("ok") is false
+		return lowered
+	lr is lowered.get("value")
+	result is expect_no_placeholders(lr, PLACEHOLDER_MSG)
+	if result.get("ok") is false
+		return result
+	return make_ok(map("kind" is "binding", "name" is binding.get("name"), "value" is result.get("value"), "span" is binding.get("span")))
+
+*lower_function_item(func)
+	body_result is lower_block(func.get("body"))
+	if body_result.get("ok") is false
+		return body_result
+	return make_ok(map("kind" is "function", "name" is func.get("name"), "params" is func.get("params"), "body" is body_result.get("value"), "func_kind" is func.get("func_kind"), "span" is func.get("span")))
+
+*lower_type_item(ty)
+	# Lower fields with defaults
+	lowered_fields is []
+	for field in ty.get("fields")
+		result is lower_field(field)
+		if result.get("ok") is false
+			return result
+		lowered_fields.push(result.get("value"))
+	# Lower methods
+	lowered_methods is []
+	for method in ty.get("methods")
+		result is lower_function_item(method)
+		if result.get("ok") is false
+			return result
+		lowered_methods.push(result.get("value"))
+	return make_ok(map("kind" is "type_def", "name" is ty.get("name"), "traits" is ty.get("traits"), "fields" is lowered_fields, "methods" is lowered_methods, "variants" is ty.get("variants"), "span" is ty.get("span")))
+
+*lower_store_item(store)
+	lowered_fields is []
+	for field in store.get("fields")
+		result is lower_field(field)
+		if result.get("ok") is false
+			return result
+		lowered_fields.push(result.get("value"))
+	lowered_methods is []
+	for method in store.get("methods")
+		result is lower_function_item(method)
+		if result.get("ok") is false
+			return result
+		lowered_methods.push(result.get("value"))
+	return make_ok(map("kind" is "store_def", "name" is store.get("name"), "traits" is store.get("traits"), "fields" is lowered_fields, "methods" is lowered_methods, "is_actor" is store.get("is_actor"), "is_persistent" is store.get("is_persistent"), "span" is store.get("span")))
+
+*lower_field(field)
+	default_val is field.get("default")
+	if default_val is none
+		return make_ok(field)
+	lowered is lower_expression(default_val)
+	if lowered.get("ok") is false
+		return lowered
+	lr is lowered.get("value")
+	result is expect_no_placeholders(lr, PLACEHOLDER_MSG)
+	if result.get("ok") is false
+		return result
+	return make_ok(map("kind" is "field", "name" is field.get("name"), "is_ref" is field.get("is_ref"), "default" is result.get("value"), "span" is field.get("span")))
+
+# ─── Block Lowering ─────────────────────────────────────────────────
+
+*lower_block(block)
+	stmts is block.get("statements")
+	lowered_stmts is []
+	for stmt in stmts
+		result is lower_statement(stmt)
+		if result.get("ok") is false
+			return result
+		lowered_stmts.push(result.get("value"))
+	lowered_value is none
+	val is block.get("value")
+	if val isnt none
+		lowered is lower_expression(val)
+		if lowered.get("ok") is false
+			return lowered
+		lr is lowered.get("value")
+		result is expect_no_placeholders(lr, PLACEHOLDER_MSG)
+		if result.get("ok") is false
+			return result
+		lowered_value is result.get("value")
+	return make_ok(map("kind" is "block", "statements" is lowered_stmts, "value" is lowered_value, "span" is block.get("span")))
+
+# ─── Statement Lowering ────────────────────────────────────────────
+
+*lower_statement(stmt)
+	kind is stmt.get("kind")
+	if kind is "binding"
+		return lower_binding_item(stmt)
+	if kind is "expression_stmt"
+		lowered is lower_expression(stmt.get("expr"))
+		if lowered.get("ok") is false
+			return lowered
+		lr is lowered.get("value")
+		result is expect_no_placeholders(lr, PLACEHOLDER_MSG)
+		if result.get("ok") is false
+			return result
+		return make_ok(map("kind" is "expression_stmt", "expr" is result.get("value")))
+	if kind is "return"
+		lowered is lower_expression(stmt.get("expr"))
+		if lowered.get("ok") is false
+			return lowered
+		lr is lowered.get("value")
+		result is expect_no_placeholders(lr, PLACEHOLDER_MSG)
+		if result.get("ok") is false
+			return result
+		return make_ok(map("kind" is "return", "expr" is result.get("value"), "span" is stmt.get("span")))
+	if kind is "if"
+		return lower_if_stmt(stmt)
+	if kind is "while"
+		return lower_while_stmt(stmt)
+	if kind is "for"
+		return lower_for_stmt(stmt)
+	if kind is "break"
+		return make_ok(stmt)
+	if kind is "continue"
+		return make_ok(stmt)
+	if kind is "field_assign"
+		return lower_field_assign_stmt(stmt)
+	if kind is "guard"
+		return lower_guard_stmt(stmt)
+	# Pass through unknown statement kinds
+	return make_ok(stmt)
+
+*lower_if_stmt(stmt)
+	lowered_cond is lower_expression(stmt.get("condition"))
+	if lowered_cond.get("ok") is false
+		return lowered_cond
+	lr_cond is lowered_cond.get("value")
+	cond_result is expect_no_placeholders(lr_cond, PLACEHOLDER_MSG)
+	if cond_result.get("ok") is false
+		return cond_result
+	body_result is lower_block(stmt.get("body"))
+	if body_result.get("ok") is false
+		return body_result
+	# Lower elif branches
+	lowered_elifs is []
+	elifs is stmt.get("elif_branches")
+	if elifs isnt none
+		for elif_branch in elifs
+			elif_cond_lowered is lower_expression(elif_branch[0])
+			if elif_cond_lowered.get("ok") is false
+				return elif_cond_lowered
+			lr_ec is elif_cond_lowered.get("value")
+			ec_result is expect_no_placeholders(lr_ec, PLACEHOLDER_MSG)
+			if ec_result.get("ok") is false
+				return ec_result
+			elif_body_result is lower_block(elif_branch[1])
+			if elif_body_result.get("ok") is false
+				return elif_body_result
+			lowered_elifs.push([ec_result.get("value"), elif_body_result.get("value")])
+	# Lower else body
+	lowered_else is none
+	else_body is stmt.get("else_body")
+	if else_body isnt none
+		else_result is lower_block(else_body)
+		if else_result.get("ok") is false
+			return else_result
+		lowered_else is else_result.get("value")
+	return make_ok(map("kind" is "if", "condition" is cond_result.get("value"), "body" is body_result.get("value"), "elif_branches" is lowered_elifs, "else_body" is lowered_else, "span" is stmt.get("span")))
+
+*lower_while_stmt(stmt)
+	lowered_cond is lower_expression(stmt.get("condition"))
+	if lowered_cond.get("ok") is false
+		return lowered_cond
+	lr_cond is lowered_cond.get("value")
+	cond_result is expect_no_placeholders(lr_cond, PLACEHOLDER_MSG)
+	if cond_result.get("ok") is false
+		return cond_result
+	body_result is lower_block(stmt.get("body"))
+	if body_result.get("ok") is false
+		return body_result
+	return make_ok(map("kind" is "while", "condition" is cond_result.get("value"), "body" is body_result.get("value"), "span" is stmt.get("span")))
+
+*lower_for_stmt(stmt)
+	lowered_iter is lower_expression(stmt.get("iterable"))
+	if lowered_iter.get("ok") is false
+		return lowered_iter
+	lr_iter is lowered_iter.get("value")
+	iter_result is expect_no_placeholders(lr_iter, PLACEHOLDER_MSG)
+	if iter_result.get("ok") is false
+		return iter_result
+	body_result is lower_block(stmt.get("body"))
+	if body_result.get("ok") is false
+		return body_result
+	return make_ok(map("kind" is "for", "variable" is stmt.get("variable"), "iterable" is iter_result.get("value"), "body" is body_result.get("value"), "span" is stmt.get("span")))
+
+*lower_field_assign_stmt(stmt)
+	lowered_target is lower_expression(stmt.get("target"))
+	if lowered_target.get("ok") is false
+		return lowered_target
+	lr_target is lowered_target.get("value")
+	target_result is expect_no_placeholders(lr_target, PLACEHOLDER_MSG)
+	if target_result.get("ok") is false
+		return target_result
+	lowered_val is lower_expression(stmt.get("value"))
+	if lowered_val.get("ok") is false
+		return lowered_val
+	lr_val is lowered_val.get("value")
+	val_result is expect_no_placeholders(lr_val, PLACEHOLDER_MSG)
+	if val_result.get("ok") is false
+		return val_result
+	return make_ok(map("kind" is "field_assign", "target" is target_result.get("value"), "field" is stmt.get("field"), "value" is val_result.get("value"), "span" is stmt.get("span")))
+
+*lower_guard_stmt(stmt)
+	lowered_cond is lower_expression(stmt.get("condition"))
+	if lowered_cond.get("ok") is false
+		return lowered_cond
+	lr_cond is lowered_cond.get("value")
+	cond_result is expect_no_placeholders(lr_cond, PLACEHOLDER_MSG)
+	if cond_result.get("ok") is false
+		return cond_result
+	body_result is lower_block(stmt.get("body"))
+	if body_result.get("ok") is false
+		return body_result
+	return make_ok(map("kind" is "guard", "condition" is cond_result.get("value"), "body" is body_result.get("value"), "span" is stmt.get("span")))
+
+# ─── Expression Lowering ───────────────────────────────────────────
+
+*lower_expression(expr)
+	kind is expr.get("kind")
+	# Leaf expressions — no placeholders possible
+	if kind is "unit" or kind is "none" or kind is "identifier" or kind is "integer" or kind is "float" or kind is "bool" or kind is "string_lit"
+		return make_ok(make_lowering(expr, none))
+	# Placeholder — bubble up
+	if kind is "placeholder"
+		info is make_placeholder_info(expr.get("index"), expr.get("span"))
+		return make_ok(make_lowering(expr, info))
+	# Binary
+	if kind is "binary"
+		return lower_binary_expr(expr)
+	# Unary
+	if kind is "unary"
+		return lower_unary_expr(expr)
+	# List
+	if kind is "list"
+		return lower_list_expr(expr)
+	# Map
+	if kind is "map_lit"
+		return lower_map_expr(expr)
+	# Call — special: placeholders in args become lambdas
+	if kind is "call"
+		return lower_call_expr(expr)
+	# Member
+	if kind is "member"
+		return lower_member_expr(expr)
+	# Index
+	if kind is "index"
+		return lower_index_expr(expr)
+	# Ternary
+	if kind is "ternary"
+		return lower_ternary_expr(expr)
+	# Pipeline
+	if kind is "pipeline"
+		return lower_pipeline_expr(expr)
+	# Match
+	if kind is "match"
+		return lower_match_expr(expr)
+	# Lambda — lower body but don't propagate placeholders upward
+	if kind is "lambda"
+		body_result is lower_block(expr.get("body"))
+		if body_result.get("ok") is false
+			return body_result
+		return make_ok(make_lowering(map("kind" is "lambda", "params" is expr.get("params"), "body" is body_result.get("value"), "span" is expr.get("span")), none))
+	# Throw
+	if kind is "throw"
+		inner is lower_expression(expr.get("value"))
+		if inner.get("ok") is false
+			return inner
+		lr is inner.get("value")
+		return make_ok(make_lowering(map("kind" is "throw", "value" is lr.get("expr"), "span" is expr.get("span")), lr.get("placeholder")))
+	# Error propagate
+	if kind is "error_propagate"
+		inner is lower_expression(expr.get("expr"))
+		if inner.get("ok") is false
+			return inner
+		lr is inner.get("value")
+		return make_ok(make_lowering(map("kind" is "error_propagate", "expr" is lr.get("expr"), "span" is expr.get("span")), lr.get("placeholder")))
+	# Error value, inline_asm, etc. — pass through
+	return make_ok(make_lowering(expr, none))
+
+*lower_binary_expr(expr)
+	left_result is lower_expression(expr.get("left"))
+	if left_result.get("ok") is false
+		return left_result
+	right_result is lower_expression(expr.get("right"))
+	if right_result.get("ok") is false
+		return right_result
+	lr_left is left_result.get("value")
+	lr_right is right_result.get("value")
+	merged_ph is merge_placeholder_info(lr_left.get("placeholder"), lr_right.get("placeholder"))
+	new_expr is map("kind" is "binary", "op" is expr.get("op"), "left" is lr_left.get("expr"), "right" is lr_right.get("expr"), "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_unary_expr(expr)
+	inner is lower_expression(expr.get("expr"))
+	if inner.get("ok") is false
+		return inner
+	lr is inner.get("value")
+	new_expr is map("kind" is "unary", "op" is expr.get("op"), "expr" is lr.get("expr"), "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, lr.get("placeholder")))
+
+*lower_list_expr(expr)
+	items is expr.get("items")
+	lowered_items is []
+	merged_ph is none
+	for item in items
+		result is lower_expression(item)
+		if result.get("ok") is false
+			return result
+		lr is result.get("value")
+		lowered_items.push(lr.get("expr"))
+		merged_ph is merge_placeholder_info(merged_ph, lr.get("placeholder"))
+	new_expr is map("kind" is "list", "items" is lowered_items, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_map_expr(expr)
+	entries is expr.get("entries")
+	lowered_entries is []
+	merged_ph is none
+	for entry in entries
+		key_result is lower_expression(entry[0])
+		if key_result.get("ok") is false
+			return key_result
+		val_result is lower_expression(entry[1])
+		if val_result.get("ok") is false
+			return val_result
+		lr_key is key_result.get("value")
+		lr_val is val_result.get("value")
+		lowered_entries.push([lr_key.get("expr"), lr_val.get("expr")])
+		merged_ph is merge_placeholder_info(merged_ph, lr_key.get("placeholder"))
+		merged_ph is merge_placeholder_info(merged_ph, lr_val.get("placeholder"))
+	new_expr is map("kind" is "map_lit", "entries" is lowered_entries, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_call_expr(expr)
+	callee_result is lower_expression(expr.get("callee"))
+	if callee_result.get("ok") is false
+		return callee_result
+	lr_callee is callee_result.get("value")
+	# Placeholders in callee position are an error
+	if lr_callee.get("placeholder") isnt none
+		return make_error("placeholder cannot appear in function position", lr_callee.get("placeholder").get("span"))
+	# Lower each argument; wrap in lambda if it has placeholders
+	args is expr.get("args")
+	lowered_args is []
+	for arg in args
+		result is lower_expression(arg)
+		if result.get("ok") is false
+			return result
+		lr is result.get("value")
+		if lr.get("placeholder") isnt none
+			wrapped is wrap_placeholder_lambda(lr.get("expr"), lr.get("placeholder"))
+			if wrapped.get("ok") is false
+				return wrapped
+			lowered_args.push(wrapped.get("value"))
+		else
+			lowered_args.push(lr.get("expr"))
+	new_expr is map("kind" is "call", "callee" is lr_callee.get("expr"), "args" is lowered_args, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, none))
+
+*lower_member_expr(expr)
+	inner is lower_expression(expr.get("target"))
+	if inner.get("ok") is false
+		return inner
+	lr is inner.get("value")
+	new_expr is map("kind" is "member", "target" is lr.get("expr"), "property" is expr.get("property"), "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, lr.get("placeholder")))
+
+*lower_index_expr(expr)
+	target_result is lower_expression(expr.get("target"))
+	if target_result.get("ok") is false
+		return target_result
+	index_result is lower_expression(expr.get("index"))
+	if index_result.get("ok") is false
+		return index_result
+	lr_target is target_result.get("value")
+	lr_index is index_result.get("value")
+	merged_ph is merge_placeholder_info(lr_target.get("placeholder"), lr_index.get("placeholder"))
+	new_expr is map("kind" is "index", "target" is lr_target.get("expr"), "index" is lr_index.get("expr"), "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_ternary_expr(expr)
+	cond_result is lower_expression(expr.get("condition"))
+	if cond_result.get("ok") is false
+		return cond_result
+	then_result is lower_expression(expr.get("then_branch"))
+	if then_result.get("ok") is false
+		return then_result
+	else_result is lower_expression(expr.get("else_branch"))
+	if else_result.get("ok") is false
+		return else_result
+	lr_c is cond_result.get("value")
+	lr_t is then_result.get("value")
+	lr_e is else_result.get("value")
+	merged_ph is merge_placeholder_info(lr_c.get("placeholder"), lr_t.get("placeholder"))
+	merged_ph is merge_placeholder_info(merged_ph, lr_e.get("placeholder"))
+	new_expr is map("kind" is "ternary", "condition" is lr_c.get("expr"), "then_branch" is lr_t.get("expr"), "else_branch" is lr_e.get("expr"), "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_pipeline_expr(expr)
+	left_result is lower_expression(expr.get("left"))
+	if left_result.get("ok") is false
+		return left_result
+	right_result is lower_expression(expr.get("right"))
+	if right_result.get("ok") is false
+		return right_result
+	lr_left is left_result.get("value")
+	lr_right is right_result.get("value")
+	merged_ph is merge_placeholder_info(lr_left.get("placeholder"), lr_right.get("placeholder"))
+	new_expr is map("kind" is "pipeline", "left" is lr_left.get("expr"), "right" is lr_right.get("expr"), "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_match_expr(expr)
+	# Lower the scrutinee
+	val_result is lower_expression(expr.get("value"))
+	if val_result.get("ok") is false
+		return val_result
+	lr_val is val_result.get("value")
+	# Lower arm bodies
+	arms is expr.get("arms")
+	lowered_arms is []
+	for arm in arms
+		body_result is lower_block(arm.get("body"))
+		if body_result.get("ok") is false
+			return body_result
+		lowered_arms.push(map("pattern" is arm.get("pattern"), "body" is body_result.get("value")))
+	# Lower default arm
+	lowered_default is none
+	default_arm is expr.get("default")
+	if default_arm isnt none
+		default_result is lower_block(default_arm)
+		if default_result.get("ok") is false
+			return default_result
+		lowered_default is default_result.get("value")
+	new_expr is map("kind" is "match", "value" is lr_val.get("expr"), "arms" is lowered_arms, "default" is lowered_default, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, lr_val.get("placeholder")))
+
+# ─── Placeholder Lambda Wrapping ───────────────────────────────────
+
+*wrap_placeholder_lambda(body_expr, info)
+	validation is validate_placeholders(info)
+	if validation.get("ok") is false
+		return validation
+	count is placeholder_param_count(info)
+	# Generate parameter names: _arg0, _arg1, ...
+	params is []
+	names is []
+	idx is 0
+	while idx < count
+		name is '_arg{idx}'
+		params.push(map("kind" is "param", "name" is name, "default" is none, "span" is info.get("span")))
+		names.push(name)
+		idx is idx + 1
+	# Replace placeholder expressions with identifier references
+	replaced_body is replace_placeholders(body_expr, names)
+	body_block is map("kind" is "block", "statements" is [], "value" is replaced_body, "span" is info.get("span"))
+	lambda is map("kind" is "lambda", "params" is params, "body" is body_block, "span" is info.get("span"))
+	return make_ok(lambda)
+
+# ─── Placeholder Replacement ───────────────────────────────────────
+# Recursively replace Placeholder nodes with Identifier nodes.
+
+*replace_placeholders(expr, names)
+	kind is expr.get("kind")
+	if kind is "placeholder"
+		normalized is normalize_index(expr.get("index"))
+		param_idx is normalized - 1
+		name is names[param_idx]
+		return map("kind" is "identifier", "name" is name, "span" is expr.get("span"))
+	if kind is "binary"
+		left is replace_placeholders(expr.get("left"), names)
+		right is replace_placeholders(expr.get("right"), names)
+		return map("kind" is "binary", "op" is expr.get("op"), "left" is left, "right" is right, "span" is expr.get("span"))
+	if kind is "unary"
+		inner is replace_placeholders(expr.get("expr"), names)
+		return map("kind" is "unary", "op" is expr.get("op"), "expr" is inner, "span" is expr.get("span"))
+	if kind is "call"
+		callee is replace_placeholders(expr.get("callee"), names)
+		args is []
+		for arg in expr.get("args")
+			args.push(replace_placeholders(arg, names))
+		return map("kind" is "call", "callee" is callee, "args" is args, "span" is expr.get("span"))
+	if kind is "member"
+		target is replace_placeholders(expr.get("target"), names)
+		return map("kind" is "member", "target" is target, "property" is expr.get("property"), "span" is expr.get("span"))
+	if kind is "index"
+		target is replace_placeholders(expr.get("target"), names)
+		index is replace_placeholders(expr.get("index"), names)
+		return map("kind" is "index", "target" is target, "index" is index, "span" is expr.get("span"))
+	if kind is "ternary"
+		cond is replace_placeholders(expr.get("condition"), names)
+		then_b is replace_placeholders(expr.get("then_branch"), names)
+		else_b is replace_placeholders(expr.get("else_branch"), names)
+		return map("kind" is "ternary", "condition" is cond, "then_branch" is then_b, "else_branch" is else_b, "span" is expr.get("span"))
+	if kind is "throw"
+		val is replace_placeholders(expr.get("value"), names)
+		return map("kind" is "throw", "value" is val, "span" is expr.get("span"))
+	if kind is "list"
+		items is []
+		for item in expr.get("items")
+			items.push(replace_placeholders(item, names))
+		return map("kind" is "list", "items" is items, "span" is expr.get("span"))
+	if kind is "map_lit"
+		entries is []
+		for entry in expr.get("entries")
+			entries.push([replace_placeholders(entry[0], names), replace_placeholders(entry[1], names)])
+		return map("kind" is "map_lit", "entries" is entries, "span" is expr.get("span"))
+	if kind is "lambda"
+		# Don't descend into lambdas — they have their own scope
+		return expr
+	# Match and other complex nodes could be added here but are rare in placeholder context
+	return expr
