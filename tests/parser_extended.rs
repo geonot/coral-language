@@ -294,3 +294,80 @@ fn parse_trailing_newlines() {
     let program = parse_ok("x is 42\n\n\n");
     assert_eq!(program.items.len(), 1);
 }
+
+// ─── T2.1: Generic Type Parameter Syntax ─────────────────────────────
+
+#[test]
+fn parse_enum_with_type_params() {
+    let program = parse_ok("enum Option[T]\n    Some(value)\n    None\n");
+    match &program.items[0] {
+        Item::Type(t) => {
+            assert_eq!(t.name, "Option");
+            assert_eq!(t.type_params, vec!["T"]);
+            assert_eq!(t.variants.len(), 2);
+            assert_eq!(t.variants[0].name, "Some");
+            assert_eq!(t.variants[1].name, "None");
+        }
+        _ => panic!("expected type definition"),
+    }
+}
+
+#[test]
+fn parse_enum_with_multiple_type_params() {
+    let program = parse_ok("enum Result[T, E]\n    Ok(value)\n    Err(error)\n");
+    match &program.items[0] {
+        Item::Type(t) => {
+            assert_eq!(t.name, "Result");
+            assert_eq!(t.type_params, vec!["T", "E"]);
+            assert_eq!(t.variants.len(), 2);
+        }
+        _ => panic!("expected type definition"),
+    }
+}
+
+#[test]
+fn parse_enum_no_type_params() {
+    // Enums without type params should still work
+    let program = parse_ok("enum Color\n    Red\n    Green\n    Blue\n");
+    match &program.items[0] {
+        Item::Type(t) => {
+            assert_eq!(t.name, "Color");
+            assert!(t.type_params.is_empty());
+            assert_eq!(t.variants.len(), 3);
+        }
+        _ => panic!("expected type definition"),
+    }
+}
+
+#[test]
+fn parse_type_annotation_with_type_args() {
+    // Type annotation (in a binding): x: Option[Int]
+    let program = parse_ok("*foo(x: Option[Int])\n    x\n");
+    match &program.items[0] {
+        Item::Function(f) => {
+            let ann = f.params[0].type_annotation.as_ref().expect("expected annotation");
+            assert_eq!(ann.segments, vec!["Option"]);
+            assert_eq!(ann.type_args.len(), 1);
+            assert_eq!(ann.type_args[0].segments, vec!["Int"]);
+        }
+        _ => panic!("expected function"),
+    }
+}
+
+#[test]
+fn parse_nested_type_annotation_args() {
+    // Map[String, List[Int]]
+    let program = parse_ok("*foo(x: Map[String, List[Int]])\n    x\n");
+    match &program.items[0] {
+        Item::Function(f) => {
+            let ann = f.params[0].type_annotation.as_ref().expect("expected annotation");
+            assert_eq!(ann.segments, vec!["Map"]);
+            assert_eq!(ann.type_args.len(), 2);
+            assert_eq!(ann.type_args[0].segments, vec!["String"]);
+            assert_eq!(ann.type_args[1].segments, vec!["List"]);
+            assert_eq!(ann.type_args[1].type_args.len(), 1);
+            assert_eq!(ann.type_args[1].type_args[0].segments, vec!["Int"]);
+        }
+        _ => panic!("expected function"),
+    }
+}

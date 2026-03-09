@@ -196,10 +196,12 @@ impl Parser {
     fn parse_type_def(&mut self) -> ParseResult<TypeDefinition> {
         let start = self.advance().span;
         let (name, name_span) = self.consume_identifier()?;
+        let type_params = self.parse_type_params()?;
         let (with_traits, fields, methods, end_span) = self.parse_composite_body_with_traits()?;
         let span = start.join(name_span).join(end_span);
         Ok(TypeDefinition {
             name,
+            type_params,
             with_traits,
             fields,
             methods,
@@ -216,6 +218,7 @@ impl Parser {
     fn parse_enum_def(&mut self) -> ParseResult<TypeDefinition> {
         let start = self.advance().span; // consume `enum`
         let (name, name_span) = self.consume_identifier()?;
+        let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Newline, "expected newline after enum name")?;
         
         let body_start = match self.consume_indent_with_recovery(
@@ -227,6 +230,7 @@ impl Parser {
                 // Empty enum with no variants
                 return Ok(TypeDefinition {
                     name,
+                    type_params,
                     with_traits: Vec::new(),
                     fields: Vec::new(),
                     methods: Vec::new(),
@@ -260,6 +264,7 @@ impl Parser {
         let span = start.join(name_span).join(end_span);
         Ok(TypeDefinition {
             name,
+            type_params,
             with_traits: Vec::new(),  // Enums don't have traits yet
             fields: Vec::new(),
             methods: Vec::new(),
@@ -439,6 +444,28 @@ impl Parser {
         Ok(Some(annotation))
     }
 
+    /// Parse optional type parameters on a type/enum definition.
+    /// Syntax: `[A, B, C]` — returns empty Vec if no `[` follows.
+    fn parse_type_params(&mut self) -> ParseResult<Vec<String>> {
+        if !self.matches(TokenKind::LBracket) {
+            return Ok(Vec::new());
+        }
+        let mut params = Vec::new();
+        loop {
+            if self.check(TokenKind::RBracket) {
+                self.advance();
+                break;
+            }
+            let (param_name, _) = self.consume_identifier()?;
+            params.push(param_name);
+            if !self.matches(TokenKind::Comma) {
+                self.expect(TokenKind::RBracket, "expected `]` after type parameters")?;
+                break;
+            }
+        }
+        Ok(params)
+    }
+
     fn parse_type_annotation(&mut self) -> ParseResult<TypeAnnotation> {
         let (first, mut span) = self.consume_type_identifier()?;
         let mut segments = vec![first];
@@ -447,7 +474,24 @@ impl Parser {
             span = span.join(segment_span);
             segments.push(segment);
         }
-        Ok(TypeAnnotation { segments, type_args: Vec::new(), span })
+        // Parse type arguments: Type[Arg1, Arg2]
+        let mut type_args = Vec::new();
+        if self.matches(TokenKind::LBracket) {
+            loop {
+                if self.check(TokenKind::RBracket) {
+                    span = span.join(self.advance().span);
+                    break;
+                }
+                let arg = self.parse_type_annotation()?;
+                span = span.join(arg.span);
+                type_args.push(arg);
+                if !self.matches(TokenKind::Comma) {
+                    span = span.join(self.expect(TokenKind::RBracket, "expected `]` after type arguments")?.span);
+                    break;
+                }
+            }
+        }
+        Ok(TypeAnnotation { segments, type_args, span })
     }
 
     fn parse_taxonomy_node(&mut self) -> ParseResult<TaxonomyNode> {
@@ -873,7 +917,7 @@ impl Parser {
                 let body_span = match &body_stmt {
                     Statement::Return(_, s) | Statement::Break(s) | Statement::Continue(s) => *s,
                     Statement::Expression(e) => e.span(),
-                    Statement::If { span, .. } | Statement::While { span, .. } | Statement::For { span, .. } => *span,
+                    Statement::If { span, .. } | Statement::While { span, .. } | Statement::For { span, .. } | Statement::ForKV { span, .. } | Statement::ForRange { span, .. } => *span,
                     Statement::Binding(b) => b.span,
                     Statement::FieldAssign { span, .. } => *span,
                 };
@@ -961,13 +1005,63 @@ impl Parser {
                 ));
             }
         };
+        
+        // Check for key-value syntax: `for key, value in map`
+        if self.matches(TokenKind::Comma) {
+            let value_var = match self.peek_kind() {
+                TokenKind::Identifier(name) => {
+                    let name = name.clone();
+                    self.advance();
+                    name
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "expected second variable name after ',' in for".to_string(),
+                        self.current_span(),
+                    ));
+                }
+            };
+            self.expect(TokenKind::KeywordIn, "expected 'in' after for variables")?;
+            let iterable = self.parse_expression()?;
+            self.skip_newlines();
+            let body = self.parse_block()?;
+            return Ok(Statement::ForKV {
+                key_var: variable,
+                value_var,
+                iterable,
+                body,
+                span,
+            });
+        }
+        
         self.expect(TokenKind::KeywordIn, "expected 'in' after for variable")?;
-        let iterable = self.parse_expression()?;
+        let start_expr = self.parse_expression()?;
+        
+        // Check for range syntax: `for i in start to end [step s]`
+        if self.matches(TokenKind::KeywordTo) {
+            let end_expr = self.parse_expression()?;
+            let step_expr = if self.matches(TokenKind::KeywordStep) {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
+            self.skip_newlines();
+            let body = self.parse_block()?;
+            return Ok(Statement::ForRange {
+                variable,
+                start: start_expr,
+                end: end_expr,
+                step: step_expr,
+                body,
+                span,
+            });
+        }
+        
         self.skip_newlines();
         let body = self.parse_block()?;
         Ok(Statement::For {
             variable,
-            iterable,
+            iterable: start_expr,
             body,
             span,
         })
@@ -1527,8 +1621,15 @@ impl Parser {
             | TokenKind::KeywordType
             | TokenKind::KeywordFn
             | TokenKind::KeywordIs
+            | TokenKind::KeywordIsnt
             | TokenKind::KeywordExtern
-            | TokenKind::KeywordPtr => {
+            | TokenKind::KeywordPtr
+            | TokenKind::KeywordEnum
+            | TokenKind::KeywordTrait
+            | TokenKind::KeywordWith
+            | TokenKind::KeywordTo
+            | TokenKind::KeywordStep
+            | TokenKind::KeywordIn => {
                 let (name, span) = self.consume_identifier_or_keyword()?;
                 Ok(Expression::Identifier(name, span))
             }
@@ -1628,7 +1729,10 @@ impl Parser {
             
             let key = self.parse_unary()?;
             self.skip_newlines();
-            self.expect(TokenKind::KeywordIs, "expected `is` between map key and value")?;
+            // Accept both `:` and `is` as map key-value separator (`:` preferred)
+            if !self.matches(TokenKind::Colon) {
+                self.expect(TokenKind::KeywordIs, "expected `:` or `is` between map key and value")?;
+            }
             self.skip_newlines();
             let value = self.parse_expression()?;
             entries.push((key, value));
@@ -1827,17 +1931,69 @@ impl Parser {
                 break;
             }
             if self.matches(TokenKind::Bang) {
-                let expr = self.parse_expression()?;
-                default = Some(Box::new(Block::from_expression(expr)));
+                // S3.1: Default arm also supports multi-statement blocks
+                let body = if self.check(TokenKind::Newline) {
+                    self.advance(); // consume newline
+                    if self.check(TokenKind::Indent) {
+                        self.parse_block()?
+                    } else {
+                        Block {
+                            statements: vec![],
+                            value: None,
+                            span: self.current_span(),
+                        }
+                    }
+                } else {
+                    let expr = self.parse_expression()?;
+                    Block::from_expression(expr)
+                };
+                default = Some(Box::new(body));
                 self.skip_newlines();
                 continue;
             }
             let pattern = self.parse_match_pattern()?;
+            // S3.3: Or-patterns — `Pat1 or Pat2 or Pat3 ? body`
+            let pattern = if self.check(TokenKind::KeywordOr) {
+                let mut alternatives = vec![pattern];
+                while self.matches(TokenKind::KeywordOr) {
+                    alternatives.push(self.parse_match_pattern()?);
+                }
+                MatchPattern::Or(alternatives)
+            } else {
+                pattern
+            };
+            // S3.2: Optional guard clause — `Pattern if condition ? body`
+            // Use parse_pipeline to avoid consuming the `?` as a ternary operator
+            let guard = if self.check(TokenKind::KeywordIf) {
+                self.advance(); // consume `if`
+                Some(Box::new(self.parse_pipeline()?))
+            } else {
+                None
+            };
             self.expect(TokenKind::Question, "expected `?` in match arm")?;
-            let expr = self.parse_expression()?;
+            // S3.1: Multi-statement match arms — if `?` is followed by a
+            // newline + indent, parse a full block (multiple statements).
+            // Otherwise, parse a single expression as before.
+            let body = if self.check(TokenKind::Newline) {
+                self.advance(); // consume newline
+                if self.check(TokenKind::Indent) {
+                    self.parse_block()?
+                } else {
+                    // Newline but no indent — empty arm body (unit)
+                    Block {
+                        statements: vec![],
+                        value: None,
+                        span: self.current_span(),
+                    }
+                }
+            } else {
+                let expr = self.parse_expression()?;
+                Block::from_expression(expr)
+            };
             arms.push(MatchArm {
                 pattern,
-                body: Block::from_expression(expr),
+                guard,
+                body,
             });
             self.skip_newlines();
         }
@@ -1983,6 +2139,20 @@ impl Parser {
             TokenKind::KeywordPtr => { self.advance(); Ok(("ptr".to_string(), span)) }
             TokenKind::KeywordErr => { self.advance(); Ok(("err".to_string(), span)) }
             TokenKind::KeywordNone => { self.advance(); Ok(("none".to_string(), span)) }
+            TokenKind::KeywordEnum => { self.advance(); Ok(("enum".to_string(), span)) }
+            TokenKind::KeywordReturn => { self.advance(); Ok(("return".to_string(), span)) }
+            TokenKind::KeywordTrait => { self.advance(); Ok(("trait".to_string(), span)) }
+            TokenKind::KeywordWith => { self.advance(); Ok(("with".to_string(), span)) }
+            TokenKind::KeywordIf => { self.advance(); Ok(("if".to_string(), span)) }
+            TokenKind::KeywordElif => { self.advance(); Ok(("elif".to_string(), span)) }
+            TokenKind::KeywordElse => { self.advance(); Ok(("else".to_string(), span)) }
+            TokenKind::KeywordWhile => { self.advance(); Ok(("while".to_string(), span)) }
+            TokenKind::KeywordFor => { self.advance(); Ok(("for".to_string(), span)) }
+            TokenKind::KeywordIn => { self.advance(); Ok(("in".to_string(), span)) }
+            TokenKind::KeywordBreak => { self.advance(); Ok(("break".to_string(), span)) }
+            TokenKind::KeywordContinue => { self.advance(); Ok(("continue".to_string(), span)) }
+            TokenKind::KeywordTo => { self.advance(); Ok(("to".to_string(), span)) }
+            TokenKind::KeywordStep => { self.advance(); Ok(("step".to_string(), span)) }
             _ => Err(self.error_here("expected identifier")),
         }
     }

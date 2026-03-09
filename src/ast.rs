@@ -155,6 +155,23 @@ pub enum Statement {
         body: Block,
         span: Span,
     },
+    /// Key-value for loop over maps: `for key, value in map`
+    ForKV {
+        key_var: String,
+        value_var: String,
+        iterable: Expression,
+        body: Block,
+        span: Span,
+    },
+    /// Range-based for loop: `for i in start to end [step s]`
+    ForRange {
+        variable: String,
+        start: Expression,
+        end: Expression,
+        step: Option<Expression>,
+        body: Block,
+        span: Span,
+    },
     /// Field assignment on a store/actor: `self.field is value`
     FieldAssign {
         target: Expression,
@@ -169,6 +186,7 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDefinition {
     pub name: String,
+    pub type_params: Vec<String>,  // Generic type parameters, e.g., [T] or [A, B]
     pub with_traits: Vec<String>,  // `with TraitName` clauses
     pub fields: Vec<Field>,
     pub methods: Vec<Function>,
@@ -380,6 +398,8 @@ pub struct MatchExpression {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
+    /// S3.2: Optional guard clause — `Pattern if condition ? body`
+    pub guard: Option<Box<Expression>>,
     pub body: Block,
 }
 
@@ -398,4 +418,7 @@ pub enum MatchPattern {
     },
     /// Wildcard pattern that matches anything without binding
     Wildcard(Span),
+    /// S3.3: Or-pattern — matches if any sub-pattern matches.
+    /// e.g. `Circle(r) or Sphere(r) ? compute(r)`
+    Or(Vec<MatchPattern>),
 }

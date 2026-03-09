@@ -59,7 +59,9 @@ pub enum TypeId {
     TypeVar(TypeVarId),
     /// Algebraic Data Type (user-defined enum/sum type), with optional type arguments.
     Adt(String, Vec<TypeId>),
-    /// Unknown type (for permissive parsing, but should error in strict mode).
+    /// Store instance type (typed store/type instances).
+    Store(String),
+    /// Unknown type (for permissive parsing — persisting after solving emits a warning).
     #[default]
     Unknown,
 }
@@ -78,7 +80,7 @@ impl TypeId {
     /// Check if this type contains no unresolved type variables.
     pub fn is_concrete(&self) -> bool {
         match self {
-            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) => true,
+            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) | TypeId::Store(_) => true,
             TypeId::Adt(_, args) => args.iter().all(|a| a.is_concrete()),
             TypeId::TypeVar(_) => false,
             TypeId::List(elem) => elem.is_concrete(),
@@ -86,6 +88,20 @@ impl TypeId {
             TypeId::Func(params, ret) => {
                 params.iter().all(|p| p.is_concrete()) && ret.is_concrete()
             }
+        }
+    }
+
+    /// Check if this type contains `Unknown` anywhere in its structure.
+    pub fn contains_unknown(&self) -> bool {
+        match self {
+            TypeId::Unknown => true,
+            TypeId::List(elem) => elem.contains_unknown(),
+            TypeId::Map(k, v) => k.contains_unknown() || v.contains_unknown(),
+            TypeId::Func(params, ret) => {
+                params.iter().any(|p| p.contains_unknown()) || ret.contains_unknown()
+            }
+            TypeId::Adt(_, args) => args.iter().any(|a| a.contains_unknown()),
+            _ => false,
         }
     }
 
@@ -162,6 +178,7 @@ pub fn format_type(ty: &TypeId) -> String {
                 format!("{}[{}]", name, args_s.join(", "))
             }
         }
+        TypeId::Store(name) => name.clone(),
         TypeId::Unknown => "_".into(),
     }
 }

@@ -113,6 +113,34 @@ fn parses_map_literal() {
 }
 
 #[test]
+fn parses_map_literal_colon_syntax() {
+    // S1.1: Colon syntax for map entries
+    let expr = parse_single_binding_expression(
+        "config is map('foo': 1, 'bar': 2)\n",
+    );
+    match expr {
+        Expression::Map(entries, _) => {
+            assert_eq!(entries.len(), 2);
+        }
+        other => panic!("expected map literal with colon syntax, got {:?}", other),
+    }
+}
+
+#[test]
+fn parses_map_literal_mixed_separators() {
+    // Both `:` and `is` can be used in the same map literal
+    let expr = parse_single_binding_expression(
+        "config is map('foo': 1, 'bar' is 2)\n",
+    );
+    match expr {
+        Expression::Map(entries, _) => {
+            assert_eq!(entries.len(), 2);
+        }
+        other => panic!("expected map literal with mixed separators, got {:?}", other),
+    }
+}
+
+#[test]
 fn parses_map_property_access() {
     let expr = parse_single_binding_expression(
         "value is map('foo' is 1).foo\n",

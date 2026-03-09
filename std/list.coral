@@ -70,6 +70,10 @@ use std.prelude
 *list_sub(lst, start_idx, end_idx)
 	list_slice(lst, start_idx, end_idx)
 
+# Alias: standard name for sub-list
+*sublist(lst, start_idx, end_idx)
+	list_slice(lst, start_idx, end_idx)
+
 # Sort a list (numeric then string lexicographic)
 *sort(lst)
 	list_sort(lst)

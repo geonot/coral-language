@@ -1,0 +1,13 @@
+# Benchmark: Tight numeric loop
+# Tests: numeric arithmetic in hot loops, NaN-boxing fast path
+
+*main()
+    start is time_now()
+    sum is 0
+    i is 0
+    while i < 10000000
+        sum is sum + i
+        i is i + 1
+    elapsed is time_now() - start
+    log("sum(0..10M) = " + to_string(sum))
+    log("elapsed_ms: " + to_string(elapsed))

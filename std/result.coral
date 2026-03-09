@@ -35,7 +35,9 @@ enum Result
 *unwrap(result)
   match result
     Ok(value) ? value
-    Err(error) ? log('PANIC: unwrap called on Err: ' + error.to_string())
+    Err(error)
+      log('PANIC: unwrap called on Err: ' + error.to_string())
+      exit(1)
 
 # Get the error from Err, or return default for Ok  
 *unwrap_err_or(result, default)
@@ -46,7 +48,9 @@ enum Result
 # Get the error from Err, panic on Ok
 *unwrap_err(result)
   match result
-    Ok(_) ? log('PANIC: unwrap_err called on Ok')
+    Ok(_)
+      log('PANIC: unwrap_err called on Ok')
+      exit(1)
     Err(error) ? error
 
 # Map function over Ok value, leave Err unchanged

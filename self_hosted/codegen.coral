@@ -76,6 +76,12 @@
 	b.get("alloca_lines").push('{indent}{reg} = alloca %CoralValue*')
 	return reg
 
+*emit_deferred_alloca_typed(b, ty)
+	reg is fresh_da_reg(b)
+	indent is b.get("indent")
+	b.get("alloca_lines").push('{indent}{reg} = alloca {ty}')
+	return reg
+
 *flush_deferred_allocas(b)
 	alloca_buf is b.get("alloca_lines")
 	if alloca_buf is none
@@ -892,6 +898,10 @@
 		return emit_while_stmt(b, stmt)
 	if kind is "for"
 		return emit_for_stmt(b, stmt)
+	if kind is "for_range"
+		return emit_for_range_stmt(b, stmt)
+	if kind is "for_kv"
+		return emit_for_kv_stmt(b, stmt)
 	if kind is "field_assign"
 		return emit_field_assign(b, stmt)
 	if kind is "break"
@@ -1040,6 +1050,123 @@
 	begin_bb(b, exit_bb)
 	# Release iterator
 	emit_indent(b, 'call void @coral_value_release(%CoralValue* {iter})')
+	pop_loop(b)
+	return none
+
+*emit_for_kv_stmt(b, stmt)
+	key_name is stmt.get("key_var")
+	val_name is stmt.get("value_var")
+	iterable is emit_expression(b, stmt.get("iterable"))
+	# Get map entries as a list of [key, value] pairs
+	entries is fresh_reg(b)
+	emit_indent(b, '{entries} = call %CoralValue* @coral_map_entries(%CoralValue* {iterable})')
+	# Create iterator over entries list
+	iter is fresh_reg(b)
+	emit_indent(b, '{iter} = call %CoralValue* @coral_value_iter(%CoralValue* {entries})')
+	header_bb is fresh_bb(b, "forkv_header")
+	body_bb is fresh_bb(b, "forkv_body")
+	exit_bb is fresh_bb(b, "forkv_exit")
+	b.get("loop_stack").push(map("header" is header_bb, "exit" is exit_bb))
+	emit_br(b, header_bb)
+	begin_bb(b, header_bb)
+	elem is fresh_reg(b)
+	emit_indent(b, '{elem} = call %CoralValue* @coral_value_iter_next(%CoralValue* {iter})')
+	tag_ptr is fresh_reg(b)
+	emit_indent(b, '{tag_ptr} = bitcast %CoralValue* {elem} to i8*')
+	tag_val is fresh_reg(b)
+	emit_indent(b, '{tag_val} = load i8, i8* {tag_ptr}')
+	done is fresh_reg(b)
+	emit_indent(b, '{done} = icmp eq i8 {tag_val}, 7')
+	emit_br_cond(b, done, exit_bb, body_bb)
+	begin_bb(b, body_bb)
+	# Extract key and value from [key, value] pair
+	idx0 is fresh_reg(b)
+	emit_indent(b, '{idx0} = call %CoralValue* @coral_make_number(double 0.0)')
+	idx1 is fresh_reg(b)
+	emit_indent(b, '{idx1} = call %CoralValue* @coral_make_number(double 1.0)')
+	key_reg is fresh_reg(b)
+	emit_indent(b, '{key_reg} = call %CoralValue* @coral_list_get(%CoralValue* {elem}, %CoralValue* {idx0})')
+	val_reg is fresh_reg(b)
+	emit_indent(b, '{val_reg} = call %CoralValue* @coral_list_get(%CoralValue* {elem}, %CoralValue* {idx1})')
+	# Bind key variable
+	existing_key is b.get("variables").get(key_name)
+	if existing_key isnt none
+		emit_indent(b, 'store %CoralValue* {key_reg}, %CoralValue** {existing_key}')
+	else
+		key_alloca is emit_deferred_alloca(b)
+		emit_indent(b, 'store %CoralValue* {key_reg}, %CoralValue** {key_alloca}')
+		b.get("variables").set(key_name, key_alloca)
+	# Bind value variable
+	existing_val is b.get("variables").get(val_name)
+	if existing_val isnt none
+		emit_indent(b, 'store %CoralValue* {val_reg}, %CoralValue** {existing_val}')
+	else
+		val_alloca is emit_deferred_alloca(b)
+		emit_indent(b, 'store %CoralValue* {val_reg}, %CoralValue** {val_alloca}')
+		b.get("variables").set(val_name, val_alloca)
+	emit_block(b, stmt.get("body"))
+	emit_br(b, header_bb)
+	begin_bb(b, exit_bb)
+	emit_indent(b, 'call void @coral_value_release(%CoralValue* {iter})')
+	pop_loop(b)
+	return none
+
+*emit_for_range_stmt(b, stmt)
+	var_name is stmt.get("variable")
+	start_val is emit_expression(b, stmt.get("start"))
+	end_val is emit_expression(b, stmt.get("end"))
+	step_expr is stmt.get("step")
+
+	# Extract f64 values
+	start_f64 is fresh_reg(b)
+	emit_indent(b, '{start_f64} = call double @coral_nb_as_number(i64 {start_val})')
+	end_f64 is fresh_reg(b)
+	emit_indent(b, '{end_f64} = call double @coral_nb_as_number(i64 {end_val})')
+	step_f64 is fresh_reg(b)
+	if step_expr isnt none
+		step_nb is emit_expression(b, step_expr)
+		emit_indent(b, '{step_f64} = call double @coral_nb_as_number(i64 {step_nb})')
+	else
+		emit_indent(b, '{step_f64} = fadd double 0.0, 1.0')
+
+	# Allocate counter
+	counter is emit_deferred_alloca_typed(b, "double")
+	emit_indent(b, 'store double {start_f64}, double* {counter}')
+
+	header_bb is fresh_bb(b, "for_range_header")
+	body_bb is fresh_bb(b, "for_range_body")
+	exit_bb is fresh_bb(b, "for_range_exit")
+	b.get("loop_stack").push(map("header" is header_bb, "exit" is exit_bb))
+	emit_br(b, header_bb)
+	begin_bb(b, header_bb)
+
+	cur is fresh_reg(b)
+	emit_indent(b, '{cur} = load double, double* {counter}')
+	done is fresh_reg(b)
+	emit_indent(b, '{done} = fcmp oge double {cur}, {end_f64}')
+	emit_br_cond(b, done, exit_bb, body_bb)
+	begin_bb(b, body_bb)
+
+	# Wrap counter as NaN-boxed and bind
+	counter_nb is fresh_reg(b)
+	emit_indent(b, '{counter_nb} = call i64 @coral_nb_make_number(double {cur})')
+	existing is b.get("variables").get(var_name)
+	if existing isnt none
+		emit_indent(b, 'store i64 {counter_nb}, i64* {existing}')
+	else
+		alloca_reg is emit_deferred_alloca(b)
+		emit_indent(b, 'store i64 {counter_nb}, i64* {alloca_reg}')
+		b.get("variables").set(var_name, alloca_reg)
+
+	emit_block(b, stmt.get("body"))
+	# Increment
+	cur2 is fresh_reg(b)
+	emit_indent(b, '{cur2} = load double, double* {counter}')
+	next is fresh_reg(b)
+	emit_indent(b, '{next} = fadd double {cur2}, {step_f64}')
+	emit_indent(b, 'store double {next}, double* {counter}')
+	emit_br(b, header_bb)
+	begin_bb(b, exit_bb)
 	pop_loop(b)
 	return none
 

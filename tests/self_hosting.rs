@@ -543,8 +543,10 @@ fn sh4_range_calls_runtime() {
 fn run_self_hosted_e2e(coral_source: &str) -> String {
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Once;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+    static COMPILE_ONCE: Once = Once::new();
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
 
     let ws = PathBuf::from(WORKSPACE);
@@ -556,14 +558,15 @@ fn run_self_hosted_e2e(coral_source: &str) -> String {
         );
     }
 
-    // Step 1: Compile self-hosted compiler to LLVM IR (shared)
+    // Step 1: Compile self-hosted compiler to LLVM IR (shared, compiled once)
     let sh_ll = ws.join("target/tmp/self_hosted_test.ll");
     std::fs::create_dir_all(ws.join("target/tmp")).unwrap();
-    if !sh_ll.exists() {
-        let ir = compile_to_ir("self_hosted/compiler.coral");
-        // Use a lock file to avoid races
-        let _ = std::fs::write(&sh_ll, &ir);
-    }
+    COMPILE_ONCE.call_once(|| {
+        if !sh_ll.exists() {
+            let ir = compile_to_ir("self_hosted/compiler.coral");
+            let _ = std::fs::write(&sh_ll, &ir);
+        }
+    });
 
     // Step 2: Write the test program to a unique temp file
     let test_coral = ws.join(format!("target/tmp/e2e_input_{}.coral", id));

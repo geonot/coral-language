@@ -35,8 +35,8 @@ fn compiles_store_with_reference_fields() {
     assert!(ir.contains("@coral_value_retain"));
     assert!(ir.contains("@coral_value_release"));
     
-    // Verify method signatures take ptr parameters and return ptr
-    assert!(ir.contains("define ptr @Node_set_next(ptr %0, ptr %1)"));
+    // Verify method signatures take i64 parameters and return i64 (NaN-boxed)
+    assert!(ir.contains("define i64 @Node_set_next(i64 %0, i64 %1)"));
 }
 
 #[test]

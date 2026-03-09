@@ -52,6 +52,8 @@ pub enum TokenKind {
     KeywordIn,
     KeywordBreak,
     KeywordContinue,
+    KeywordTo,
+    KeywordStep,
     Placeholder(u32),
     Star,
     Ampersand,
@@ -461,6 +463,8 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                     "in" => TokenKind::KeywordIn,
                     "break" => TokenKind::KeywordBreak,
                     "continue" => TokenKind::KeywordContinue,
+                    "to" => TokenKind::KeywordTo,
+                    "step" => TokenKind::KeywordStep,
                     _ => TokenKind::Identifier(slice.to_string()),
                 };
                 tokens.push(Token::new(kind, Span::new(start, pos)));

@@ -10,26 +10,29 @@ _Created: 2026-01-06_
 |---------|--------|-------|
 | Actor spawn | ✅ Working | `coral_actor_spawn` FFI |
 | Actor send | ✅ Working | `coral_actor_send` FFI |
-| M:N scheduler | ✅ Working | Worker thread pool |
+| M:N scheduler | ✅ Working | Worker thread pool with shutdown |
 | Bounded mailboxes | ✅ Working | Default 1024 capacity |
 | Backpressure | ✅ Basic | Returns `Full` status |
 | Actor state | ✅ Working | `self.field` access in handlers |
 | State from closure | ✅ Working | State passed via environment |
 | Failure propagation | ✅ Basic | Failure message to parent |
 | @handler syntax | ✅ Working | Compile-time arity check |
+| Named actors | ✅ Working | Global registry, lookup by name, singleton patterns |
+| Actor supervision | ✅ Working | Restart strategies, parent notification |
+| Actor timers | ✅ Working | Timer wheel, periodic/one-shot timers |
+| Clean shutdown | ✅ Working | AtomicBool + JoinHandle for timer/worker/scheduler |
+| Thread-local pools | ✅ Working | LOCAL_VALUE_POOL with overflow to global |
+| CAS-based refcount | ✅ Working | compare_exchange_weak eliminates TOCTOU |
 
-### 1.2 What's Missing
+### 1.2 What's Not Yet Implemented
 
 | Feature | Priority | Complexity |
 |---------|----------|------------|
-| Named actors | P0 | Medium |
-| Actor supervision | P0 | High |
-| Remote actors (networking) | P1 | High |
 | Typed message contracts | P1 | Medium |
-| Actor timers | P1 | Medium |
-| Actor cancellation | P2 | Medium |
-| Actor monitoring | P2 | Low |
+| Actor monitoring (watch/unwatch) | P2 | Low |
+| Remote actors (networking) | P2 | High |
 | Location transparency | P2 | High |
+| Work-stealing scheduler | P2 | Medium |
 
 ---
 

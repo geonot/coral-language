@@ -64,7 +64,14 @@ fn dump_codegen_expanded() {
     for i in 580..640 {
         if i < lines.len() {
             let tabs = lines[i].len() - lines[i].trim_start_matches('\t').len();
-            let display = if lines[i].len() > 60 { &lines[i][..60] } else { lines[i] };
+            let display = if lines[i].len() > 60 {
+                // Find a safe UTF-8 boundary at or before byte 60
+                let mut end = 60;
+                while end > 0 && !lines[i].is_char_boundary(end) {
+                    end -= 1;
+                }
+                &lines[i][..end]
+            } else { lines[i] };
             println!("{:4} (t={}): {}", i + 1, tabs, display);
         }
     }

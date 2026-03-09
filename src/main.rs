@@ -62,8 +62,12 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to load {}", args.input.display()))?;
 
     let compiler = Compiler;
-    match compiler.compile_to_ir(&source) {
-        Ok(ir) => {
+    match compiler.compile_to_ir_with_warnings(&source) {
+        Ok((ir, warnings)) => {
+            // CC2.2: Print any warnings collected during compilation.
+            for w in &warnings {
+                eprintln!("warning: {}", w);
+            }
             let needs_disk_ir = args.emit_binary.is_some() || args.run_jit;
             let mut temp_ir: Option<TempPath> = None;
             let ir_path_for_tools = if needs_disk_ir {
@@ -293,6 +297,7 @@ fn link_native_binary(
         .arg(runtime_dir)
         .arg("-l")
         .arg("runtime")
+        .arg("-lm")
         .arg("-o")
         .arg(output);
 

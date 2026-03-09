@@ -10,8 +10,8 @@ fn compiles_basic_program() {
     let ir = compiler.compile_to_ir(source).expect(
         "failed to compile source",
     );
-    // Functions now return ptr (Value*) instead of double
-    assert!(ir.contains("define ptr @__user_main"));
+    // Functions now return i64 (NaN-boxed) after M1 transition
+    assert!(ir.contains("define i64 @__user_main"));
 }
 
 #[test]

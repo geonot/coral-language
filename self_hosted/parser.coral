@@ -108,6 +108,12 @@ use lexer
 *make_for_stmt(variable, iterable, body, span)
 	return map("kind" is "for", "variable" is variable, "iterable" is iterable, "body" is body, "span" is span)
 
+*make_for_range_stmt(variable, start, end_val, step, body, span)
+	return map("kind" is "for_range", "variable" is variable, "start" is start, "end" is end_val, "step" is step, "body" is body, "span" is span)
+
+*make_for_kv_stmt(key_var, value_var, iterable, body, span)
+	return map("kind" is "for_kv", "key_var" is key_var, "value_var" is value_var, "iterable" is iterable, "body" is body, "span" is span)
+
 *make_break_stmt(span)
 	return map("kind" is "break", "span" is span)
 
@@ -648,12 +654,37 @@ use lexer
 
 	var_tok is expect(p, "identifier")
 	variable is var_tok.get("value")
+
+	# Check for key-value syntax: for key, value in map
+	if current_kind(p) is "comma"
+		advance_parser(p)
+		val_tok is expect(p, "identifier")
+		value_var is val_tok.get("value")
+		expect(p, "keyword_in")
+		iterable is parse_expression(p)
+		skip_newlines(p)
+		body is parse_block(p)
+		return make_for_kv_stmt(variable, value_var, iterable, body, make_span(start, current_token(p).get("start")))
+
 	expect(p, "keyword_in")
-	iterable is parse_expression(p)
+	start_expr is parse_expression(p)
+
+	# Check for range syntax: for i in start to end [step s]
+	if current_kind(p) is "keyword_to"
+		advance_parser(p)
+		end_expr is parse_expression(p)
+		step_expr is none
+		if current_kind(p) is "keyword_step"
+			advance_parser(p)
+			step_expr is parse_expression(p)
+		skip_newlines(p)
+		body is parse_block(p)
+		return make_for_range_stmt(variable, start_expr, end_expr, step_expr, body, make_span(start, current_token(p).get("start")))
+
 	skip_newlines(p)
 	body is parse_block(p)
 
-	return make_for_stmt(variable, iterable, body, make_span(start, current_token(p).get("start")))
+	return make_for_stmt(variable, start_expr, body, make_span(start, current_token(p).get("start")))
 
 # ─── Expression Parsing — Precedence Climbing ──────────────────────
 
@@ -1152,7 +1183,11 @@ use lexer
 *parse_map_entry(p)
 	# Parse key at comparison level (below equality) so 'is' separator isn't consumed
 	key is parse_comparison(p)
-	expect(p, "keyword_is")
+	# Accept both `:` and `is` as map key-value separator (`:` preferred)
+	if current_kind(p) is "colon"
+		advance_parser(p)
+	else
+		expect(p, "keyword_is")
 	value is parse_expression(p)
 	return [key, value]
 

@@ -1,0 +1,28 @@
+# Benchmark: String processing
+# Tests: string concatenation, split, replace, join
+
+*main()
+    start is time_now()
+
+    # Build string with optimized join
+    parts is []
+    i is 0
+    while i < 10000
+        parts is parts.push(to_string(i))
+        i is i + 1
+    big is join_list(parts, ",")
+
+    # Split it back
+    tokens is split(big, ",")
+
+    # Replace operations
+    replaced is replace(big, ",", ";")
+
+    # Measure string length
+    len is big.length
+
+    elapsed is time_now() - start
+    log("built_length = " + to_string(len))
+    log("token_count = " + to_string(tokens.length))
+    log("replaced_length = " + to_string(replaced.length))
+    log("elapsed_ms: " + to_string(elapsed))

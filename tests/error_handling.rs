@@ -127,7 +127,7 @@ fn error_propagation_syntax_parses() {
 "#;
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(code).expect("Error propagation syntax should parse");
-    assert!(ir.contains("@coral_is_err"), "Should call coral_is_err to check for errors");
+    assert!(ir.contains("@coral_nb_is_err"), "Should call coral_nb_is_err to check for errors");
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn error_propagation_returns_early_on_error() {
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(code).expect("Error propagation should compile");
     // Should have error checking and conditional return
-    assert!(ir.contains("@coral_is_err"), "Should check if value is error");
+    assert!(ir.contains("@coral_nb_is_err"), "Should check if value is error");
     // Should have conditional branch for error case
     assert!(ir.contains("br i1"), "Should have conditional branch for error handling");
 }
@@ -162,7 +162,7 @@ fn error_propagation_continues_on_success() {
 "#;
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(code).expect("Success case should compile");
-    assert!(ir.contains("@coral_is_err"), "Should still check for errors");
+    assert!(ir.contains("@coral_nb_is_err"), "Should still check for errors");
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn error_propagation_chained() {
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(code).expect("Chained propagation should compile");
     // Should have multiple coral_is_err calls
-    let is_err_count = ir.matches("@coral_is_err").count();
+    let is_err_count = ir.matches("@coral_nb_is_err").count();
     assert!(is_err_count >= 2, "Should have multiple error checks, found {}", is_err_count);
 }
 
@@ -201,7 +201,7 @@ fn error_propagation_in_expression() {
 "#;
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(code).expect("Expression propagation should compile");
-    assert!(ir.contains("@coral_is_err"), "Should check for errors");
+    assert!(ir.contains("@coral_nb_is_err"), "Should check for errors");
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn error_propagation_does_not_conflict_with_ternary() {
     let ir = compiler.compile_to_ir(code).expect("Ternary should still work");
     // Should NOT have error propagation calls, just ternary
     // Note: declaration of coral_is_err may exist, but no calls should be made
-    assert!(!ir.contains("call i8 @coral_is_err"), "Ternary should not trigger error propagation calls");
+    assert!(!ir.contains("call i8 @coral_nb_is_err"), "Ternary should not trigger error propagation calls");
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn error_propagation_with_function_call() {
 "#;
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(code).expect("Function call propagation should compile");
-    assert!(ir.contains("@coral_is_err"), "Should check function result for errors");
+    assert!(ir.contains("@coral_nb_is_err"), "Should check function result for errors");
 }
 
 // ========== .err PROPERTY TESTS ==========

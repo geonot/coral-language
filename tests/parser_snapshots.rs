@@ -161,6 +161,28 @@ fn statement_snapshot(statement: &Statement) -> Value {
                 "body": block_snapshot(body),
             }
         }),
+        Statement::ForRange { variable, start, end, step, body, .. } => {
+            let mut obj = json!({
+                "for_range": {
+                    "variable": variable,
+                    "start": expression_snapshot(start),
+                    "end": expression_snapshot(end),
+                    "body": block_snapshot(body),
+                }
+            });
+            if let Some(s) = step {
+                obj["for_range"]["step"] = expression_snapshot(s);
+            }
+            obj
+        },
+        Statement::ForKV { key_var, value_var, iterable, body, .. } => json!({
+            "for_kv": {
+                "key_var": key_var,
+                "value_var": value_var,
+                "iterable": expression_snapshot(iterable),
+                "body": block_snapshot(body),
+            }
+        }),
         Statement::Break(_) => json!({ "break": true }),
         Statement::Continue(_) => json!({ "continue": true }),
         Statement::FieldAssign { target, field, value, .. } => json!({
@@ -391,6 +413,9 @@ fn pattern_snapshot(pattern: &MatchPattern) -> Value {
             }
         }),
         MatchPattern::Wildcard(_) => json!({ "wildcard": "_" }),
+        MatchPattern::Or(alternatives) => json!({
+            "or": alternatives.iter().map(pattern_snapshot).collect::<Vec<_>>()
+        }),
     }
 }
 

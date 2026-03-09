@@ -822,6 +822,36 @@ fn e2e_negation_operator() {
 }
 
 #[test]
+fn e2e_unary_minus() {
+    // S1.4: Unary negation
+    assert_output(
+        r#"
+*main()
+    x is 42
+    log(-x)
+    log(-1)
+    log(-(3 + 4))
+"#,
+        &["-42", "-1", "-7"],
+    );
+}
+
+#[test]
+fn e2e_for_kv_map_iteration() {
+    // L1.6: for key, value in map
+    assert_output(
+        r#"
+*main()
+    m is map("a": 1, "b": 2)
+    for k, v in m
+        log(k)
+        log(v)
+"#,
+        &["a", "1", "b", "2"],
+    );
+}
+
+#[test]
 fn e2e_option_adt() {
     assert_output(
         r#"
@@ -1230,6 +1260,47 @@ fn e2e_for_loop_string_iteration() {
         log(w)
 "#,
         &["hello", "world", "coral"],
+    );
+}
+
+#[test]
+fn e2e_for_range_basic() {
+    // S1.3: for i in 1 to 5
+    assert_output(
+        r#"
+*main()
+    for i in 1 to 5
+        log(i)
+"#,
+        &["1", "2", "3", "4"],
+    );
+}
+
+#[test]
+fn e2e_for_range_with_step() {
+    // S1.3: for i in 0 to 10 step 3
+    assert_output(
+        r#"
+*main()
+    for i in 0 to 10 step 3
+        log(i)
+"#,
+        &["0", "3", "6", "9"],
+    );
+}
+
+#[test]
+fn e2e_for_range_accumulator() {
+    // S1.3: for i in 1 to 6 accumulating a sum
+    assert_output(
+        r#"
+*main()
+    total is 0
+    for i in 1 to 6
+        total is total + i
+    log(total)
+"#,
+        &["15"],
     );
 }
 
@@ -2477,5 +2548,209 @@ fn e2e_range_empty() {
     log(items.length())
 "#,
         &["0"],
+    );
+}
+
+// ─── S3.6: Match as statement ──────────────────────────────────────
+
+#[test]
+fn e2e_match_as_statement() {
+    assert_output(
+        r#"
+*main()
+    x is 2
+    match x
+        1 ? log("one")
+        2 ? log("two")
+        3 ? log("three")
+    log("done")
+"#,
+        &["two", "done"],
+    );
+}
+
+#[test]
+fn e2e_match_statement_default_arm() {
+    assert_output(
+        r#"
+*main()
+    x is 99
+    match x
+        1 ? log("one")
+        ! log("other")
+    log("done")
+"#,
+        &["other", "done"],
+    );
+}
+
+// ─── S3.1: Multi-statement match arms ──────────────────────────────
+
+#[test]
+fn e2e_match_multi_statement_arm() {
+    assert_output(
+        r#"
+*main()
+    x is 2
+    result is match x
+        1 ? 10
+        2 ?
+            a is 20
+            b is 22
+            a + b
+        ! 0
+    log(result)
+"#,
+        &["42"],
+    );
+}
+
+#[test]
+fn e2e_match_multi_statement_side_effects() {
+    assert_output(
+        r#"
+*main()
+    x is 1
+    match x
+        1 ?
+            log("matched one")
+            log("doing work")
+        2 ?
+            log("matched two")
+        ! log("default")
+    log("done")
+"#,
+        &["matched one", "doing work", "done"],
+    );
+}
+
+#[test]
+fn e2e_match_multi_statement_default() {
+    assert_output(
+        r#"
+*main()
+    x is 99
+    match x
+        1 ? log("one")
+        !
+            log("fell through")
+            log("to default")
+    log("done")
+"#,
+        &["fell through", "to default", "done"],
+    );
+}
+
+// ===== S3.2: Guard Clauses in Match =====
+
+#[test]
+fn e2e_match_guard_basic() {
+    // Guard clause should filter match arms
+    assert_output(
+        r#"
+*main()
+    x is 5
+    result is match x
+        v if v > 10 ? "big"
+        v if v > 3 ? "medium"
+        v ? "small"
+    log(result)
+"#,
+        &["medium"],
+    );
+}
+
+#[test]
+fn e2e_match_guard_with_adt() {
+    // Guard on ADT pattern — destructure then check value
+    assert_output(
+        r#"
+enum Wrapper
+    Val(n)
+
+*main()
+    items is [Val(10), Val(3), Val(7)]
+    for item in items
+        msg is match item
+            Val(n) if n > 5 ? "high"
+            Val(n) ? "low"
+        log(msg)
+"#,
+        &["high", "low", "high"],
+    );
+}
+
+#[test]
+fn e2e_match_guard_falls_through() {
+    // When guard fails, should try next arm (not execute arm body)
+    assert_output(
+        r#"
+*main()
+    x is 3
+    result is match x
+        v if v > 100 ? "huge"
+        v if v > 50 ? "big"
+        ! "default"
+    log(result)
+"#,
+        &["default"],
+    );
+}
+
+// ===== S3.3: Or-Patterns in Match =====
+
+#[test]
+fn e2e_match_or_pattern_literals() {
+    // Or-pattern with literal values
+    assert_output(
+        r#"
+*main()
+    for x in [1, 2, 3, 4, 5]
+        label is match x
+            1 or 2 ? "low"
+            3 or 4 ? "mid"
+            _ ? "high"
+        log(label)
+"#,
+        &["low", "low", "mid", "mid", "high"],
+    );
+}
+
+#[test]
+fn e2e_match_or_pattern_constructors() {
+    // Or-pattern with ADT constructors that bind variables
+    assert_output(
+        r#"
+enum Shape
+    Circle(r)
+    Sphere(r)
+    Box(w)
+
+*main()
+    shapes is [Circle(3), Sphere(5), Box(10)]
+    for s in shapes
+        label is match s
+            Circle(r) or Sphere(r) ? "round " + r
+            Box(w) ? "box " + w
+        log(label)
+"#,
+        &["round 3", "round 5", "box 10"],
+    );
+}
+
+#[test]
+fn e2e_match_or_pattern_with_guard() {
+    // Or-pattern combined with a guard clause
+    assert_output(
+        r#"
+*main()
+    for x in [1, 2, 3, 4, 5, 6]
+        label is match x
+            1 or 2 or 3 if x > 2 ? "low-high"
+            1 or 2 or 3 ? "low"
+            _ ? "other"
+        log(label)
+"#,
+        &["low", "low", "low-high", "other", "other", "other"],
     );
 }

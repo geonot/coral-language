@@ -77,8 +77,8 @@ fn inline_asm_noop_when_allowed() {
     let _guard = EnvGuard::set("CORAL_INLINE_ASM", "allow-noop");
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(source).expect("inline asm should noop when allowed");
-    // Functions now return ptr (Value*) instead of double
-    assert!(ir.contains("define ptr @__user_main"));
+    // Functions now return i64 (NaN-boxed) after M1 transition
+    assert!(ir.contains("define i64 @__user_main"));
 }
 
 #[test]

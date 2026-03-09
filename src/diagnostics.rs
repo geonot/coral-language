@@ -1,4 +1,4 @@
-use crate::span::Span;
+use crate::span::{LineIndex, Span};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,77 +91,86 @@ pub enum Stage {
 pub struct CompileError {
     pub stage: Stage,
     pub diagnostic: Diagnostic,
+    /// Optional source text for pretty-printing (CC2.1).
+    source: Option<String>,
 }
 
 impl CompileError {
     pub fn new(stage: Stage, diagnostic: Diagnostic) -> Self {
-        Self { stage, diagnostic }
+        Self { stage, diagnostic, source: None }
+    }
+
+    /// Create an error that carries the original source for pretty-printing (CC2.1).
+    pub fn with_source(stage: Stage, diagnostic: Diagnostic, source: &str) -> Self {
+        Self {
+            stage,
+            diagnostic,
+            source: Some(source.to_owned()),
+        }
     }
 
     /// Create a more descriptive error based on the stage and diagnostic.
     pub fn with_context(stage: Stage, diagnostic: Diagnostic, source: &str) -> Self {
         let enhanced = Self::add_source_context(diagnostic, source);
-        Self::new(stage, enhanced)
+        Self { stage, diagnostic: enhanced, source: Some(source.to_owned()) }
     }
 
     /// Add source code context to a diagnostic for better error messages.
     fn add_source_context(mut diagnostic: Diagnostic, source: &str) -> Diagnostic {
+        let idx = LineIndex::new(source);
         let span = diagnostic.span;
-        
-        // Find the line number and column
-        let lines: Vec<&str> = source.lines().collect();
-        let mut line_num = 1;
-        let mut char_count = 0;
-        let mut line_start = 0;
-        
-        for (i, line) in lines.iter().enumerate() {
-            let line_end = char_count + line.len() + 1; // +1 for newline
-            if char_count <= span.start && span.start < line_end {
-                line_num = i + 1;
-                line_start = char_count;
-                break;
-            }
-            char_count = line_end;
-        }
-        
-        let col_num = span.start - line_start + 1;
-        let line_content = lines.get(line_num - 1).unwrap_or(&"");
-        
-        // Enhance help message with source context
-        let existing_help = diagnostic.help.unwrap_or_default();
+        let (line_num, col_num) = idx.line_col(span.start);
+        let line_content = idx.line_text(source, span.start);
+        let underline_len = if span.end > span.start { span.end - span.start } else { 1 };
+
         let context_help = format!(
             "at line {}, column {}\n{}\n{}{}",
             line_num,
             col_num,
             line_content,
-            " ".repeat((span.start - line_start).max(0)),
-            "^".repeat((span.end - span.start).max(1))
+            " ".repeat(col_num.saturating_sub(1)),
+            "^".repeat(underline_len.min(line_content.len().saturating_sub(col_num.saturating_sub(1)).max(1)))
         );
-        
+
+        let existing_help = diagnostic.help.unwrap_or_default();
         diagnostic.help = Some(if existing_help.is_empty() {
             context_help
         } else {
             format!("{}\n{}", existing_help, context_help)
         });
-        
+
         diagnostic
     }
 }
 
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} error at {}: {}",
-            match self.stage {
-                Stage::Lex => "Lexical",
-                Stage::Parse => "Parse",
-                Stage::Semantic => "Semantic",
-                Stage::Codegen => "Codegen",
-            },
-            self.diagnostic.span,
-            self.diagnostic.message
-        )?;
+        let stage_name = match self.stage {
+            Stage::Lex => "Lexical",
+            Stage::Parse => "Parse",
+            Stage::Semantic => "Semantic",
+            Stage::Codegen => "Codegen",
+        };
+
+        // CC2.1: If we have source, show line:col instead of raw byte offsets.
+        if let Some(src) = &self.source {
+            let idx = LineIndex::new(src);
+            write!(
+                f,
+                "{} error at {}: {}",
+                stage_name,
+                idx.fmt_span(self.diagnostic.span),
+                self.diagnostic.message
+            )?;
+        } else {
+            write!(
+                f,
+                "{} error at {}: {}",
+                stage_name,
+                self.diagnostic.span,
+                self.diagnostic.message
+            )?;
+        }
         if let Some(help) = &self.diagnostic.help {
             write!(f, "\nhelp: {}", help)?;
         }

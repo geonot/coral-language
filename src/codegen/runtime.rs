@@ -5,7 +5,7 @@
 
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{FunctionType, PointerType, StructType};
+use inkwell::types::{FunctionType, IntType, PointerType, StructType};
 use inkwell::values::FunctionValue;
 use inkwell::AddressSpace;
 
@@ -13,6 +13,45 @@ use inkwell::AddressSpace;
 #[allow(dead_code)]
 pub struct RuntimeBindings<'ctx> {
     pub value_ptr_type: PointerType<'ctx>,
+    // NaN-boxing: i64 is the new universal value type
+    pub value_i64_type: IntType<'ctx>,
+    // NaN-boxing: bridge functions for old-API interop
+    pub nb_to_handle: FunctionValue<'ctx>,
+    pub nb_from_handle: FunctionValue<'ctx>,
+    // NaN-boxing: hot-path constructors (zero allocation for immediates)
+    pub nb_make_number: FunctionValue<'ctx>,
+    pub nb_make_bool: FunctionValue<'ctx>,
+    pub nb_make_unit: FunctionValue<'ctx>,
+    pub nb_make_none: FunctionValue<'ctx>,
+    pub nb_make_string: FunctionValue<'ctx>,
+    // NaN-boxing: hot-path extractors
+    pub nb_as_number: FunctionValue<'ctx>,
+    pub nb_as_bool: FunctionValue<'ctx>,
+    pub nb_tag: FunctionValue<'ctx>,
+    pub nb_is_truthy: FunctionValue<'ctx>,
+    pub nb_is_err: FunctionValue<'ctx>,
+    pub nb_is_absent: FunctionValue<'ctx>,
+    // NaN-boxing: retain/release (no-op for immediates)
+    pub nb_retain: FunctionValue<'ctx>,
+    pub nb_release: FunctionValue<'ctx>,
+    // NaN-boxing: arithmetic (fast path for numbers)
+    pub nb_add: FunctionValue<'ctx>,
+    pub nb_sub: FunctionValue<'ctx>,
+    pub nb_mul: FunctionValue<'ctx>,
+    pub nb_div: FunctionValue<'ctx>,
+    pub nb_rem: FunctionValue<'ctx>,
+    pub nb_neg: FunctionValue<'ctx>,
+    // NaN-boxing: comparisons (fast path for numbers + immediates)
+    pub nb_equals: FunctionValue<'ctx>,
+    pub nb_not_equals: FunctionValue<'ctx>,
+    pub nb_less_than: FunctionValue<'ctx>,
+    pub nb_greater_than: FunctionValue<'ctx>,
+    pub nb_less_equal: FunctionValue<'ctx>,
+    pub nb_greater_equal: FunctionValue<'ctx>,
+    // NaN-boxing: I/O
+    pub nb_print: FunctionValue<'ctx>,
+    pub nb_println: FunctionValue<'ctx>,
+    // Original pointer-based API (kept for cold-path calls via bridge)
     pub make_number: FunctionValue<'ctx>,
     pub make_bool: FunctionValue<'ctx>,
     pub make_string: FunctionValue<'ctx>,
@@ -231,6 +270,15 @@ pub struct RuntimeBindings<'ctx> {
     pub actor_graceful_stop: FunctionValue<'ctx>,
     // Range helper (Phase D)
     pub list_range: FunctionValue<'ctx>,
+    // StringBuilder / optimized string ops (L1.1)
+    pub sb_new: FunctionValue<'ctx>,
+    pub sb_push: FunctionValue<'ctx>,
+    pub sb_finish: FunctionValue<'ctx>,
+    pub sb_len: FunctionValue<'ctx>,
+    pub string_join_list: FunctionValue<'ctx>,
+    pub string_repeat: FunctionValue<'ctx>,
+    pub string_reverse: FunctionValue<'ctx>,
+    pub value_to_string: FunctionValue<'ctx>,
 }
 
 impl<'ctx> RuntimeBindings<'ctx> {
@@ -279,6 +327,173 @@ impl<'ctx> RuntimeBindings<'ctx> {
             false,
         );
         let closure_release_type = context.void_type().fn_type(&[i8_ptr.into()], false);
+
+        // ════════════════════════════════════════════════════════════════
+        // NaN-boxing: i64-based FFI declarations
+        // ════════════════════════════════════════════════════════════════
+
+        // Bridge functions (old API ↔ new i64 API)
+        let nb_to_handle = module.add_function(
+            "coral_nb_to_handle",
+            value_ptr_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_from_handle = module.add_function(
+            "coral_nb_from_handle",
+            i64_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // NaN-box constructors (zero-allocation for immediates)
+        let nb_make_number = module.add_function(
+            "coral_nb_make_number",
+            i64_type.fn_type(&[f64_type.into()], false),
+            None,
+        );
+        let nb_make_bool = module.add_function(
+            "coral_nb_make_bool",
+            i64_type.fn_type(&[i8_type.into()], false),
+            None,
+        );
+        let nb_make_unit = module.add_function(
+            "coral_nb_make_unit",
+            i64_type.fn_type(&[], false),
+            None,
+        );
+        let nb_make_none = module.add_function(
+            "coral_nb_make_none",
+            i64_type.fn_type(&[], false),
+            None,
+        );
+        let nb_make_string = module.add_function(
+            "coral_nb_make_string",
+            i64_type.fn_type(&[i8_ptr.into(), usize_type.into()], false),
+            None,
+        );
+
+        // NaN-box extractors
+        let nb_as_number = module.add_function(
+            "coral_nb_as_number",
+            f64_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_as_bool = module.add_function(
+            "coral_nb_as_bool",
+            i8_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_tag = module.add_function(
+            "coral_nb_tag",
+            i8_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_is_truthy = module.add_function(
+            "coral_nb_is_truthy",
+            i8_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_is_err = module.add_function(
+            "coral_nb_is_err",
+            i8_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_is_absent = module.add_function(
+            "coral_nb_is_absent",
+            i8_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+
+        // NaN-box retain/release (no-op for immediates)
+        let nb_retain = module.add_function(
+            "coral_nb_retain",
+            context.void_type().fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_release = module.add_function(
+            "coral_nb_release",
+            context.void_type().fn_type(&[i64_type.into()], false),
+            None,
+        );
+
+        // NaN-box arithmetic (fast path for numbers)
+        let nb_add = module.add_function(
+            "coral_nb_add",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_sub = module.add_function(
+            "coral_nb_sub",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_mul = module.add_function(
+            "coral_nb_mul",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_div = module.add_function(
+            "coral_nb_div",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_rem = module.add_function(
+            "coral_nb_rem",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_neg = module.add_function(
+            "coral_nb_neg",
+            i64_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+
+        // NaN-box comparisons (fast path for numbers + immediates)
+        let nb_equals = module.add_function(
+            "coral_nb_equals",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_not_equals = module.add_function(
+            "coral_nb_not_equals",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_less_than = module.add_function(
+            "coral_nb_less_than",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_greater_than = module.add_function(
+            "coral_nb_greater_than",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_less_equal = module.add_function(
+            "coral_nb_less_equal",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        let nb_greater_equal = module.add_function(
+            "coral_nb_greater_equal",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+
+        // NaN-box I/O
+        let nb_print = module.add_function(
+            "coral_nb_print",
+            context.void_type().fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_println = module.add_function(
+            "coral_nb_println",
+            context.void_type().fn_type(&[i64_type.into()], false),
+            None,
+        );
+
+        // ════════════════════════════════════════════════════════════════
+        // Original pointer-based API (kept for cold-path via bridge)
+        // ════════════════════════════════════════════════════════════════
 
         // Value constructors
         let make_number = module.add_function(
@@ -1049,6 +1264,49 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // StringBuilder / optimized string ops (L1.1)
+        let void_type = context.void_type();
+        let sb_new = module.add_function(
+            "coral_sb_new",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let sb_push = module.add_function(
+            "coral_sb_push",
+            void_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let sb_finish = module.add_function(
+            "coral_sb_finish",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let sb_len = module.add_function(
+            "coral_sb_len",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let string_join_list = module.add_function(
+            "coral_string_join_list",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let string_repeat = module.add_function(
+            "coral_string_repeat",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let string_reverse = module.add_function(
+            "coral_string_reverse",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let value_to_string = module.add_function(
+            "coral_value_to_string",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         // Map extensions
         let map_remove = module.add_function(
             "coral_map_remove",
@@ -1387,6 +1645,36 @@ impl<'ctx> RuntimeBindings<'ctx> {
 
         Self {
             value_ptr_type,
+            value_i64_type: i64_type,
+            nb_to_handle,
+            nb_from_handle,
+            nb_make_number,
+            nb_make_bool,
+            nb_make_unit,
+            nb_make_none,
+            nb_make_string,
+            nb_as_number,
+            nb_as_bool,
+            nb_tag,
+            nb_is_truthy,
+            nb_is_err,
+            nb_is_absent,
+            nb_retain,
+            nb_release,
+            nb_add,
+            nb_sub,
+            nb_mul,
+            nb_div,
+            nb_rem,
+            nb_neg,
+            nb_equals,
+            nb_not_equals,
+            nb_less_than,
+            nb_greater_than,
+            nb_less_equal,
+            nb_greater_equal,
+            nb_print,
+            nb_println,
             make_number,
             make_bool,
             make_string,
@@ -1578,6 +1866,14 @@ impl<'ctx> RuntimeBindings<'ctx> {
             actor_demonitor,
             actor_graceful_stop,
             list_range,
+            sb_new,
+            sb_push,
+            sb_finish,
+            sb_len,
+            string_join_list,
+            string_repeat,
+            string_reverse,
+            value_to_string,
         }
     }
 }

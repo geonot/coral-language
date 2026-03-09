@@ -25,6 +25,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             variable_allocas: HashMap::new(),
             function: ctor_fn,
             loop_stack: Vec::new(),
+            di_scope: None,
+            fn_name: String::new(),
+            in_tail_position: false,
+            cse_cache: HashMap::new(),
         };
         for field in &store.fields {
             let key = self.emit_string_literal(&field.name);
@@ -122,15 +126,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Extract message name/data and dispatch to @message methods
         // Use hash-based dispatch table for efficient message routing
         let name_key = self.emit_string_literal("name");
+        let name_key_ptr = self.nb_to_ptr(name_key);
         let data_key = self.emit_string_literal("data");
+        let data_key_ptr = self.nb_to_ptr(data_key);
         let name_field = self.call_runtime_ptr(
             self.runtime.map_get,
-            &[msg_param.into(), name_key.into()],
+            &[msg_param.into(), name_key_ptr.into()],
             "msg_name",
         );
         let data_field = self.call_runtime_ptr(
             self.runtime.map_get,
-            &[msg_param.into(), data_key.into()],
+            &[msg_param.into(), data_key_ptr.into()],
             "msg_data",
         );
 
@@ -160,12 +166,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             self.builder.position_at_end(current_bb);
             let method_name = self.emit_string_literal(&method.name);
+            let method_name_ptr = self.nb_to_ptr(method_name);
             let eq = self.call_runtime_ptr(
                 self.runtime.value_equals,
-                &[name_field.into(), method_name.into()],
+                &[name_field.into(), method_name_ptr.into()],
                 "msg_name_eq",
             );
-            let is_match = self.value_to_bool(eq);
+            let eq_nb = self.ptr_to_nb(eq);
+            let is_match = self.value_to_bool(eq_nb);
             self.builder
                 .build_conditional_branch(is_match, match_bb, next_bb)
                 .unwrap();
@@ -257,37 +265,47 @@ impl<'ctx> CodeGenerator<'ctx> {
             variable_allocas: HashMap::new(),
             function: ctor_fn,
             loop_stack: Vec::new(),
+            di_scope: None,
+            fn_name: String::new(),
+            in_tail_position: false,
+            cse_cache: HashMap::new(),
         };
         
         // Set __type__ field so we know what store type this is for method dispatch
         let type_key = self.emit_string_literal("__type__");
+        let type_key_ptr = self.nb_to_ptr(type_key);
         let type_value = self.emit_string_literal(&store.name);
+        let type_value_ptr = self.nb_to_ptr(type_value);
         self.call_runtime_ptr(
             self.runtime.map_set,
-            &[store_map.into(), type_key.into(), type_value.into()],
+            &[store_map.into(), type_key_ptr.into(), type_value_ptr.into()],
             "set_type",
         );
         
         // Initialize each field
         for field in &store.fields {
             let key = self.emit_string_literal(&field.name);
+            let key_ptr = self.nb_to_ptr(key);
             let value = if let Some(default) = &field.default {
                 let val = self.emit_expression(&mut ctx, default)?;
                 // For reference fields, retain the initial value
                 if field.is_reference {
-                    self.call_runtime_void(self.runtime.value_retain, &[val.into()], "retain_ref_field");
+                    self.call_nb_void(self.runtime.nb_retain, &[val.into()]);
                 }
                 val
             } else if field.is_reference {
                 // Reference fields default to unit (null reference)
-                self.call_runtime_ptr(self.runtime.make_unit, &[], "null_ref")
+                let unit_ptr = self.call_runtime_ptr(self.runtime.make_unit, &[], "null_ref");
+                self.ptr_to_nb(unit_ptr)
             } else {
                 // Value fields default to 0
                 self.wrap_number(self.f64_type.const_float(0.0))
             };
+            // Convert NaN-boxed value to Value* for map_set
+            let value_ptr = self.nb_to_ptr(value);
             self.call_runtime_ptr(
                 self.runtime.map_set,
-                &[store_map.into(), key.into(), value.into()],
+                &[store_map.into(), key_ptr.into(), value_ptr.into()],
                 "set_field",
             );
         }
@@ -334,9 +352,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             // Stash the handle in the map so methods can use it for persistence
             let handle_key = self.emit_string_literal("__store_handle__");
+            let handle_key_ptr = self.nb_to_ptr(handle_key);
             self.call_runtime_ptr(
                 self.runtime.map_set,
-                &[store_map.into(), handle_key.into(), store_handle.into()],
+                &[store_map.into(), handle_key_ptr.into(), store_handle.into()],
                 "set_handle",
             );
 
@@ -350,22 +369,27 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             // Copy the __type__ and __store_handle__ into the created map for method dispatch
             let type_key2 = self.emit_string_literal("__type__");
+            let type_key2_ptr = self.nb_to_ptr(type_key2);
             let type_val2 = self.emit_string_literal(&store.name);
+            let type_val2_ptr = self.nb_to_ptr(type_val2);
             self.call_runtime_ptr(
                 self.runtime.map_set,
-                &[created.into(), type_key2.into(), type_val2.into()],
+                &[created.into(), type_key2_ptr.into(), type_val2_ptr.into()],
                 "set_type_created",
             );
             let handle_key2 = self.emit_string_literal("__store_handle__");
+            let handle_key2_ptr = self.nb_to_ptr(handle_key2);
             self.call_runtime_ptr(
                 self.runtime.map_set,
-                &[created.into(), handle_key2.into(), store_handle.into()],
+                &[created.into(), handle_key2_ptr.into(), store_handle.into()],
                 "set_handle_created",
             );
 
-            self.builder.build_return(Some(&created)).unwrap();
+            let created_nb = self.ptr_to_nb(created);
+            self.builder.build_return(Some(&created_nb)).unwrap();
         } else {
-            self.builder.build_return(Some(&store_map)).unwrap();
+            let store_nb = self.ptr_to_nb(store_map);
+            self.builder.build_return(Some(&store_nb)).unwrap();
         }
         Ok(())
     }
@@ -385,17 +409,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             variable_allocas: HashMap::new(),
             function: llvm_fn,
             loop_stack: Vec::new(),
+            di_scope: None,
+            fn_name: String::new(),
+            in_tail_position: false,
+            cse_cache: HashMap::new(),
         };
 
         // First param is the store (Map), inject as `self`
-        let store_ptr = llvm_fn.get_nth_param(0).unwrap().into_pointer_value();
-        self.store_variable(&mut ctx, "self", store_ptr);
+        let store_val = llvm_fn.get_nth_param(0).unwrap().into_int_value();
+        self.store_variable(&mut ctx, "self", store_val);
 
-        // Remaining params are CoralValue* pointers (not f64)
+        // Remaining params are NaN-boxed i64 values
         for (i, param_ast) in function.params.iter().enumerate() {
             let param = llvm_fn.get_nth_param((i + 1) as u32).unwrap();
-            let value_ptr = param.into_pointer_value();
-            self.store_variable(&mut ctx, &param_ast.name, value_ptr);
+            let value = param.into_int_value();
+            self.store_variable(&mut ctx, &param_ast.name, value);
         }
 
         let block_value = self.emit_block(&mut ctx, &function.body)?;

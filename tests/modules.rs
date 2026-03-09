@@ -72,9 +72,9 @@ fn compiles_actor_with_state_and_self_access() {
     assert!(ir.contains("@coral_map_set"), "actor should initialize fields in state");
     // self.field access should use map_get
     assert!(ir.contains("@coral_map_get"), "self.field should emit map_get");
-    // Handler should pass state to methods (now returns ptr and takes ptr params)
-    assert!(ir.contains("define ptr @Greeter_say_hello(ptr"), 
-        "message handlers should take state ptr as first param");
+    // Handler should pass state to methods (now returns i64 NaN-boxed values)
+    assert!(ir.contains("define i64 @Greeter_say_hello(i64"), 
+        "message handlers should take state i64 as first param");
     // Handler invoke should be generated
     assert!(ir.contains("@__Greeter_handler_invoke"), "actor handler invoke should be generated");
     // Handler release should be generated
@@ -92,13 +92,13 @@ fn compiles_actor_handler_with_param() {
         .compile_to_ir(&source)
         .expect("failed to compile actor with param program");
 
-    // Handler with 1 param should take state ptr + ptr (now using Value* for all params)
-    assert!(ir.contains("define ptr @Counter_set_value(ptr %0, ptr %1)"), 
-        "handler with param should take state ptr and param");
-    // Dispatch no longer needs to convert msg_data to number (passed as Value* now)
+    // Handler with 1 param should take state i64 + i64 (NaN-boxed values)
+    assert!(ir.contains("define i64 @Counter_set_value(i64 %0, i64 %1)"), 
+        "handler with param should take state i64 and param");
+    // Dispatch no longer needs to convert msg_data to number (passed as NaN-boxed now)
     // Handler with no params should only take state
-    assert!(ir.contains("define ptr @Counter_ping(ptr %0)"),
-        "handler with no params should only take state ptr");
+    assert!(ir.contains("define i64 @Counter_ping(i64 %0)"),
+        "handler with no params should only take state i64");
 }
 
 #[test]

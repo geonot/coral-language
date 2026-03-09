@@ -1,10 +1,9 @@
 # Coral Self-Hosting Compiler Specification
 
-_Created: 2026-01-06_
+_Created: 2026-01-06_  
+_Status: **✅ COMPLETED** — Bootstrap achieved March 2026 (gen2 == gen3, byte-identical). See [SELF_HOSTING_STATUS.md](SELF_HOSTING_STATUS.md) for current status._
 
-## 1. Overview
-
-This document specifies the requirements and architecture for rewriting the Coral compiler in Coral itself (self-hosting). The self-hosted compiler will replace the current Rust implementation while maintaining full compatibility.
+> **Note:** This document is the original design specification. The actual implementation (7,690 lines across 7 flat files in `self_hosted/`) differs from the proposed architecture below in some details (e.g., MIR phase was dropped, module structure is flat rather than nested). Preserved as a reference for the design decisions that guided development.
 
 ### 1.1 Goals
 

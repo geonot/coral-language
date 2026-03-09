@@ -12,7 +12,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         params: &[Parameter],
         body: &Block,
         span: Span,
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         if body
             .statements
             .iter()
@@ -37,7 +37,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             let field_types: Vec<_> = capture_names
                 .iter()
-                .map(|_| self.runtime.value_ptr_type.into())
+                .map(|_| self.runtime.value_i64_type.into())
                 .collect();
             Some(self.context.struct_type(&field_types, false))
         };
@@ -80,7 +80,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|f| f.as_global_value().as_pointer_value())
             .unwrap_or_else(|| release_ptr_type.const_null());
         let args = &[invoke_ptr.into(), release_ptr.into(), env_ptr.into()];
-        Ok(self.call_runtime_ptr(self.runtime.make_closure, args, "make_closure"))
+        let closure_ptr = self.call_runtime_ptr(self.runtime.make_closure, args, "make_closure");
+        Ok(self.ptr_to_nb(closure_ptr))
     }
 
     /// Wrap a named function in a closure so it can be used as a first-class value.
@@ -91,7 +92,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         _ctx: &FunctionContext<'ctx>,
         name: &str,
         target_fn: FunctionValue<'ctx>,
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         let param_count = target_fn.count_params();
         let saved_block = self.builder.get_insert_block();
 
@@ -131,10 +132,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .unwrap()
                 .into_pointer_value();
-            call_args.push(arg_val.into());
+            // Retain before converting: nb_from_handle releases immediates,
+            // but args are borrowed from the runtime
+            self.call_runtime_void(self.runtime.value_retain, &[arg_val.into()], "retain_borrowed_arg");
+            // Convert Value* to NaN-boxed i64 for the target function
+            let arg_nb = self.ptr_to_nb(arg_val);
+            call_args.push(arg_nb.into());
         }
 
-        // Call the original function
+        // Call the original function (returns NaN-boxed i64)
         let result = self
             .builder
             .build_call(target_fn, &call_args, "thunk_call")
@@ -142,10 +148,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value()
             .left()
             .unwrap()
-            .into_pointer_value();
+            .into_int_value();
 
+        // Convert NaN-boxed i64 back to Value* for closure protocol
+        let result_ptr = self.nb_to_ptr(result);
         // Store result and return
-        self.builder.build_store(out_param, result).unwrap();
+        self.builder.build_store(out_param, result_ptr).unwrap();
         self.builder.build_return(None).unwrap();
 
         // Restore builder position
@@ -162,7 +170,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let null_release = release_ptr_type.const_null();
         let null_env = self.runtime.value_ptr_type.const_null();
         let closure_args = &[invoke_ptr.into(), null_release.into(), null_env.into()];
-        Ok(self.call_runtime_ptr(self.runtime.make_closure, closure_args, "fn_as_closure"))
+        let closure_ptr = self.call_runtime_ptr(self.runtime.make_closure, closure_args, "fn_as_closure");
+        Ok(self.ptr_to_nb(closure_ptr))
     }
 
     /// Emit code to construct an enum (ADT) variant value.
@@ -171,7 +180,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         ctx: &mut FunctionContext<'ctx>,
         variant_name: &str,
         args: &[Expression],
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         // Create tag name as a global string constant
         let tag_name_bytes = variant_name.as_bytes();
         let tag_name_global = self.get_or_create_string_constant(variant_name);
@@ -201,9 +210,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let array_type = self.runtime.value_ptr_type.array_type(field_count as u32);
             let mut temp_array = array_type.get_undef();
             for (idx, value) in field_values.iter().enumerate() {
+                let value_ptr = self.nb_to_ptr(*value);
                 temp_array = self
                     .builder
-                    .build_insert_value(temp_array, *value, idx as u32, "field")
+                    .build_insert_value(temp_array, value_ptr, idx as u32, "field")
                     .unwrap()
                     .into_array_value();
             }
@@ -222,18 +232,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         
         // Call coral_make_tagged(tag_name, tag_name_len, fields, field_count)
-        Ok(self.call_runtime_ptr(
+        let tagged_ptr = self.call_runtime_ptr(
             self.runtime.make_tagged,
             &[tag_name_ptr.into(), tag_name_len.into(), fields_ptr.into(), field_count_val.into()],
             "make_tagged",
-        ))
+        );
+        Ok(self.ptr_to_nb(tagged_ptr))
     }
     
     /// Emit a nullary enum constructor (no fields, e.g., None)
     pub(super) fn emit_enum_constructor_nullary(
         &mut self,
         variant_name: &str,
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         let tag_name_bytes = variant_name.as_bytes();
         let tag_name_global = self.get_or_create_string_constant(variant_name);
         let tag_name_ptr = self.builder
@@ -250,19 +261,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             .const_null();
         let zero = self.usize_type.const_zero();
         
-        Ok(self.call_runtime_ptr(
+        let tagged_ptr = self.call_runtime_ptr(
             self.runtime.make_tagged,
             &[tag_name_ptr.into(), tag_name_len.into(), null_ptr.into(), zero.into()],
             "make_tagged_nullary",
-        ))
+        );
+        Ok(self.ptr_to_nb(tagged_ptr))
     }
 
     pub(super) fn emit_closure_call(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
-        closure: PointerValue<'ctx>,
+        closure: IntValue<'ctx>,
         args: &[Expression],
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {
             arg_values.push(self.emit_expression(ctx, arg)?);
@@ -280,9 +292,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .array_type(arg_values.len() as u32);
             let mut temp_array = array_type.get_undef();
             for (idx, value) in arg_values.iter().enumerate() {
+                let value_ptr = self.nb_to_ptr(*value);
                 temp_array = self
                     .builder
-                    .build_insert_value(temp_array, *value, idx as u32, "closure_arg")
+                    .build_insert_value(temp_array, value_ptr, idx as u32, "closure_arg")
                     .unwrap()
                     .into_array_value();
             }
@@ -300,8 +313,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .const_int(arg_values.len() as u64, false);
             (ptr, len)
         };
-        let args = &[closure.into(), args_ptr.into(), len_value.into()];
-        Ok(self.call_runtime_ptr(self.runtime.closure_invoke, args, "closure_invoke"))
+        let closure_ptr = self.nb_to_ptr(closure);
+        let args = &[closure_ptr.into(), args_ptr.into(), len_value.into()];
+        let result_ptr = self.call_runtime_ptr(self.runtime.closure_invoke, args, "closure_invoke");
+        Ok(self.ptr_to_nb(result_ptr))
     }
     pub(super) fn determine_lambda_captures(
         &self,
@@ -370,6 +385,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Statement::For { variable, iterable, body, .. } => {
                     self.collect_captures_expr(iterable, available, &mut locals, captures, seen);
+                    locals.insert(variable.clone());
+                    self.collect_captures_block(body, available, &mut locals, captures, seen);
+                }
+                Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+                    self.collect_captures_expr(iterable, available, &mut locals, captures, seen);
+                    locals.insert(key_var.clone());
+                    locals.insert(value_var.clone());
+                    self.collect_captures_block(body, available, &mut locals, captures, seen);
+                }
+                Statement::ForRange { variable, start, end, step, body, .. } => {
+                    self.collect_captures_expr(start, available, &mut locals, captures, seen);
+                    self.collect_captures_expr(end, available, &mut locals, captures, seen);
+                    if let Some(s) = step {
+                        self.collect_captures_expr(s, available, &mut locals, captures, seen);
+                    }
                     locals.insert(variable.clone());
                     self.collect_captures_block(body, available, &mut locals, captures, seen);
                 }
@@ -442,6 +472,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Match(match_expr) => {
                 self.collect_captures_expr(&match_expr.value, available, locals, captures, seen);
                 for arm in &match_expr.arms {
+                    // S3.2: Guard expression may capture variables
+                    if let Some(guard) = &arm.guard {
+                        self.collect_captures_expr(guard, available, locals, captures, seen);
+                    }
                     self.collect_captures_block(&arm.body, available, locals, captures, seen);
                 }
                 if let Some(default) = &match_expr.default {
@@ -502,6 +536,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             variable_allocas: HashMap::new(),
             function: invoke_fn,
             loop_stack: Vec::new(),
+            di_scope: None,
+            fn_name: String::new(),
+            in_tail_position: false,
+            cse_cache: HashMap::new(),
         };
 
         if let Some(struct_type) = env_struct {
@@ -527,17 +565,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let value = self
                         .builder
                         .build_load(
-                            self.runtime.value_ptr_type,
+                            self.runtime.value_i64_type,
                             field_ptr,
                             &format!("capture_load_{}", idx),
                         )
                         .unwrap()
-                        .into_pointer_value();
-                    lambda_ctx.variable_allocas.insert(name.clone(), {
-                        let alloca = self.builder.build_alloca(self.runtime.value_ptr_type, &format!("{name}_ptr")).unwrap();
-                        self.builder.build_store(alloca, value).unwrap();
-                        alloca
-                    });
+                        .into_int_value();
+                    self.store_variable(&mut lambda_ctx, name, value);
                 }
             }
         }
@@ -554,7 +588,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )
                     .unwrap()
             };
-            let arg_value = self
+            let arg_ptr_val = self
                 .builder
                 .build_load(
                     self.runtime.value_ptr_type,
@@ -563,11 +597,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .unwrap()
                 .into_pointer_value();
+            // Retain before converting: nb_from_handle releases immediates,
+            // but args are borrowed from the runtime (reduce, closure_invoke, etc.)
+            self.call_runtime_void(self.runtime.value_retain, &[arg_ptr_val.into()], "retain_borrowed_arg");
+            // Convert Value* to NaN-boxed i64
+            let arg_value = self.ptr_to_nb(arg_ptr_val);
             self.store_variable(&mut lambda_ctx, &param.name, arg_value);
         }
 
     let result = self.emit_block(&mut lambda_ctx, body)?;
-        self.builder.build_store(out_param, result).unwrap();
+        let result_ptr = self.nb_to_ptr(result);
+        self.builder.build_store(out_param, result_ptr).unwrap();
         self.builder.build_return(None).unwrap();
 
         if let Some(block) = saved_block {
@@ -618,13 +658,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             let value = self
                 .builder
                 .build_load(
-                    self.runtime.value_ptr_type,
+                    self.runtime.value_i64_type,
                     field_ptr,
                     &format!("release_capture_{}", idx),
                 )
                 .unwrap()
-                .into_pointer_value();
-            self.call_runtime_void(self.runtime.value_release, &[value.into()], "release_capture");
+                .into_int_value();
+            self.call_nb_void(self.runtime.nb_release, &[value.into()]);
         }
         let raw_ptr = self
             .builder
@@ -651,7 +691,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn build_closure_env(
         &mut self,
         env_struct: Option<StructType<'ctx>>,
-        capture_values: &[PointerValue<'ctx>],
+        capture_values: &[IntValue<'ctx>],
         span: Span,
     ) -> Result<PointerValue<'ctx>, Diagnostic> {
         let i8_ptr_type = self.i8_type.ptr_type(AddressSpace::default());
@@ -676,7 +716,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .unwrap();
             for (idx, value) in capture_values.iter().enumerate() {
-                self.call_runtime_void(self.runtime.value_retain, &[(*value).into()], "retain_capture");
+                self.call_nb_void(self.runtime.nb_retain, &[(*value).into()]);
                 let field_ptr = self
                     .builder
                     .build_struct_gep(

@@ -466,3 +466,154 @@ pub extern "C" fn coral_string_lines(value: ValueHandle) -> ValueHandle {
     let lines: Vec<ValueHandle> = s.lines().map(|line| coral_make_string_from_rust(line)).collect();
     coral_make_list(lines.as_ptr(), lines.len())
 }
+
+
+// ─── StringBuilder FFI ───────────────────────────────────────────────
+// Provides O(n) string building instead of O(n²) repeated concatenation.
+
+struct StringBuilderObject {
+    buf: Vec<u8>,
+}
+
+/// Create a new StringBuilder. Returns a Bytes-tagged Value holding the builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_sb_new() -> ValueHandle {
+    let sb = Box::new(StringBuilderObject { buf: Vec::with_capacity(256) });
+    let handle = Box::into_raw(sb) as *mut std::ffi::c_void;
+    alloc_value(Value::from_heap(ValueTag::Bytes, handle))
+}
+
+/// Append a string to the StringBuilder. Mutates the builder in-place.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_sb_push(sb: ValueHandle, s: ValueHandle) {
+    if sb.is_null() || s.is_null() { return; }
+    let sb_val = unsafe { &*sb };
+    let s_val = unsafe { &*s };
+    if sb_val.tag != ValueTag::Bytes as u8 { return; }
+    let builder = unsafe { &mut *(sb_val.payload.ptr as *mut StringBuilderObject) };
+    let bytes = string_to_bytes(s_val);
+    builder.buf.extend_from_slice(&bytes);
+}
+
+/// Append raw bytes (from a string value) to the builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_sb_push_bytes(sb: ValueHandle, data: *const u8, len: usize) {
+    if sb.is_null() || data.is_null() { return; }
+    let sb_val = unsafe { &*sb };
+    if sb_val.tag != ValueTag::Bytes as u8 { return; }
+    let builder = unsafe { &mut *(sb_val.payload.ptr as *mut StringBuilderObject) };
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    builder.buf.extend_from_slice(slice);
+}
+
+/// Finalize the StringBuilder, returning a String value. Consumes the builder's buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_sb_finish(sb: ValueHandle) -> ValueHandle {
+    if sb.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    let sb_val = unsafe { &*sb };
+    if sb_val.tag != ValueTag::Bytes as u8 {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+    let builder = unsafe { &mut *(sb_val.payload.ptr as *mut StringBuilderObject) };
+    let result = coral_make_string(builder.buf.as_ptr(), builder.buf.len());
+    builder.buf.clear();
+    result
+}
+
+/// Get the current accumulated length of the StringBuilder.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_sb_len(sb: ValueHandle) -> ValueHandle {
+    if sb.is_null() { return coral_make_number(0.0); }
+    let sb_val = unsafe { &*sb };
+    if sb_val.tag != ValueTag::Bytes as u8 { return coral_make_number(0.0); }
+    let builder = unsafe { &*(sb_val.payload.ptr as *const StringBuilderObject) };
+    coral_make_number(builder.buf.len() as f64)
+}
+
+
+// ─── Optimized String Operations ─────────────────────────────────────
+// Direct FFI implementations that bypass O(n²) patterns in Coral stdlib.
+
+/// Join a list of strings with a separator. O(n) instead of O(n²).
+/// coral_string_join_list(list, separator) → String
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_join_list(list: ValueHandle, sep: ValueHandle) -> ValueHandle {
+    if list.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    let list_val = unsafe { &*list };
+    if list_val.tag != ValueTag::List as u8 {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+    let items = unsafe { &*(list_val.payload.ptr as *const ListObject) };
+    if items.items.is_empty() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+    
+    let sep_bytes = if !sep.is_null() {
+        string_to_bytes(unsafe { &*sep })
+    } else {
+        Vec::new()
+    };
+    
+    // Pre-calculate total size for single allocation
+    let mut total_len = 0usize;
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(items.items.len());
+    for elem in &items.items {
+        if elem.is_null() { 
+            parts.push(Vec::new());
+            continue;
+        }
+        let val = unsafe { &**elem };
+        let bytes = if val.tag == ValueTag::String as u8 {
+            string_to_bytes(val)
+        } else {
+            value_to_rust_string(val).into_bytes()
+        };
+        total_len += bytes.len();
+        parts.push(bytes);
+    }
+    total_len += sep_bytes.len() * parts.len().saturating_sub(1);
+    
+    let mut buf = Vec::with_capacity(total_len);
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(&sep_bytes);
+        }
+        buf.extend_from_slice(part);
+    }
+    
+    coral_make_string(buf.as_ptr(), buf.len())
+}
+
+/// Repeat a string N times. O(n) instead of O(n²).
+/// coral_string_repeat(str, count) → String
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_repeat(s: ValueHandle, count: ValueHandle) -> ValueHandle {
+    if s.is_null() || count.is_null() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+    let s_val = unsafe { &*s };
+    let n = unsafe { (*count).payload.number } as usize;
+    if n == 0 { return coral_make_string(std::ptr::null(), 0); }
+    
+    let bytes = string_to_bytes(s_val);
+    if bytes.is_empty() { return coral_make_string(std::ptr::null(), 0); }
+    
+    let total = bytes.len() * n;
+    let mut buf = Vec::with_capacity(total);
+    for _ in 0..n {
+        buf.extend_from_slice(&bytes);
+    }
+    coral_make_string(buf.as_ptr(), buf.len())
+}
+
+/// Reverse a string. O(n) instead of O(n²).
+/// coral_string_reverse(str) → String
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_reverse(s: ValueHandle) -> ValueHandle {
+    if s.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    let s_val = unsafe { &*s };
+    let s_str = value_to_rust_string(s_val);
+    // Reverse by Unicode grapheme clusters for correctness
+    let reversed: String = s_str.chars().rev().collect();
+    coral_make_string(reversed.as_ptr(), reversed.len())
+}

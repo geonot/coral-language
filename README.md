@@ -2,7 +2,7 @@
 
 A programming language combining Python-like ergonomics with C/Rust-level performance, featuring built-in actors, persistent stores, and automatic memory management via reference counting with cycle detection.
 
-**Status**: Pre-Alpha — 406 tests passing (0 failures), 121 end-to-end execution tests, JIT and native binary compilation working.
+**Status**: Phase Beta — Self-hosted compiler bootstraps (gen2 == gen3), 816 tests passing (0 failures), NaN-boxed value representation, type-specialized numeric codegen, JIT and native binary compilation working.
 
 ## Quick Start
 
@@ -48,17 +48,18 @@ Coral uses indentation-based syntax with `is` for binding, `*` for function decl
 | Functions (`*name(args)`) | Working | Implicit return, closures, higher-order |
 | Variables (`name is expr`) | Working | Rebindable, alloca-based |
 | Control flow (if/elif/else, while, for..in) | Working | Full codegen with PHI nodes |
-| Pattern matching (`match`) | Working | ADTs, literals, wildcards, nested patterns |
+| Pattern matching (`match`) | Working | ADTs, literals, wildcards, nested, guards, or-patterns |
 | Algebraic data types (`type`) | Working | Variants with fields, exhaustiveness checking |
 | Stores (mutable objects) | Working | Field access/mutation via `self.field` |
 | Traits | Working | Default methods, required methods, store/type implementation |
 | Actors | Working | Spawn, send, named actors, timers, supervision |
 | Lists & Maps | Working | Literals, push/pop/get/set, map/filter/reduce |
 | Template strings | Working | `'Value: {expr}'` with auto-coercion |
-| Pipeline operator (`~`) | Partial | Parses, basic codegen |
+| Pipeline operator (`~`) | Working | Full desugaring in lowering pass |
 | Persistent stores | Partial | Runtime WAL + dual-format storage; codegen incomplete |
 | Module system (`use`) | Working | Text-based expansion from `std/` directory |
 | Guard statements | Working | `cond ? stmt` as shorthand for `if cond { stmt }` |
+| Self-hosted compiler | **Bootstrap** | gen2 == gen3 byte-identical; 7,690 lines of Coral |
 
 ### Design Principles
 
@@ -73,7 +74,6 @@ Coral uses indentation-based syntax with `is` for binding, `*` for function decl
 
 ```
 Source → Lexer → Parser → Semantic → Lower → Codegen → LLVM IR
-              ↘ MIR (const-folding, limited)
 ```
 
 | Component | File | Lines | Description |
@@ -85,29 +85,28 @@ Source → Lexer → Parser → Semantic → Lower → Codegen → LLVM IR
 | Type System | `src/types/` | ~1,500 | Constraint solver, unification, ADT types |
 | Lowering | `src/lower.rs` | ~400 | Placeholder-to-lambda, IR preparation |
 | Codegen | `src/codegen/` | ~5,900 | LLVM IR emission via Inkwell |
-| MIR | `src/mir*.rs` | ~650 | Minimal const-evaluator (limited) |
 | Module Loader | `src/module_loader.rs` | ~250 | `use` directive expansion |
 | CLI | `src/main.rs` | ~330 | coralc binary with JIT/binary/IR emission |
 
 ### Runtime (`runtime/src/`)
 
-~23,000 lines of Rust implementing:
+~25,000 lines of Rust implementing:
 
 - **Tagged value system** — refcounted `Value` with NaN-boxing-style inline storage
 - **Reference counting** — CAS-based release, thread-local value pools, iterative drop
 - **Cycle detector** — mark-gray/scan/collect-white with lock-guarded safety
-- **175+ FFI functions** — `coral_make_*`, `coral_list_*`, `coral_map_*`, arithmetic, comparison, etc.
+- **220+ FFI functions** — `coral_make_*`, `coral_list_*`, `coral_map_*`, arithmetic, comparison, etc.
 - **Actor system** — work queue, scheduler, named registry, timers, supervision
 - **Persistent store** — WAL engine, JSONL + binary formats, field indexing
 - **Runtime telemetry** — allocator stats via `CORAL_RUNTIME_METRICS` env var
 
 ### Standard Library (`std/`)
 
-~950 lines of Coral across 16 modules. Most modules are thin wrappers around runtime builtins. See [docs/STDLIB_STATUS.md](docs/STDLIB_STATUS.md) for per-module assessment.
+~1,900 lines of Coral across 20 modules (plus 3 runtime-facing modules). Includes core data types, string/char processing, math, I/O, networking, JSON, time, encoding, sorting, formatting, and testing. See [docs/STDLIB_STATUS.md](docs/STDLIB_STATUS.md) for per-module assessment.
 
 ### Self-Hosted Compiler (`self_hosted/`)
 
-~2,165 lines of Coral implementing a front-end (lexer + parser). See [docs/SELF_HOSTING_STATUS.md](docs/SELF_HOSTING_STATUS.md) for details.
+7,690 lines of Coral implementing a complete compiler (lexer, parser, lower, module_loader, semantic, codegen, compiler). **Bootstraps successfully** — compiles itself, and the output compiles itself again to produce byte-identical IR. See [docs/SELF_HOSTING_STATUS.md](docs/SELF_HOSTING_STATUS.md) for details.
 
 ## CLI Usage
 
@@ -166,33 +165,31 @@ use std.math
 All documentation is in [docs/](docs/). See [docs/README.md](docs/README.md) for the full index.
 
 Key documents:
-- [docs/ROADMAP_TO_ALPHA.md](docs/ROADMAP_TO_ALPHA.md) — Outstanding issues and path to alpha release
-- [docs/SELF_HOSTING_STATUS.md](docs/SELF_HOSTING_STATUS.md) — Self-hosted compiler progress
-- [docs/STDLIB_STATUS.md](docs/STDLIB_STATUS.md) — Standard library completeness
-- [REMEDIATION_TRACKER.md](REMEDIATION_TRACKER.md) — Detailed bug fix history and current status
+- [docs/LANGUAGE_EVOLUTION_ROADMAP.md](docs/LANGUAGE_EVOLUTION_ROADMAP.md) — Authoritative roadmap (6 pillars, all tasks)
+- [docs/EVOLUTION_PROGRESS.md](docs/EVOLUTION_PROGRESS.md) — Implementation progress tracker
+- [docs/LLM_ONBOARDING.md](docs/LLM_ONBOARDING.md) — Agent onboarding and workflow guide
 
 ## Project Layout
 
 ```
 coral/
-├── src/                    # Compiler (Rust, ~15,500 lines)
+├── src/                    # Compiler (Rust, ~16,200 lines)
 │   ├── lexer.rs            # Indent-aware tokenizer
 │   ├── parser.rs           # Recursive-descent parser
 │   ├── ast.rs              # AST definitions
 │   ├── semantic.rs         # Semantic analysis + type inference
 │   ├── types/              # Type system (core, env, solver)
-│   ├── codegen/            # LLVM IR generation (mod.rs, runtime.rs)
+│   ├── codegen/            # LLVM IR generation (6 modules)
 │   ├── lower.rs            # Placeholder desugaring
-│   ├── mir*.rs             # MIR const-evaluator
 │   ├── compiler.rs         # Pipeline orchestration
 │   ├── main.rs             # CLI (coralc)
 │   └── module_loader.rs    # use-directive resolution
-├── runtime/                # Runtime library (Rust, ~23,000 lines)
+├── runtime/                # Runtime library (Rust, ~25,000 lines)
 │   └── src/                # Tagged values, RC, actors, stores
-├── std/                    # Standard library (Coral, ~950 lines)
-├── self_hosted/            # Self-hosted compiler (Coral, ~2,165 lines)
+├── std/                    # Standard library (Coral, ~1,900 lines, 20 modules)
+├── self_hosted/            # Self-hosted compiler (Coral, ~7,700 lines, bootstraps)
 ├── examples/               # Example programs
-├── tests/                  # Integration tests (~7,500 lines)
+├── tests/                  # Integration tests (~14,000 lines, 816 tests)
 ├── docs/                   # Documentation
 ├── tree-sitter-coral/      # Tree-sitter grammar
 └── vscode-coral/           # VS Code extension

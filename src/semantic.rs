@@ -174,6 +174,15 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                 
                 // Handle enum (sum type) variants - register constructors
                 if !r#type.variants.is_empty() {
+                    // T2.1: Register generic type parameters in TypeEnv
+                    let has_type_params = !r#type.type_params.is_empty();
+                    if has_type_params {
+                        types.register_generic_type(
+                            r#type.name.clone(),
+                            r#type.type_params.iter().map(|s| s.as_str()).collect(),
+                        );
+                    }
+                    
                     // Register the enum type itself as an ADT
                     types.insert(r#type.name.clone(), TypeId::Adt(r#type.name.clone(), vec![]));
                     
@@ -195,6 +204,17 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                             }
                         }
                         constructor_owners.insert(ctor_name.clone(), r#type.name.clone());
+                        
+                        // T2.2: For generic enums, register constructors for let-polymorphism
+                        // instead of a fixed monomorphic type. Each call site will get fresh vars.
+                        if has_type_params {
+                            types.register_generic_constructor(
+                                ctor_name.clone(),
+                                r#type.name.clone(),
+                                r#type.type_params.clone(),
+                                variant.fields.len(),
+                            );
+                        }
                         
                         if variant.fields.is_empty() {
                             // Nullary constructor - register as an ADT value (not a function)
@@ -256,11 +276,11 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                         }
                     }
                 } else {
-                    // Non-actor store: register constructor make_StoreName() -> Any
+                    // Non-actor store: register constructor make_StoreName() -> Store(name)
                     let ctor_name = format!("make_{}", store.name);
                     types.insert(
                         ctor_name,
-                        TypeId::Func(vec![], Box::new(TypeId::Primitive(Primitive::Any))),
+                        TypeId::Func(vec![], Box::new(TypeId::Store(store.name.clone()))),
                     );
                 }
                 // Track store field names for member access type inference (TS-4)
@@ -325,6 +345,21 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
 
     // Collect warnings for unhandled error values
     let mut warnings = Vec::new();
+
+    // T1.1/T1.5: Warn on remaining Unknown types after solving.
+    // Skip internal names (prefixed with $, $$, or containing ::) and builtins.
+    for (name, ty) in resolved.iter_all() {
+        if ty.contains_unknown()
+            && !name.starts_with('$')
+            && !name.contains("::")
+            && !is_builtin_name(&name)
+        {
+            warnings.push(Diagnostic::warning(
+                format!("type of `{}` could not be fully inferred (contains Unknown)", name),
+                Span::new(0, 0),
+            ));
+        }
+    }
 
     // Check match exhaustiveness after type definitions are collected (TS-9: warnings, not errors)
     check_all_match_exhaustiveness(&globals, &functions, &type_defs, &mut warnings);
@@ -664,6 +699,9 @@ fn has_return_statements(block: &Block) -> bool {
             crate::ast::Statement::For { body, .. } => {
                 if has_return_statements(body) { return true; }
             }
+            crate::ast::Statement::ForRange { body, .. } => {
+                if has_return_statements(body) { return true; }
+            }
             _ => {}
         }
     }
@@ -721,6 +759,23 @@ fn collect_block_constraints(
                 types.insert(variable.clone(), elem_ty);
                 let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
             }
+            crate::ast::Statement::ForKV { key_var, value_var, iterable, body, span } => {
+                let iterable_ty = collect_constraints_expr(iterable, constraints, types, graph);
+                let elem_ty = TypeId::TypeVar(graph.fresh());
+                constraints.push(ConstraintKind::IterableAt(iterable_ty, elem_ty.clone(), *span));
+                types.insert(key_var.clone(), elem_ty.clone());
+                types.insert(value_var.clone(), elem_ty);
+                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
+            }
+            crate::ast::Statement::ForRange { variable, start, end, step, body, .. } => {
+                let _ = collect_constraints_expr(start, constraints, types, graph);
+                let _ = collect_constraints_expr(end, constraints, types, graph);
+                if let Some(s) = step {
+                    let _ = collect_constraints_expr(s, constraints, types, graph);
+                }
+                types.insert(variable.clone(), TypeId::Primitive(Primitive::Float));
+                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
+            }
             crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_) => {}
             crate::ast::Statement::FieldAssign { target, value, .. } => {
                 let _ = collect_constraints_expr(target, constraints, types, graph);
@@ -752,10 +807,32 @@ fn collect_constraints_expr(
         Expression::InlineAsm { .. } => TypeId::Unknown,
         Expression::PtrLoad { .. } => TypeId::Unknown,
         Expression::Unsafe { .. } => TypeId::Unknown,
-        Expression::Identifier(name, _) => types
-            .get(name)
-            .cloned()
-            .unwrap_or(TypeId::Unknown),
+        Expression::Identifier(name, _) => {
+            // T2.2: Let-polymorphism for generic constructors.
+            // Each use of a generic constructor (e.g., None, Some) gets fresh type vars.
+            if let Some((enum_name, type_params, field_count)) = types.get_generic_constructor(name).cloned() {
+                // Create fresh type variables for each type parameter
+                let fresh_args: Vec<TypeId> = type_params.iter()
+                    .map(|_| TypeId::TypeVar(graph.fresh()))
+                    .collect();
+                let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
+                if field_count == 0 {
+                    // Nullary constructor: return ADT directly
+                    adt_ty
+                } else {
+                    // N-ary constructor: return Func(fresh_vars...) -> ADT[fresh_vars...]
+                    let param_types: Vec<TypeId> = (0..field_count)
+                        .map(|_| TypeId::TypeVar(graph.fresh()))
+                        .collect();
+                    TypeId::Func(param_types, Box::new(adt_ty))
+                }
+            } else {
+                types
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(TypeId::Unknown)
+            }
+        }
         Expression::Placeholder(id, _) => TypeId::Placeholder(*id),
         Expression::TaxonomyPath { .. } => TypeId::Primitive(Primitive::String),
         Expression::List(items, span) => {
@@ -983,30 +1060,87 @@ fn collect_constraints_expr(
                         types.insert(name.clone(), scrutinee_ty.clone());
                     }
                     crate::ast::MatchPattern::Constructor { name, fields, span: _ } => {
-                        // Look up the constructor to find its ADT type
-                        if let Some(ctor_ty) = types.get(name) {
-                            let adt_ty = match ctor_ty {
-                                // Nullary constructor → type is directly the ADT
-                                TypeId::Adt(adt_name, args) => TypeId::Adt(adt_name.clone(), args.clone()),
-                                // Constructor with fields → return type of the function is the ADT
-                                TypeId::Func(_, ret) => (**ret).clone(),
-                                _ => TypeId::Primitive(Primitive::Any),
-                            };
-                            // Constrain the scrutinee to the ADT type
+                        // T2.2: Let-polymorphism for generic constructors in match patterns.
+                        // If the constructor belongs to a generic enum, instantiate fresh type vars
+                        // and unify the fields with those vars.
+                        if let Some((enum_name, type_params, _field_count)) = types.get_generic_constructor(name).cloned() {
+                            let fresh_args: Vec<TypeId> = type_params.iter()
+                                .map(|_| TypeId::TypeVar(graph.fresh()))
+                                .collect();
+                            let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
                             constraints.push(ConstraintKind::EqualAt(
                                 scrutinee_ty.clone(),
                                 adt_ty,
                                 match_span,
                             ));
-                        }
-                        // Bind field variables (fields are dynamically typed for now)
-                        for pat in fields {
-                            collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                            // Bind pattern fields to fresh type vars
+                            for pat in fields {
+                                let field_ty = TypeId::TypeVar(graph.fresh());
+                                collect_pattern_bindings(pat, &field_ty, types);
+                            }
+                        } else {
+                            // Non-generic constructor: original behavior
+                            if let Some(ctor_ty) = types.get(name) {
+                                let adt_ty = match ctor_ty {
+                                    TypeId::Adt(adt_name, args) => TypeId::Adt(adt_name.clone(), args.clone()),
+                                    TypeId::Func(_, ret) => (**ret).clone(),
+                                    _ => TypeId::Primitive(Primitive::Any),
+                                };
+                                constraints.push(ConstraintKind::EqualAt(
+                                    scrutinee_ty.clone(),
+                                    adt_ty,
+                                    match_span,
+                                ));
+                            }
+                            // Bind field variables (fields are dynamically typed for now)
+                            for pat in fields {
+                                collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                            }
                         }
                     }
                     crate::ast::MatchPattern::Wildcard(_) => {
                         // Wildcard matches anything, no type constraints
                     }
+                    crate::ast::MatchPattern::Or(alternatives) => {
+                        // Or-pattern: collect constraints from each alternative
+                        for alt in alternatives {
+                            match alt {
+                                crate::ast::MatchPattern::Integer(_) => {
+                                    constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                                }
+                                crate::ast::MatchPattern::Bool(_) => {
+                                    constraints.push(ConstraintKind::EqualAt(
+                                        scrutinee_ty.clone(),
+                                        TypeId::Primitive(Primitive::Bool),
+                                        match_span,
+                                    ));
+                                }
+                                crate::ast::MatchPattern::String(_) => {
+                                    constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), TypeId::Primitive(Primitive::String), match_span));
+                                }
+                                crate::ast::MatchPattern::Identifier(name) => {
+                                    types.insert(name.clone(), scrutinee_ty.clone());
+                                }
+                                crate::ast::MatchPattern::Constructor { name, fields, .. } => {
+                                    if let Some((enum_name, type_params, _field_count)) = types.get_generic_constructor(name).cloned() {
+                                        let fresh_args: Vec<TypeId> = type_params.iter()
+                                            .map(|_| TypeId::TypeVar(graph.fresh()))
+                                            .collect();
+                                        let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
+                                        constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), adt_ty, match_span));
+                                    }
+                                    for pat in fields {
+                                        collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                // S3.2: Collect constraints from guard expression
+                if let Some(guard) = &arm.guard {
+                    collect_constraints_expr(guard, constraints, types, graph);
                 }
                 let arm_ty = collect_block_constraints(&arm.body, constraints, types, graph, None);
                 arm_tys.push(arm_ty);
@@ -1101,6 +1235,11 @@ fn collect_pattern_bindings(pattern: &crate::ast::MatchPattern, ty: &TypeId, typ
             }
         }
         // Literal patterns don't introduce bindings
+        crate::ast::MatchPattern::Or(alternatives) => {
+            for alt in alternatives {
+                collect_pattern_bindings(alt, ty, types);
+            }
+        }
         crate::ast::MatchPattern::Integer(_)
         | crate::ast::MatchPattern::Bool(_)
         | crate::ast::MatchPattern::String(_)
@@ -1151,7 +1290,18 @@ fn type_from_annotation(ann: &crate::ast::TypeAnnotation) -> TypeId {
             }
         },
         // Unknown type annotations are permissive.
-        _ => TypeId::Unknown,
+        // T2.3: Handle user-defined generic types like Option[Int], Result[T, E], etc.
+        name => {
+            if !ann.type_args.is_empty() {
+                let type_args: Vec<TypeId> = ann.type_args.iter()
+                    .map(|a| type_from_annotation(a))
+                    .collect();
+                TypeId::Adt(name.to_string(), type_args)
+            } else {
+                // Could be a non-generic ADT or truly unknown
+                TypeId::Adt(name.to_string(), vec![])
+            }
+        },
     };
     
     base_type
@@ -1214,6 +1364,25 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
             }
             Statement::For { variable, iterable, body, span } => {
                 check_expression(iterable, scopes, known_names)?;
+                scopes.push();
+                scopes.declare(variable.clone(), *span);
+                check_block(body, scopes, known_names)?;
+                scopes.pop();
+            }
+            Statement::ForKV { key_var, value_var, iterable, body, span } => {
+                check_expression(iterable, scopes, known_names)?;
+                scopes.push();
+                scopes.declare(key_var.clone(), *span);
+                scopes.declare(value_var.clone(), *span);
+                check_block(body, scopes, known_names)?;
+                scopes.pop();
+            }
+            Statement::ForRange { variable, start, end, step, body, span } => {
+                check_expression(start, scopes, known_names)?;
+                check_expression(end, scopes, known_names)?;
+                if let Some(s) = step {
+                    check_expression(s, scopes, known_names)?;
+                }
                 scopes.push();
                 scopes.declare(variable.clone(), *span);
                 check_block(body, scopes, known_names)?;
@@ -1389,7 +1558,13 @@ fn is_builtin_name(name: &str) -> bool {
         // Memory operations (runtime FFI)
         "value_retain" | "value_release" | "heap_alloc" | "heap_free" |
         // Range helper
-        "range"
+        "range" |
+        // StringBuilder / optimized string ops (L1.1)
+        "sb_new" | "sb_push" | "sb_finish" | "sb_len" |
+        "string_join_list" | "join_list" |
+        "string_repeat" | "repeat_string" |
+        "string_reverse" | "reverse_string" |
+        "value_to_string"
     )
 }
 
@@ -1399,6 +1574,10 @@ fn check_match_expression(expr: &MatchExpression, scopes: &mut ScopeStack, known
         // Match arms can introduce bindings via patterns
         scopes.push();
         declare_pattern_bindings(&arm.pattern, scopes, arm.body.span);
+        // S3.2: Check guard expression in the arm's scope (pattern vars available)
+        if let Some(guard) = &arm.guard {
+            check_expression(guard, scopes, known_names)?;
+        }
         check_block(&arm.body, scopes, known_names)?;
         scopes.pop();
     }
@@ -1421,6 +1600,11 @@ fn declare_pattern_bindings(pattern: &crate::ast::MatchPattern, scopes: &mut Sco
             }
         }
         // Other patterns don't introduce bindings
+        crate::ast::MatchPattern::Or(alternatives) => {
+            for alt in alternatives {
+                declare_pattern_bindings(alt, scopes, span);
+            }
+        }
         crate::ast::MatchPattern::Integer(_)
         | crate::ast::MatchPattern::Bool(_)
         | crate::ast::MatchPattern::String(_)
@@ -1504,6 +1688,18 @@ fn check_block_match_exhaustiveness(
             }
             Statement::For { iterable, body, .. } => {
                 check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
+                check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
+            }
+            Statement::ForKV { iterable, body, .. } => {
+                check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
+                check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
+            }
+            Statement::ForRange { start, end, step, body, .. } => {
+                check_expr_match_exhaustiveness(start, ctor_map, enum_variants, warnings);
+                check_expr_match_exhaustiveness(end, ctor_map, enum_variants, warnings);
+                if let Some(s) = step {
+                    check_expr_match_exhaustiveness(s, ctor_map, enum_variants, warnings);
+                }
                 check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
             }
             Statement::Break(_) | Statement::Continue(_) => {}
@@ -1606,6 +1802,34 @@ fn check_expr_match_exhaustiveness(
     }
 }
 
+/// Recursively collect constructor names, wildcards, and identifiers from a pattern
+/// for exhaustiveness checking.  Handles Or-patterns by recursing into alternatives.
+fn collect_pattern_ctors_for_exhaustiveness(
+    pattern: &crate::ast::MatchPattern,
+    matched_ctors: &mut HashSet<String>,
+    has_wildcard: &mut bool,
+    has_identifier_catch_all: &mut bool,
+) {
+    match pattern {
+        crate::ast::MatchPattern::Constructor { name, .. } => {
+            matched_ctors.insert(name.clone());
+        }
+        crate::ast::MatchPattern::Wildcard(_) => {
+            *has_wildcard = true;
+        }
+        crate::ast::MatchPattern::Identifier(_) => {
+            *has_identifier_catch_all = true;
+        }
+        crate::ast::MatchPattern::Or(alternatives) => {
+            for alt in alternatives {
+                collect_pattern_ctors_for_exhaustiveness(alt, matched_ctors, has_wildcard, has_identifier_catch_all);
+            }
+        }
+        // Literals don't help with enum exhaustiveness
+        _ => {}
+    }
+}
+
 /// Check a single match expression for exhaustiveness (TS-9: warnings + nested ADT checking)
 fn check_single_match_exhaustiveness(
     match_expr: &MatchExpression,
@@ -1624,20 +1848,7 @@ fn check_single_match_exhaustiveness(
     let mut has_identifier_catch_all = false;
     
     for arm in &match_expr.arms {
-        match &arm.pattern {
-            crate::ast::MatchPattern::Constructor { name, .. } => {
-                matched_ctors.insert(name.clone());
-            }
-            crate::ast::MatchPattern::Wildcard(_) => {
-                has_wildcard = true;
-            }
-            crate::ast::MatchPattern::Identifier(_) => {
-                // An identifier pattern catches everything
-                has_identifier_catch_all = true;
-            }
-            // Literals (integer, bool, string, list) don't help with enum exhaustiveness
-            _ => {}
-        }
+        collect_pattern_ctors_for_exhaustiveness(&arm.pattern, &mut matched_ctors, &mut has_wildcard, &mut has_identifier_catch_all);
     }
     
     // If there's a wildcard or identifier catch-all, match is exhaustive
@@ -1933,6 +2144,21 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
                 tracker.touch(variable);
                 visit_block(body, tracker, mark_returns_as_escape);
             }
+            Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+                visit_expression(iterable, tracker);
+                tracker.touch(key_var);
+                tracker.touch(value_var);
+                visit_block(body, tracker, mark_returns_as_escape);
+            }
+            Statement::ForRange { start, end, step, body, variable, .. } => {
+                visit_expression(start, tracker);
+                visit_expression(end, tracker);
+                if let Some(s) = step {
+                    visit_expression(s, tracker);
+                }
+                tracker.touch(variable);
+                visit_block(body, tracker, mark_returns_as_escape);
+            }
             Statement::Break(_) | Statement::Continue(_) => {}
             Statement::FieldAssign { target, value, .. } => {
                 visit_expression(target, tracker);
@@ -2007,6 +2233,9 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
         Expression::Match(match_expr) => {
             visit_expression(&match_expr.value, tracker);
             for arm in &match_expr.arms {
+                if let Some(guard) = &arm.guard {
+                    visit_expression(guard, tracker);
+                }
                 visit_block(&arm.body, tracker, false);
             }
             if let Some(default) = &match_expr.default {
@@ -2276,6 +2505,16 @@ fn find_in_statement(
             find_forbidden_identifier(iterable, forbidden)
                 .or_else(|| find_in_block(body, forbidden))
         }
+        Statement::ForKV { iterable, body, .. } => {
+            find_forbidden_identifier(iterable, forbidden)
+                .or_else(|| find_in_block(body, forbidden))
+        }
+        Statement::ForRange { start, end, step, body, .. } => {
+            find_forbidden_identifier(start, forbidden)
+                .or_else(|| find_forbidden_identifier(end, forbidden))
+                .or_else(|| step.as_ref().and_then(|s| find_forbidden_identifier(s, forbidden)))
+                .or_else(|| find_in_block(body, forbidden))
+        }
         Statement::Break(_) | Statement::Continue(_) => None,
         Statement::FieldAssign { target, value, .. } => {
             find_forbidden_identifier(target, forbidden)
@@ -2389,6 +2628,18 @@ fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic
             }
             Statement::For { iterable, body, .. } => {
                 check_expr_nested_blocks(iterable, warnings);
+                check_block_for_unhandled_errors(body, warnings);
+            }
+            Statement::ForKV { iterable, body, .. } => {
+                check_expr_nested_blocks(iterable, warnings);
+                check_block_for_unhandled_errors(body, warnings);
+            }
+            Statement::ForRange { start, end, step, body, .. } => {
+                check_expr_nested_blocks(start, warnings);
+                check_expr_nested_blocks(end, warnings);
+                if let Some(s) = step {
+                    check_expr_nested_blocks(s, warnings);
+                }
                 check_block_for_unhandled_errors(body, warnings);
             }
             Statement::Break(_) | Statement::Continue(_) => {}

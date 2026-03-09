@@ -8,6 +8,10 @@ mod weak_ref;
 mod cycle_detector;
 mod symbol;
 
+// NaN-boxing value representation (M1)
+pub mod nanbox;
+pub mod nanbox_ffi;
+
 // Split modules (IQ-3)
 pub mod actor_ops;
 pub mod arithmetic;
@@ -476,7 +480,7 @@ impl Value {
     }
 }
 
-fn alloc_value(value: Value) -> ValueHandle {
+pub(crate) fn alloc_value(value: Value) -> ValueHandle {
     ensure_runtime_initialized();
     LIVE_VALUE_COUNT.fetch_add(1, Ordering::Relaxed);
     // Fast path: thread-local pool (no locking)

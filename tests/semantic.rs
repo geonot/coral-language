@@ -10,6 +10,7 @@ use coralc::ast::{
     Program,
     Statement,
     StoreDefinition,
+    TypeAnnotation,
     TypeDefinition,
     TypeVariant,
     VariantField,
@@ -215,6 +216,7 @@ fn allows_default_referencing_earlier_parameter() {
 fn assigns_any_to_message_data_and_actor_primitive() {
     let message_type = TypeDefinition {
         name: "Message".into(),
+        type_params: vec![],
         fields: vec![Field {
             name: "data".into(),
             is_reference: false,
@@ -462,6 +464,7 @@ fn accepts_enum_constructor_call() {
     // Define an enum: enum Option { Some(value), None }
     let option_enum = TypeDefinition {
         name: "Option".into(),
+        type_params: vec![],
         fields: vec![],
         methods: vec![],
         variants: vec![
@@ -512,6 +515,7 @@ fn accepts_nullary_enum_constructor() {
     // Define an enum: enum Option { Some(value), None }
     let option_enum = TypeDefinition {
         name: "Option".into(),
+        type_params: vec![],
         fields: vec![],
         methods: vec![],
         variants: vec![
@@ -801,4 +805,190 @@ fn method_based_equality_test() {
     // x.equals(y) for equality comparison - tested via codegen
     // This is a placeholder to document the new equality model
     assert!(true);
+}
+
+// ============================================================================
+// T2.1/T2.2: Generic type parameters and let-polymorphism
+// ============================================================================
+
+#[test]
+fn generic_enum_constructor_infers_fresh_types() {
+    // enum Option[T]
+    //     Some(value)
+    //     None
+    // *main()
+    //     x is Some(42)
+    //     y is Some("hello")
+    // Both should succeed - each call gets fresh type vars (let-polymorphism)
+    let option_enum = TypeDefinition {
+        name: "Option".into(),
+        type_params: vec!["T".into()],
+        fields: vec![],
+        methods: vec![],
+        variants: vec![
+            TypeVariant {
+                name: "Some".into(),
+                fields: vec![VariantField {
+                    name: Some("value".into()),
+                    type_annotation: None,
+                    span: span(),
+                }],
+                span: span(),
+            },
+            TypeVariant {
+                name: "None".into(),
+                fields: vec![],
+                span: span(),
+            },
+        ],
+        with_traits: vec![],
+        span: span(),
+    };
+
+    let function = Function {
+        name: "main".into(),
+        params: vec![],
+        body: Block {
+            statements: vec![
+                Statement::Binding(Binding {
+                    name: "x".into(),
+                    type_annotation: None,
+                    value: Expression::Call {
+                        callee: Box::new(ident("Some")),
+                        args: vec![int_literal(42)],
+                        span: span(),
+                    },
+                    span: span(),
+                }),
+                Statement::Binding(Binding {
+                    name: "y".into(),
+                    type_annotation: None,
+                    value: Expression::Call {
+                        callee: Box::new(ident("Some")),
+                        args: vec![Expression::String("hello".into(), span())],
+                        span: span(),
+                    },
+                    span: span(),
+                }),
+            ],
+            value: None,
+            span: span(),
+        },
+        kind: FunctionKind::Free,
+        span: span(),
+    };
+
+    let program = Program::new(
+        vec![Item::Type(option_enum), Item::Function(function)],
+        span(),
+    );
+    semantic::analyze(program).expect("generic enum should allow polymorphic constructor calls");
+}
+
+#[test]
+fn generic_nullary_constructor_in_match() {
+    // Generic None should work in match patterns
+    let option_enum = TypeDefinition {
+        name: "Option".into(),
+        type_params: vec!["T".into()],
+        fields: vec![],
+        methods: vec![],
+        variants: vec![
+            TypeVariant {
+                name: "Some".into(),
+                fields: vec![VariantField {
+                    name: Some("value".into()),
+                    type_annotation: None,
+                    span: span(),
+                }],
+                span: span(),
+            },
+            TypeVariant {
+                name: "None".into(),
+                fields: vec![],
+                span: span(),
+            },
+        ],
+        with_traits: vec![],
+        span: span(),
+    };
+
+    let function = Function {
+        name: "main".into(),
+        params: vec![],
+        body: Block {
+            statements: vec![],
+            value: Some(Box::new(ident("None"))),
+            span: span(),
+        },
+        kind: FunctionKind::Free,
+        span: span(),
+    };
+
+    let program = Program::new(
+        vec![Item::Type(option_enum), Item::Function(function)],
+        span(),
+    );
+    semantic::analyze(program).expect("generic nullary constructor should type-check");
+}
+
+#[test]
+fn generic_type_annotation_in_param() {
+    // T2.3: *foo(x: Option[Int]) should parse and type-check
+    // The annotation creates Adt("Option", [Primitive(Int)])
+    let option_enum = TypeDefinition {
+        name: "Option".into(),
+        type_params: vec!["T".into()],
+        fields: vec![],
+        methods: vec![],
+        variants: vec![
+            TypeVariant {
+                name: "Some".into(),
+                fields: vec![VariantField {
+                    name: Some("value".into()),
+                    type_annotation: None,
+                    span: span(),
+                }],
+                span: span(),
+            },
+            TypeVariant {
+                name: "None".into(),
+                fields: vec![],
+                span: span(),
+            },
+        ],
+        with_traits: vec![],
+        span: span(),
+    };
+
+    let function = Function {
+        name: "main".into(),
+        params: vec![Parameter {
+            name: "x".into(),
+            type_annotation: Some(TypeAnnotation {
+                segments: vec!["Option".into()],
+                type_args: vec![TypeAnnotation {
+                    segments: vec!["Int".into()],
+                    type_args: vec![],
+                    span: span(),
+                }],
+                span: span(),
+            }),
+            default: None,
+            span: span(),
+        }],
+        body: Block {
+            statements: vec![],
+            value: Some(Box::new(ident("x"))),
+            span: span(),
+        },
+        kind: FunctionKind::Free,
+        span: span(),
+    };
+
+    let program = Program::new(
+        vec![Item::Type(option_enum), Item::Function(function)],
+        span(),
+    );
+    semantic::analyze(program).expect("generic type annotation should type-check");
 }

@@ -1,0 +1,14 @@
+# Benchmark: Recursive fibonacci
+# Tests: function call overhead, numeric arithmetic, recursion
+
+*fib(n)
+    if n < 2
+        return n
+    fib(n - 1) + fib(n - 2)
+
+*main()
+    start is time_now()
+    result is fib(30)
+    elapsed is time_now() - start
+    log("fibonacci(30) = " + to_string(result))
+    log("elapsed_ms: " + to_string(elapsed))

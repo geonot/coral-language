@@ -420,6 +420,15 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
             }
         }
 
+        // Store unification: same name.
+        (TypeId::Store(a_name), TypeId::Store(b_name)) => {
+            if a_name == b_name {
+                Ok(())
+            } else {
+                Err(TypeError::mismatch(&ra, &rb, span))
+            }
+        }
+
         // List unification.
         (TypeId::List(ae), TypeId::List(be)) => unify(*ae.clone(), *be.clone(), graph, span),
 

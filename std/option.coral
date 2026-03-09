@@ -37,7 +37,9 @@ enum Option
 *unwrap(opt)
 	match opt
 	Some(value) ? value
-	None ? log("PANIC: unwrap called on None")
+	None
+		log("PANIC: unwrap called on None")
+		exit(1)
 
 # Transform the inner value if present
 *map_option(opt, func)

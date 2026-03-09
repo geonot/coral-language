@@ -8,15 +8,19 @@ use super::*;
 impl<'ctx> CodeGenerator<'ctx> {
     pub(super) fn build_message_value(
         &mut self,
-        name_value: PointerValue<'ctx>,
-        payload_value: PointerValue<'ctx>,
-    ) -> PointerValue<'ctx> {
+        name_value: IntValue<'ctx>,
+        payload_value: IntValue<'ctx>,
+    ) -> IntValue<'ctx> {
         let entry_ptr_type = self.runtime.map_entry_type.ptr_type(AddressSpace::default());
         let array_type = self.runtime.map_entry_type.array_type(2);
         let mut temp_array = array_type.get_undef();
 
+        let name_value = self.nb_to_ptr(name_value);
+        let payload_value = self.nb_to_ptr(payload_value);
         let name_key = self.emit_string_literal("name");
+        let name_key = self.nb_to_ptr(name_key);
         let data_key = self.emit_string_literal("data");
+        let data_key = self.nb_to_ptr(data_key);
 
         let mut name_entry = self.runtime.map_entry_type.get_undef();
         name_entry = self
@@ -71,45 +75,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         target: &Expression,
         property: &str,
         _span: Span,
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         // For 'self' target (store instance), always use map lookup for field access
         if let Expression::Identifier(name, _) = target {
             if name == "self" {
                 let target_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_string_literal(property);
-                return Ok(self.call_runtime_ptr(
-                    self.runtime.map_get,
-                    &[target_value.into(), key_value.into()],
-                    "map_get_property",
-                ));
+                return Ok(self.call_bridged(self.runtime.map_get, &[target_value, key_value], "map_get_property"));
             }
         }
         let target_value = self.emit_expression(ctx, target)?;
         match property {
-            "length" | "count" if !self.store_field_names.contains(property) => Ok(self.call_runtime_ptr(
-                self.runtime.value_length,
-                &[target_value.into()],
-                "value_length",
-            )),
+            "length" | "count" if !self.store_field_names.contains(property) => Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length")),
             "length" | "count" => {
                 // If any store defines a field with this name, use field_or_length
                 // to dispatch at runtime: maps/stores → field lookup, else → length.
                 let key_value = self.emit_string_literal(property);
-                Ok(self.call_runtime_ptr(
-                    self.runtime.field_or_length,
-                    &[target_value.into(), key_value.into()],
-                    "field_or_length",
-                ))
+                Ok(self.call_bridged(self.runtime.field_or_length, &[target_value, key_value], "field_or_length"))
             }
-            "size" => Ok(self.call_runtime_ptr(
-                self.runtime.map_length,
-                &[target_value.into()],
-                "map_length",
-            )),
+            "size" => Ok(self.call_bridged(self.runtime.map_length, &[target_value], "map_length")),
             "err" => {
                 // x.err - returns true if x is an error value
+                let target_ptr = self.nb_to_ptr(target_value);
                 let is_err = self.builder
-                    .build_call(self.runtime.is_err, &[target_value.into()], "is_err_check")
+                    .build_call(self.runtime.is_err, &[target_ptr.into()], "is_err_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
@@ -125,11 +114,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => {
                 let key_value = self.emit_string_literal(property);
-                Ok(self.call_runtime_ptr(
-                    self.runtime.map_get,
-                    &[target_value.into(), key_value.into()],
-                    "map_get_property",
-                ))
+                Ok(self.call_bridged(self.runtime.map_get, &[target_value, key_value], "map_get_property"))
             }
         }
     }
@@ -142,7 +127,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         property: &str,
         args: &[Expression],
         span: Span,
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         if let Expression::Identifier(namespace, _) = target {
             if namespace == "io" {
                 return self.emit_io_call(ctx, property, args, span);
@@ -156,11 +141,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.value_equals,
-                    &[target_value.into(), arg_value.into()],
-                    "value_equals",
-                ))
+                Ok(self.call_bridged(self.runtime.value_equals, &[target_value, arg_value], "value_equals"))
             }
             // x.not_equals(y) - value inequality comparison
             "not_equals" => {
@@ -169,11 +150,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.value_not_equals,
-                    &[target_value.into(), arg_value.into()],
-                    "value_not_equals",
-                ))
+                Ok(self.call_bridged(self.runtime.value_not_equals, &[target_value, arg_value], "value_not_equals"))
             }
             // x.not() - boolean negation
             "not" => {
@@ -190,22 +167,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("iter does not take arguments", span));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.value_iter,
-                    &[target_value.into()],
-                    "value_iter",
-                ))
+                Ok(self.call_bridged(self.runtime.value_iter, &[target_value], "value_iter"))
             }
             "keys" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("keys does not take arguments", span));
                 }
                 let map_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.map_keys,
-                    &[map_value.into()],
-                    "map_keys",
-                ))
+                Ok(self.call_bridged(self.runtime.map_keys, &[map_value], "map_keys"))
             }
             "map" => {
                 if args.len() != 1 {
@@ -213,11 +182,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let func_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.list_map,
-                    &[list_value.into(), func_value.into()],
-                    "list_map",
-                ))
+                Ok(self.call_bridged(self.runtime.list_map, &[list_value, func_value], "list_map"))
             }
             "filter" => {
                 if args.len() != 1 {
@@ -225,11 +190,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let func_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.list_filter,
-                    &[list_value.into(), func_value.into()],
-                    "list_filter",
-                ))
+                Ok(self.call_bridged(self.runtime.list_filter, &[list_value, func_value], "list_filter"))
             }
             "reduce" => {
                 if args.is_empty() || args.len() > 2 {
@@ -240,14 +201,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let (seed_arg, func_value) = if args.len() == 1 {
-                    (self.runtime.value_ptr_type.const_null(), self.emit_expression(ctx, &args[0])?)
+                    (self.wrap_none(), self.emit_expression(ctx, &args[0])?)
                 } else {
                     (self.emit_expression(ctx, &args[0])?, self.emit_expression(ctx, &args[1])?)
                 };
-                let seed_meta: BasicMetadataValueEnum<'ctx> = seed_arg.into();
-                Ok(self.call_runtime_ptr(
+                Ok(self.call_bridged(
                     self.runtime.list_reduce,
-                    &[list_value.into(), seed_meta, func_value.into()],
+                    &[list_value, seed_arg, func_value],
                     "list_reduce",
                 ))
             }
@@ -260,11 +220,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.list_push,
-                    &[list_value.into(), arg_value.into()],
-                    "list_push",
-                ))
+                Ok(self.call_bridged(self.runtime.list_push, &[list_value, arg_value], "list_push"))
             }
             "pop" => {
                 if !args.is_empty() {
@@ -274,11 +230,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let list_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.list_pop,
-                    &[list_value.into()],
-                    "list_pop",
-                ))
+                Ok(self.call_bridged(self.runtime.list_pop, &[list_value], "list_pop"))
             }
             "get" => {
                 if args.len() != 1 {
@@ -289,11 +241,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.value_get,
-                    &[target_value.into(), key_value.into()],
-                    "value_get_method",
-                ))
+                Ok(self.call_bridged(self.runtime.value_get, &[target_value, key_value], "value_get_method"))
             }
             "set" => {
                 if args.len() != 2 {
@@ -317,32 +265,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                             
                             if is_ref {
                                 // Get old value before setting
-                                let old_value = self.call_runtime_ptr(
+                                let old_value = self.call_bridged(
                                     self.runtime.map_get,
-                                    &[map_value.into(), key_value.into()],
+                                    &[map_value, key_value],
                                     "get_old_ref",
                                 );
                                 // Retain new value
-                                self.call_runtime_void(self.runtime.value_retain, &[new_value.into()], "retain_new_ref");
+                                let new_ptr = self.nb_to_ptr(new_value);
+                                self.call_runtime_void(self.runtime.value_retain, &[new_ptr.into()], "retain_new_ref");
                                 // Set the field
-                                let result = self.call_runtime_ptr(
+                                let result = self.call_bridged(
                                     self.runtime.map_set,
-                                    &[map_value.into(), key_value.into(), new_value.into()],
+                                    &[map_value, key_value, new_value],
                                     "map_set_method",
                                 );
                                 // Release old value
-                                self.call_runtime_void(self.runtime.value_release, &[old_value.into()], "release_old_ref");
+                                let old_ptr = self.nb_to_ptr(old_value);
+                                self.call_runtime_void(self.runtime.value_release, &[old_ptr.into()], "release_old_ref");
                                 return Ok(result);
                             }
                         }
                     }
                 }
                 
-                Ok(self.call_runtime_ptr(
-                    self.runtime.map_set,
-                    &[map_value.into(), key_value.into(), new_value.into()],
-                    "map_set_method",
-                ))
+                Ok(self.call_bridged(self.runtime.map_set, &[map_value, key_value, new_value], "map_set_method"))
             }
             "at" => {
                 if args.len() != 1 {
@@ -353,22 +299,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let index_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.list_get,
-                    &[list_value.into(), index_value.into()],
-                    "list_get",
-                ))
+                Ok(self.call_bridged(self.runtime.list_get, &[list_value, index_value], "list_get"))
             }
             "length" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("length does not take arguments", span));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.value_length,
-                    &[target_value.into()],
-                    "value_length",
-                ))
+                Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length"))
             }
             _ => {
                 // Check if this is a store method call
@@ -397,14 +335,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             format!("internal error: store method {} not found", mangled),
                             span,
                         ))?;
-                    // Call the store method (returns ptr, not f64)
+                    // Call the store method (returns i64 NaN-boxed value)
                     let result = self.builder.build_call(store_method, &call_args, "store_method_call")
                         .unwrap()
                         .try_as_basic_value()
                         .left()
                         .unwrap()
-                        .into_pointer_value();
-                    // Return the ptr directly (CoralValue*)
+                        .into_int_value();
                     Ok(result)
                 } else {
                     Err(Diagnostic::new(
@@ -422,14 +359,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         method: &str,
         args: &[Expression],
         span: Span,
-    ) -> Result<PointerValue<'ctx>, Diagnostic> {
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
         match method {
             "read" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("io.read expects path", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(self.runtime.fs_read, &[path.into()], "io_read"))
+                Ok(self.call_bridged(self.runtime.fs_read, &[path], "io_read"))
             }
             "write" => {
                 if args.len() != 2 {
@@ -437,22 +374,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
                 let data = self.emit_expression(ctx, &args[1])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.fs_write,
-                    &[path.into(), data.into()],
-                    "io_write",
-                ))
+                Ok(self.call_bridged(self.runtime.fs_write, &[path, data], "io_write"))
             }
             "exists" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("io.exists expects path", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_runtime_ptr(
-                    self.runtime.fs_exists,
-                    &[path.into()],
-                    "io_exists",
-                ))
+                Ok(self.call_bridged(self.runtime.fs_exists, &[path], "io_exists"))
             }
             _ => Err(Diagnostic::new(
                 format!("namespace `io` has no method `{method}`"),
@@ -467,7 +396,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expression],
         ctx: &mut FunctionContext<'ctx>,
         span: Span,
-    ) -> Result<Option<PointerValue<'ctx>>, Diagnostic> {
+    ) -> Result<Option<IntValue<'ctx>>, Diagnostic> {
         match name {
             "log" => {
                 if args.len() != 1 {
@@ -477,11 +406,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let value = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.log,
-                    &[value.into()],
-                    "log_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.log, &[value], "log_call")))
             }
             "concat" => {
                 if args.len() != 2 {
@@ -492,11 +417,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.value_add,
-                    &[a.into(), b.into()],
-                    "concat_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.value_add, &[a, b], "concat_call")))
             }
             "fs_read" => {
                 if args.len() != 1 {
@@ -506,11 +427,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_read,
-                    &[path.into()],
-                    "fs_read_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_read, &[path], "fs_read_call")))
             }
             "fs_write" => {
                 if args.len() != 2 {
@@ -521,11 +438,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
                 let data = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_write,
-                    &[path.into(), data.into()],
-                    "fs_write_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_write, &[path, data], "fs_write_call")))
             }
             "fs_exists" => {
                 if args.len() != 1 {
@@ -535,11 +448,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_exists,
-                    &[path.into()],
-                    "fs_exists_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_exists, &[path], "fs_exists_call")))
             }
             "bit_and" | "bit_or" | "bit_xor" | "bit_shl" | "bit_shr" => {
                 if args.len() != 2 {
@@ -557,7 +466,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     "bit_shl" => self.runtime.value_shift_left,
                     _ => self.runtime.value_shift_right,
                 };
-                Ok(Some(self.call_runtime_ptr(func, &[lhs.into(), rhs.into()], "bit_call")))
+                Ok(Some(self.call_bridged(func, &[lhs, rhs], "bit_call")))
             }
             "bit_not" => {
                 if args.len() != 1 {
@@ -567,11 +476,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let value = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.value_bitnot,
-                    &[value.into()],
-                    "bit_not_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.value_bitnot, &[value], "bit_not_call")))
             }
             "actor_send" => {
                 if args.len() != 2 && args.len() != 3 {
@@ -585,21 +490,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.wrap_unit()
                 };
                 let message = self.build_message_value(name, payload);
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.actor_send,
-                    &[actor.into(), message.into()],
-                    "actor_send_builtin",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.actor_send, &[actor, message], "actor_send_builtin")))
             }
             "actor_self" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("actor_self expects no arguments", span));
                 }
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.actor_self,
-                    &[],
-                    "actor_self_builtin",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.actor_self, &[], "actor_self_builtin")))
             }
             // String operations
             "string_slice" | "slice" => {
@@ -609,11 +506,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let s = self.emit_expression(ctx, &args[0])?;
                 let start = self.emit_expression(ctx, &args[1])?;
                 let end = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_slice,
-                    &[s.into(), start.into(), end.into()],
-                    "string_slice_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_slice, &[s, start, end], "string_slice_call")))
             }
             "string_char_at" | "char_at" => {
                 if args.len() != 2 {
@@ -621,11 +514,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let idx = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_char_at,
-                    &[s.into(), idx.into()],
-                    "string_char_at_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_char_at, &[s, idx], "string_char_at_call")))
             }
             "string_index_of" | "index_of" => {
                 if args.len() != 2 {
@@ -633,11 +522,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let haystack = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_index_of,
-                    &[haystack.into(), needle.into()],
-                    "string_index_of_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_index_of, &[haystack, needle], "string_index_of_call")))
             }
             "string_split" | "split" => {
                 if args.len() != 2 {
@@ -645,22 +530,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let delim = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_split,
-                    &[s.into(), delim.into()],
-                    "string_split_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_split, &[s, delim], "string_split_call")))
             }
             "string_to_chars" | "chars" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_to_chars expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_to_chars,
-                    &[s.into()],
-                    "string_to_chars_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_to_chars, &[s], "string_to_chars_call")))
             }
             "string_starts_with" | "starts_with" => {
                 if args.len() != 2 {
@@ -668,11 +545,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let prefix = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_starts_with,
-                    &[s.into(), prefix.into()],
-                    "string_starts_with_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_starts_with, &[s, prefix], "string_starts_with_call")))
             }
             "string_ends_with" | "ends_with" => {
                 if args.len() != 2 {
@@ -680,44 +553,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let suffix = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_ends_with,
-                    &[s.into(), suffix.into()],
-                    "string_ends_with_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_ends_with, &[s, suffix], "string_ends_with_call")))
             }
             "string_trim" | "trim" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_trim expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_trim,
-                    &[s.into()],
-                    "string_trim_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_trim, &[s], "string_trim_call")))
             }
             "string_to_upper" | "to_upper" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_to_upper expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_to_upper,
-                    &[s.into()],
-                    "string_to_upper_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_to_upper, &[s], "string_to_upper_call")))
             }
             "string_to_lower" | "to_lower" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_to_lower expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_to_lower,
-                    &[s.into()],
-                    "string_to_lower_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_to_lower, &[s], "string_to_lower_call")))
             }
             "string_replace" | "replace" => {
                 if args.len() != 3 {
@@ -726,11 +583,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let s = self.emit_expression(ctx, &args[0])?;
                 let old = self.emit_expression(ctx, &args[1])?;
                 let new = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_replace,
-                    &[s.into(), old.into(), new.into()],
-                    "string_replace_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_replace, &[s, old, new], "string_replace_call")))
             }
             "string_contains" | "contains" => {
                 if args.len() != 2 {
@@ -738,44 +591,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let haystack = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_contains,
-                    &[haystack.into(), needle.into()],
-                    "string_contains_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_contains, &[haystack, needle], "string_contains_call")))
             }
             "string_parse_number" | "parse_number" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_parse_number expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_parse_number,
-                    &[s.into()],
-                    "string_parse_number_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_parse_number, &[s], "string_parse_number_call")))
             }
             "string_length" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_length expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.value_length,
-                    &[s.into()],
-                    "string_length_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.value_length, &[s], "string_length_call")))
             }
-            "number_to_string" | "to_string" => {
+            "number_to_string" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("number_to_string expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.number_to_string,
-                    &[n.into()],
-                    "number_to_string_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.number_to_string, &[n], "number_to_string_call")))
+            }
+            "to_string" | "value_to_string" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("to_string expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.value_to_string, &[v], "value_to_string_call")))
             }
             // Math functions - unary
             "abs" => {
@@ -783,209 +627,133 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("abs expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_abs,
-                    &[n.into()],
-                    "math_abs_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_abs, &[n], "math_abs_call")))
             }
             "sqrt" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sqrt expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_sqrt,
-                    &[n.into()],
-                    "math_sqrt_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_sqrt, &[n], "math_sqrt_call")))
             }
             "floor" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("floor expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_floor,
-                    &[n.into()],
-                    "math_floor_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_floor, &[n], "math_floor_call")))
             }
             "ceil" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ceil expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_ceil,
-                    &[n.into()],
-                    "math_ceil_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_ceil, &[n], "math_ceil_call")))
             }
             "round" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("round expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_round,
-                    &[n.into()],
-                    "math_round_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_round, &[n], "math_round_call")))
             }
             "sin" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sin expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_sin,
-                    &[n.into()],
-                    "math_sin_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_sin, &[n], "math_sin_call")))
             }
             "cos" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("cos expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_cos,
-                    &[n.into()],
-                    "math_cos_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_cos, &[n], "math_cos_call")))
             }
             "tan" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tan expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_tan,
-                    &[n.into()],
-                    "math_tan_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_tan, &[n], "math_tan_call")))
             }
             "ln" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ln expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_ln,
-                    &[n.into()],
-                    "math_ln_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_ln, &[n], "math_ln_call")))
             }
             "log10" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("log10 expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_log10,
-                    &[n.into()],
-                    "math_log10_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_log10, &[n], "math_log10_call")))
             }
             "exp" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("exp expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_exp,
-                    &[n.into()],
-                    "math_exp_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_exp, &[n], "math_exp_call")))
             }
             "asin" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("asin expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_asin,
-                    &[n.into()],
-                    "math_asin_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_asin, &[n], "math_asin_call")))
             }
             "acos" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("acos expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_acos,
-                    &[n.into()],
-                    "math_acos_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_acos, &[n], "math_acos_call")))
             }
             "atan" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("atan expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_atan,
-                    &[n.into()],
-                    "math_atan_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_atan, &[n], "math_atan_call")))
             }
             "sinh" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sinh expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_sinh,
-                    &[n.into()],
-                    "math_sinh_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_sinh, &[n], "math_sinh_call")))
             }
             "cosh" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("cosh expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_cosh,
-                    &[n.into()],
-                    "math_cosh_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_cosh, &[n], "math_cosh_call")))
             }
             "tanh" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tanh expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_tanh,
-                    &[n.into()],
-                    "math_tanh_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_tanh, &[n], "math_tanh_call")))
             }
             "trunc" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("trunc expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_trunc,
-                    &[n.into()],
-                    "math_trunc_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_trunc, &[n], "math_trunc_call")))
             }
             "sign" | "signum" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sign expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_sign,
-                    &[n.into()],
-                    "math_sign_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_sign, &[n], "math_sign_call")))
             }
             // Math functions - binary
             "pow" => {
@@ -994,11 +762,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let base = self.emit_expression(ctx, &args[0])?;
                 let exp = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_pow,
-                    &[base.into(), exp.into()],
-                    "math_pow_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_pow, &[base, exp], "math_pow_call")))
             }
             "min" => {
                 if args.len() != 2 {
@@ -1006,11 +770,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_min,
-                    &[a.into(), b.into()],
-                    "math_min_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_min, &[a, b], "math_min_call")))
             }
             "max" => {
                 if args.len() != 2 {
@@ -1018,11 +778,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_max,
-                    &[a.into(), b.into()],
-                    "math_max_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_max, &[a, b], "math_max_call")))
             }
             "atan2" => {
                 if args.len() != 2 {
@@ -1030,41 +786,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let y = self.emit_expression(ctx, &args[0])?;
                 let x = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.math_atan2,
-                    &[y.into(), x.into()],
-                    "math_atan2_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.math_atan2, &[y, x], "math_atan2_call")))
             }
             // Process/environment
             "process_args" | "args" => {
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.process_args,
-                    &[],
-                    "process_args_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.process_args, &[], "process_args_call")))
             }
             "process_exit" | "exit" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("exit expects one argument (exit code)", span));
                 }
                 let code = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.process_exit,
-                    &[code.into()],
-                    "process_exit_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.process_exit, &[code], "process_exit_call")))
             }
             "env_get" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("env_get expects one argument", span));
                 }
                 let name_val = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.env_get,
-                    &[name_val.into()],
-                    "env_get_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.env_get, &[name_val], "env_get_call")))
             }
             "env_set" => {
                 if args.len() != 2 {
@@ -1072,11 +812,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let name_val = self.emit_expression(ctx, &args[0])?;
                 let val = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.env_set,
-                    &[name_val.into(), val.into()],
-                    "env_set_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.env_set, &[name_val, val], "env_set_call")))
             }
             // File I/O extensions
             "fs_append" => {
@@ -1085,62 +821,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
                 let data = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_append,
-                    &[path.into(), data.into()],
-                    "fs_append_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_append, &[path, data], "fs_append_call")))
             }
             "fs_read_dir" | "read_dir" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_read_dir expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_read_dir,
-                    &[path.into()],
-                    "fs_read_dir_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_read_dir, &[path], "fs_read_dir_call")))
             }
             "fs_mkdir" | "mkdir" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_mkdir expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_mkdir,
-                    &[path.into()],
-                    "fs_mkdir_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_mkdir, &[path], "fs_mkdir_call")))
             }
             "fs_delete" | "delete" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_delete expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_delete,
-                    &[path.into()],
-                    "fs_delete_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_delete, &[path], "fs_delete_call")))
             }
             "fs_is_dir" | "is_dir" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_is_dir expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.fs_is_dir,
-                    &[path.into()],
-                    "fs_is_dir_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.fs_is_dir, &[path], "fs_is_dir_call")))
             }
             "stdin_read_line" | "read_line" => {
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.stdin_read_line,
-                    &[],
-                    "stdin_read_line_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.stdin_read_line, &[], "stdin_read_line_call")))
             }
             // List extensions
             "list_contains" => {
@@ -1149,11 +861,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_contains,
-                    &[list.into(), needle.into()],
-                    "list_contains_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_contains, &[list, needle], "list_contains_call")))
             }
             "list_index_of" => {
                 if args.len() != 2 {
@@ -1161,22 +869,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_index_of,
-                    &[list.into(), needle.into()],
-                    "list_index_of_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_index_of, &[list, needle], "list_index_of_call")))
             }
             "list_reverse" | "reverse" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list_reverse expects one argument", span));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_reverse,
-                    &[list.into()],
-                    "list_reverse_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_reverse, &[list], "list_reverse_call")))
             }
             "list_slice" => {
                 if args.len() != 3 {
@@ -1185,22 +885,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let list = self.emit_expression(ctx, &args[0])?;
                 let start = self.emit_expression(ctx, &args[1])?;
                 let end = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_slice,
-                    &[list.into(), start.into(), end.into()],
-                    "list_slice_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_slice, &[list, start, end], "list_slice_call")))
             }
             "list_sort" | "sort" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list_sort expects one argument", span));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_sort,
-                    &[list.into()],
-                    "list_sort_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_sort, &[list], "list_sort_call")))
             }
             "list_join" | "join" => {
                 if args.len() != 2 {
@@ -1208,11 +900,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let sep = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_join,
-                    &[list.into(), sep.into()],
-                    "list_join_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_join, &[list, sep], "list_join_call")))
             }
             "list_concat" => {
                 if args.len() != 2 {
@@ -1220,11 +908,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.list_concat,
-                    &[a.into(), b.into()],
-                    "list_concat_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.list_concat, &[a, b], "list_concat_call")))
             }
             // Map extensions
             "map_keys" | "keys" => {
@@ -1232,11 +916,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("map_keys expects one argument", span));
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.map_keys,
-                    &[map.into()],
-                    "map_keys_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.map_keys, &[map], "map_keys_call")))
             }
             "map_remove" => {
                 if args.len() != 2 {
@@ -1244,33 +924,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
                 let key = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.map_remove,
-                    &[map.into(), key.into()],
-                    "map_remove_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.map_remove, &[map, key], "map_remove_call")))
             }
             "map_values" | "values" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("map_values expects one argument", span));
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.map_values,
-                    &[map.into()],
-                    "map_values_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.map_values, &[map], "map_values_call")))
             }
             "map_entries" | "entries" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("map_entries expects one argument", span));
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.map_entries,
-                    &[map.into()],
-                    "map_entries_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.map_entries, &[map], "map_entries_call")))
             }
             "map_has_key" | "has_key" => {
                 if args.len() != 2 {
@@ -1278,11 +946,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
                 let key = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.map_has_key,
-                    &[map.into(), key.into()],
-                    "map_has_key_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.map_has_key, &[map, key], "map_has_key_call")))
             }
             "map_merge" | "merge" => {
                 if args.len() != 2 {
@@ -1290,11 +954,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.map_merge,
-                    &[a.into(), b.into()],
-                    "map_merge_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.map_merge, &[a, b], "map_merge_call")))
             }
             // Bytes extensions
             "bytes_get" => {
@@ -1303,33 +963,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let b = self.emit_expression(ctx, &args[0])?;
                 let idx = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.bytes_get,
-                    &[b.into(), idx.into()],
-                    "bytes_get_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.bytes_get, &[b, idx], "bytes_get_call")))
             }
             "bytes_from_string" | "to_bytes" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("bytes_from_string expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.bytes_from_string,
-                    &[s.into()],
-                    "bytes_from_string_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.bytes_from_string, &[s], "bytes_from_string_call")))
             }
             "bytes_to_string" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("bytes_to_string expects one argument", span));
                 }
                 let b = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.bytes_to_string,
-                    &[b.into()],
-                    "bytes_to_string_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.bytes_to_string, &[b], "bytes_to_string_call")))
             }
             "bytes_slice" => {
                 if args.len() != 3 {
@@ -1338,11 +986,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let b = self.emit_expression(ctx, &args[0])?;
                 let start = self.emit_expression(ctx, &args[1])?;
                 let end = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.bytes_slice_val,
-                    &[b.into(), start.into(), end.into()],
-                    "bytes_slice_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.bytes_slice_val, &[b, start, end], "bytes_slice_call")))
             }
             // Type reflection
             "type_of" => {
@@ -1350,11 +994,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("type_of expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.type_of,
-                    &[v.into()],
-                    "type_of_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.type_of, &[v], "type_of_call")))
             }
             // Character operations
             "ord" | "string_ord" => {
@@ -1362,22 +1002,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("ord expects one string argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_ord,
-                    &[s.into()],
-                    "ord_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_ord, &[s], "ord_call")))
             }
             "chr" | "string_chr" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("chr expects one number argument", span));
                 }
                 let code = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_chr,
-                    &[code.into()],
-                    "chr_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_chr, &[code], "chr_call")))
             }
             "string_compare" | "strcmp" => {
                 if args.len() != 2 {
@@ -1385,11 +1017,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.string_compare,
-                    &[a.into(), b.into()],
-                    "strcmp_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.string_compare, &[a, b], "strcmp_call")))
             }
             // Error checking builtins
             "is_err" => {
@@ -1397,8 +1025,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("is_err expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
+                let v_ptr = self.nb_to_ptr(v);
                 let is_err = self.builder
-                    .build_call(self.runtime.is_err, &[v.into()], "is_err_check")
+                    .build_call(self.runtime.is_err, &[v_ptr.into()], "is_err_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
@@ -1417,8 +1046,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("is_ok expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
+                let v_ptr = self.nb_to_ptr(v);
                 let is_ok = self.builder
-                    .build_call(self.runtime.is_ok, &[v.into()], "is_ok_check")
+                    .build_call(self.runtime.is_ok, &[v_ptr.into()], "is_ok_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
@@ -1437,8 +1067,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("is_absent expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
+                let v_ptr = self.nb_to_ptr(v);
                 let is_absent = self.builder
-                    .build_call(self.runtime.is_absent, &[v.into()], "is_absent_check")
+                    .build_call(self.runtime.is_absent, &[v_ptr.into()], "is_absent_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
@@ -1457,19 +1088,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("error_name expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(
-                    self.runtime.error_name,
-                    &[v.into()],
-                    "error_name_call",
-                )))
+                Ok(Some(self.call_bridged(self.runtime.error_name, &[v], "error_name_call")))
             }
             "error_code" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("error_code expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
+                let v_ptr = self.nb_to_ptr(v);
                 let code_i32 = self.builder
-                    .build_call(self.runtime.error_code, &[v.into()], "error_code_call")
+                    .build_call(self.runtime.error_code, &[v_ptr.into()], "error_code_call")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
@@ -1489,77 +1117,77 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("json_parse expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.json_parse, &[v.into()], "json_parse_call")))
+                Ok(Some(self.call_bridged(self.runtime.json_parse, &[v], "json_parse_call")))
             }
             "json_serialize" | "json_stringify" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("json_serialize expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.json_serialize, &[v.into()], "json_serialize_call")))
+                Ok(Some(self.call_bridged(self.runtime.json_serialize, &[v], "json_serialize_call")))
             }
             "json_serialize_pretty" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("json_serialize_pretty expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.json_serialize_pretty, &[v.into()], "json_pretty_call")))
+                Ok(Some(self.call_bridged(self.runtime.json_serialize_pretty, &[v], "json_pretty_call")))
             }
             // Time operations (SL-9)
             "time_now" => {
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_now, &[], "time_now_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_now, &[], "time_now_call")))
             }
             "time_timestamp" => {
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_timestamp, &[], "time_ts_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_timestamp, &[], "time_ts_call")))
             }
             "time_format_iso" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_format_iso expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_format_iso, &[v.into()], "time_fmt_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_format_iso, &[v], "time_fmt_call")))
             }
             "time_year" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_year expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_year, &[v.into()], "time_year_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_year, &[v], "time_year_call")))
             }
             "time_month" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_month expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_month, &[v.into()], "time_month_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_month, &[v], "time_month_call")))
             }
             "time_day" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_day expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_day, &[v.into()], "time_day_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_day, &[v], "time_day_call")))
             }
             "time_hour" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_hour expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_hour, &[v.into()], "time_hour_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_hour, &[v], "time_hour_call")))
             }
             "time_minute" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_minute expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_minute, &[v.into()], "time_min_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_minute, &[v], "time_min_call")))
             }
             "time_second" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_second expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.time_second, &[v.into()], "time_sec_call")))
+                Ok(Some(self.call_bridged(self.runtime.time_second, &[v], "time_sec_call")))
             }
             // String lines
             "string_lines" => {
@@ -1567,7 +1195,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("string_lines expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.string_lines, &[v.into()], "str_lines_call")))
+                Ok(Some(self.call_bridged(self.runtime.string_lines, &[v], "str_lines_call")))
             }
             // Sort
             "sort_natural" | "list_sort_natural" => {
@@ -1575,7 +1203,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("sort_natural expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.list_sort_natural, &[v.into()], "sort_nat_call")))
+                Ok(Some(self.call_bridged(self.runtime.list_sort_natural, &[v], "sort_nat_call")))
             }
             // Bytes extensions
             "bytes_from_hex" => {
@@ -1583,7 +1211,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("bytes_from_hex expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.bytes_from_hex, &[v.into()], "bytes_hex_call")))
+                Ok(Some(self.call_bridged(self.runtime.bytes_from_hex, &[v], "bytes_hex_call")))
             }
             "bytes_contains" => {
                 if args.len() != 2 {
@@ -1591,7 +1219,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.bytes_contains, &[a.into(), b.into()], "bytes_contains_call")))
+                Ok(Some(self.call_bridged(self.runtime.bytes_contains, &[a, b], "bytes_contains_call")))
             }
             "bytes_find" => {
                 if args.len() != 2 {
@@ -1599,7 +1227,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.bytes_find, &[a.into(), b.into()], "bytes_find_call")))
+                Ok(Some(self.call_bridged(self.runtime.bytes_find, &[a, b], "bytes_find_call")))
             }
             // Encoding
             "base64_encode" => {
@@ -1607,28 +1235,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("base64_encode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.base64_encode, &[v.into()], "b64_enc_call")))
+                Ok(Some(self.call_bridged(self.runtime.base64_encode, &[v], "b64_enc_call")))
             }
             "base64_decode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("base64_decode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.base64_decode, &[v.into()], "b64_dec_call")))
+                Ok(Some(self.call_bridged(self.runtime.base64_decode, &[v], "b64_dec_call")))
             }
             "hex_encode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("hex_encode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.hex_encode, &[v.into()], "hex_enc_call")))
+                Ok(Some(self.call_bridged(self.runtime.hex_encode, &[v], "hex_enc_call")))
             }
             "hex_decode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("hex_decode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.hex_decode, &[v.into()], "hex_dec_call")))
+                Ok(Some(self.call_bridged(self.runtime.hex_decode, &[v], "hex_dec_call")))
             }
             // TCP networking
             "tcp_listen" => {
@@ -1637,14 +1265,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let p = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_listen, &[h.into(), p.into()], "tcp_listen_call")))
+                Ok(Some(self.call_bridged(self.runtime.tcp_listen, &[h, p], "tcp_listen_call")))
             }
             "tcp_accept" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tcp_accept expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_accept, &[v.into()], "tcp_accept_call")))
+                Ok(Some(self.call_bridged(self.runtime.tcp_accept, &[v], "tcp_accept_call")))
             }
             "tcp_connect" => {
                 if args.len() != 2 {
@@ -1652,7 +1280,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let p = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_connect, &[h.into(), p.into()], "tcp_connect_call")))
+                Ok(Some(self.call_bridged(self.runtime.tcp_connect, &[h, p], "tcp_connect_call")))
             }
             "tcp_read" => {
                 if args.len() != 2 {
@@ -1660,7 +1288,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let c = self.emit_expression(ctx, &args[0])?;
                 let n = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_read, &[c.into(), n.into()], "tcp_read_call")))
+                Ok(Some(self.call_bridged(self.runtime.tcp_read, &[c, n], "tcp_read_call")))
             }
             "tcp_write" => {
                 if args.len() != 2 {
@@ -1668,14 +1296,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let c = self.emit_expression(ctx, &args[0])?;
                 let d = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_write, &[c.into(), d.into()], "tcp_write_call")))
+                Ok(Some(self.call_bridged(self.runtime.tcp_write, &[c, d], "tcp_write_call")))
             }
             "tcp_close" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tcp_close expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.tcp_close, &[v.into()], "tcp_close_call")))
+                Ok(Some(self.call_bridged(self.runtime.tcp_close, &[v], "tcp_close_call")))
             }
             // Actor monitoring (AC-2)
             "monitor" | "actor_monitor" => {
@@ -1684,7 +1312,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let w = self.emit_expression(ctx, &args[0])?;
                 let t = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.actor_monitor, &[w.into(), t.into()], "monitor_call")))
+                Ok(Some(self.call_bridged(self.runtime.actor_monitor, &[w, t], "monitor_call")))
             }
             "demonitor" | "actor_demonitor" => {
                 if args.len() != 2 {
@@ -1692,7 +1320,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let w = self.emit_expression(ctx, &args[0])?;
                 let t = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.actor_demonitor, &[w.into(), t.into()], "demonitor_call")))
+                Ok(Some(self.call_bridged(self.runtime.actor_demonitor, &[w, t], "demonitor_call")))
             }
             // Graceful stop (AC-4)
             "graceful_stop" | "actor_graceful_stop" => {
@@ -1700,7 +1328,64 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("graceful_stop expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_runtime_ptr(self.runtime.actor_graceful_stop, &[v.into()], "graceful_stop_call")))
+                Ok(Some(self.call_bridged(self.runtime.actor_graceful_stop, &[v], "graceful_stop_call")))
+            }
+            // StringBuilder / optimized string ops (L1.1)
+            "sb_new" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("sb_new expects no arguments", span));
+                }
+                Ok(Some(self.call_bridged(self.runtime.sb_new, &[], "sb_new_call")))
+            }
+            "sb_push" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("sb_push expects 2 arguments (builder, string)", span));
+                }
+                let sb = self.emit_expression(ctx, &args[0])?;
+                let s = self.emit_expression(ctx, &args[1])?;
+                let sb_ptr = self.nb_to_ptr(sb);
+                let s_ptr = self.nb_to_ptr(s);
+                self.call_runtime_void(self.runtime.sb_push, &[sb_ptr.into(), s_ptr.into()], "sb_push_call");
+                // Return unit
+                let unit = self.call_nb(self.runtime.nb_make_unit, &[], "sb_push_unit");
+                Ok(Some(unit))
+            }
+            "sb_finish" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sb_finish expects 1 argument (builder)", span));
+                }
+                let sb = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.sb_finish, &[sb], "sb_finish_call")))
+            }
+            "sb_len" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sb_len expects 1 argument (builder)", span));
+                }
+                let sb = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.sb_len, &[sb], "sb_len_call")))
+            }
+            "string_join_list" | "join_list" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_join_list expects 2 arguments (list, separator)", span));
+                }
+                let list = self.emit_expression(ctx, &args[0])?;
+                let sep = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.string_join_list, &[list, sep], "join_list_call")))
+            }
+            "string_repeat" | "repeat_string" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("string_repeat expects 2 arguments (string, count)", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                let n = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.string_repeat, &[s, n], "string_repeat_call")))
+            }
+            "string_reverse" | "reverse_string" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("string_reverse expects 1 argument (string)", span));
+                }
+                let s = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.string_reverse, &[s], "string_reverse_call")))
             }
             // Range helper (Phase D)
             "range" => {
@@ -1709,12 +1394,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let zero_f64 = self.f64_type.const_float(0.0);
                         let zero = self.wrap_number(zero_f64);
                         let n = self.emit_expression(ctx, &args[0])?;
-                        Ok(Some(self.call_runtime_ptr(self.runtime.list_range, &[zero.into(), n.into()], "range_call")))
+                        Ok(Some(self.call_bridged(self.runtime.list_range, &[zero, n], "range_call")))
                     }
                     2 => {
                         let start = self.emit_expression(ctx, &args[0])?;
                         let end = self.emit_expression(ctx, &args[1])?;
-                        Ok(Some(self.call_runtime_ptr(self.runtime.list_range, &[start.into(), end.into()], "range_call")))
+                        Ok(Some(self.call_bridged(self.runtime.list_range, &[start, end], "range_call")))
                     }
                     _ => Err(Diagnostic::new("range expects 1 or 2 arguments", span)),
                 }
@@ -1726,7 +1411,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let call = self.builder.build_call(ctor_fn, &[], "actor_ctor").unwrap();
                     let handle = call.try_as_basic_value().left()
                         .ok_or_else(|| Diagnostic::new("actor constructor produced no value", span))?
-                        .into_pointer_value();
+                        .into_int_value();
                     Ok(Some(handle))
                 } else {
                     Ok(None)

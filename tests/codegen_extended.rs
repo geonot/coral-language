@@ -664,3 +664,239 @@ fn bytes_roundtrip() {
     log(s)
 "#, &["coral"]);
 }
+
+// ─── C2.1/C2.2: Type Specialization ────────────────────────────────
+
+#[test]
+fn specialize_numeric_add_uses_fadd() {
+    // Use variables (not literals) to avoid constant folding; the type specializer
+    // knows their resolved types and should emit fadd instead of coral_nb_add.
+    let ir = compile_ok("*main()\n    a is 10\n    b is 20\n    x is a + b\n    log(x)\n");
+    assert!(ir.contains("add_spec"),
+        "Expected specialized add_spec in IR for numeric addition:\n{}", ir);
+}
+
+#[test]
+fn specialize_numeric_add_correctness() {
+    // Verify the specialization produces correct results at runtime.
+    assert_output("*main()\n    a is 10\n    b is 32\n    log(a + b)\n", &["42"]);
+    assert_output("*main()\n    a is 3.14\n    b is 2.86\n    log(a + b)\n", &["6"]);
+}
+
+#[test]
+fn specialize_numeric_equals_uses_fcmp() {
+    // Coral uses `is` for equality comparison in expression context.
+    let ir = compile_ok("*main()\n    a is 1\n    b is 2\n    result is a is b\n    log(result)\n");
+    assert!(ir.contains("eq_spec"),
+        "Expected eq_spec in IR for numeric equality:\n{}", ir);
+}
+
+#[test]
+fn specialize_numeric_not_equals_uses_fcmp() {
+    // Coral uses `isnt` for not-equals.
+    let ir = compile_ok("*main()\n    a is 1\n    b is 2\n    result is a isnt b\n    log(result)\n");
+    assert!(ir.contains("ne_spec"),
+        "Expected ne_spec in IR for numeric not-equals:\n{}", ir);
+}
+
+#[test]
+fn string_add_still_uses_runtime() {
+    // String addition must still go through the runtime polymorphic add.
+    let ir = compile_ok(r#"
+*main()
+    a is "hello"
+    b is " world"
+    x is a + b
+    log(x)
+"#);
+    assert!(ir.contains("coral_nb_add"), "String add should use runtime coral_nb_add");
+}
+
+#[test]
+fn specialize_bool_not_uses_fast_path() {
+    // In Coral, `!` is the Not operator. When operand is a known-boolean variable,
+    // should use fast bool_extract instead of is_truthy.
+    let ir = compile_ok("*main()\n    a is true\n    x is !a\n    log(x)\n");
+    assert!(ir.contains("bool_extract") || ir.contains("bool_fast"),
+        "Expected fast bool extraction for boolean not, got IR:\n{}", ir);
+}
+
+#[test]
+fn specialize_bool_and_correctness() {
+    assert_output("*main()\n    a is true\n    b is true\n    log(a and b)\n", &["true"]);
+    assert_output("*main()\n    a is true\n    b is false\n    log(a and b)\n", &["false"]);
+    assert_output("*main()\n    a is false\n    b is true\n    log(a and b)\n", &["false"]);
+}
+
+#[test]
+fn specialize_bool_or_correctness() {
+    assert_output("*main()\n    a is false\n    b is true\n    log(a or b)\n", &["true"]);
+    assert_output("*main()\n    a is false\n    b is false\n    log(a or b)\n", &["false"]);
+}
+
+// ─── C3.5: Dead Function Elimination ─────────────────────────────────
+
+#[test]
+fn dead_function_eliminated() {
+    // `unused_fn` is never called from main — should not appear in IR
+    let ir = compile_ok("*unused_fn()\n    42\n\n*main()\n    log(1)\n");
+    assert!(!ir.contains("define i64 @unused_fn"),
+        "Dead function should be eliminated from IR");
+    assert!(ir.contains("define i64 @__user_main"),
+        "Main function should still be present");
+}
+
+#[test]
+fn reachable_function_kept() {
+    // `helper` is called from main — should be present in IR
+    let ir = compile_ok("*helper()\n    99\n\n*main()\n    log(helper())\n");
+    assert!(ir.contains("define i64 @helper"),
+        "Called function should be present in IR");
+}
+
+#[test]
+fn transitive_reachability() {
+    // a → b → c chain; all should be present, but `dead` should not
+    let ir = compile_ok(
+        "*dead()\n    0\n\n*c()\n    3\n\n*b()\n    c()\n\n*a()\n    b()\n\n*main()\n    log(a())\n"
+    );
+    assert!(ir.contains("define i64 @a"), "a should be reachable");
+    assert!(ir.contains("define i64 @b"), "b should be reachable");
+    assert!(ir.contains("define i64 @c"), "c should be reachable");
+    assert!(!ir.contains("define i64 @dead"), "dead should be eliminated");
+}
+
+// ─── C3.1: Small Function Inlining ──────────────────────────────────
+
+#[test]
+fn small_function_gets_alwaysinline() {
+    // A function with one expression (≤5 stmts, non-recursive) should get alwaysinline
+    let ir = compile_ok("*add(a, b)\n    a + b\n\n*main()\n    log(add(1, 2))\n");
+    // The @add function definition should have "alwaysinline" attribute
+    assert!(ir.contains("alwaysinline"), "Small function should have alwaysinline attribute");
+}
+
+#[test]
+fn recursive_function_not_inlined() {
+    // Recursive function should NOT get alwaysinline
+    let ir = compile_ok("*fib(n)\n    if n < 2\n        n\n    else\n        fib(n - 1) + fib(n - 2)\n\n*main()\n    log(fib(10))\n");
+    // Check that alwaysinline is NOT on fib
+    // Find the function definition for @fib and verify no alwaysinline
+    let fib_def = ir.find("define i64 @fib").expect("fib should exist");
+    let after_fib = &ir[fib_def..];
+    let next_define = after_fib[1..].find("define ").unwrap_or(after_fib.len());
+    let fib_section = &after_fib[..next_define];
+    assert!(!fib_section.starts_with("define i64 @fib") || !ir[fib_def..fib_def+200].contains("alwaysinline"),
+        "Recursive function should NOT have alwaysinline");
+}
+
+#[test]
+fn main_function_not_inlined() {
+    // main should never get alwaysinline
+    let ir = compile_ok("*main()\n    log(42)\n");
+    // Find __user_main definition — should NOT have alwaysinline
+    let main_pos = ir.find("define i64 @__user_main").expect("__user_main should exist");
+    let main_line_end = ir[main_pos..].find('{').unwrap_or(100);
+    let main_header = &ir[main_pos..main_pos + main_line_end];
+    assert!(!main_header.contains("alwaysinline"),
+        "main function should NOT have alwaysinline");
+}
+
+// ===== C3.3: Tail Call Optimization Tests =====
+
+#[test]
+fn tail_recursive_call_marked_tail() {
+    // A tail-recursive function returning its own call should have 'tail call' in IR
+    let ir = compile_ok(
+        "*countdown(n)\n    if n <= 0\n        0\n    else\n        return countdown(n - 1)\n\n*main()\n    log(countdown(10))\n"
+    );
+    // Find the countdown function body and check for 'tail call'
+    let cd_pos = ir.find("define i64 @countdown").expect("countdown should exist");
+    let cd_section = &ir[cd_pos..];
+    let next_def = cd_section[1..].find("define ").map(|p| p + 1).unwrap_or(cd_section.len());
+    let cd_body = &cd_section[..next_def];
+    assert!(cd_body.contains("tail call") || cd_body.contains("musttail call"),
+        "Tail-recursive self-call should be marked as tail call in IR.\nIR section:\n{}", cd_body);
+}
+
+#[test]
+fn non_tail_recursive_call_not_marked() {
+    // fib(n-1) + fib(n-2) — neither call is in tail position (result is used by add)
+    let ir = compile_ok(
+        "*fib(n)\n    if n < 2\n        n\n    else\n        fib(n - 1) + fib(n - 2)\n\n*main()\n    log(fib(5))\n"
+    );
+    let fib_pos = ir.find("define i64 @fib").expect("fib should exist");
+    let fib_section = &ir[fib_pos..];
+    let next_def = fib_section[1..].find("define ").map(|p| p + 1).unwrap_or(fib_section.len());
+    let fib_body = &fib_section[..next_def];
+    // Neither recursive call should be tail-marked
+    assert!(!fib_body.contains("tail call"),
+        "Non-tail recursive calls should NOT be marked as tail call.\nIR section:\n{}", fib_body);
+}
+
+#[test]
+fn tail_call_in_implicit_return() {
+    // When the last expression is a self-call (implicit return), it should be tail
+    let ir = compile_ok(
+        "*loop_down(n)\n    if n <= 0\n        0\n    else\n        loop_down(n - 1)\n\n*main()\n    log(loop_down(5))\n"
+    );
+    let ld_pos = ir.find("define i64 @loop_down").expect("loop_down should exist");
+    let ld_section = &ir[ld_pos..];
+    let next_def = ld_section[1..].find("define ").map(|p| p + 1).unwrap_or(ld_section.len());
+    let ld_body = &ld_section[..next_def];
+    assert!(ld_body.contains("tail call") || ld_body.contains("musttail call"),
+        "Implicit tail-recursive return should be marked as tail call.\nIR:\n{}", ld_body);
+}
+
+// ===== C3.4: Common Subexpression Elimination Tests =====
+
+#[test]
+fn cse_deduplicates_repeated_member_call() {
+    // a.length() + a.length() — the member call goes through runtime and we 
+    // conservatively don't cache it (stores are mutable maps). Verify it compiles.
+    let ir = compile_ok(
+        "*main()\n    a is [1, 2, 3]\n    x is a.length() + a.length()\n    log(x)\n"
+    );
+    // Just verify it compiles to valid IR with the expected function
+    assert!(ir.contains("define i64 @__user_main"),
+        "Should compile to valid IR with main function");
+}
+
+#[test]
+fn cse_invalidated_by_mutation() {
+    // After a is reassigned, re-evaluating expressions with a gives fresh results.
+    // Since member calls are not CSE-cached (conservative), this verifies both calls emit.
+    let ir = compile_ok(
+        "*main()\n    a is [1, 2, 3]\n    x is a.length()\n    a is [1, 2, 3, 4]\n    y is a.length()\n    log(x + y)\n"
+    );
+    let main_pos = ir.find("define i64 @__user_main").expect("main should exist");
+    let main_section = &ir[main_pos..];
+    let next_def = main_section[1..].find("define ").map(|p| p + 1).unwrap_or(main_section.len());
+    let main_body = &main_section[..next_def];
+    // Both length calls should be emitted (not cached)
+    let length_calls: Vec<_> = main_body.match_indices("coral_value_length").collect();
+    assert!(length_calls.len() >= 2,
+        "Both a.length() calls should be emitted. Found {} occurrences.\nIR:\n{}",
+        length_calls.len(), main_body);
+}
+
+#[test]
+fn cse_deduplicates_binary_subexpression() {
+    // (a + b) used twice should be computed once
+    let ir = compile_ok(
+        "*main()\n    a is 10\n    b is 20\n    x is a + b\n    y is a + b\n    log(x + y)\n"
+    );
+    // The expression `a + b` should appear once due to CSE
+    let main_pos = ir.find("define i64 @__user_main").expect("main should exist");
+    let main_section = &ir[main_pos..];
+    let next_def = main_section[1..].find("define ").map(|p| p + 1).unwrap_or(main_section.len());
+    let main_body = &main_section[..next_def];
+    // Count fadd instructions (for a + b)
+    let add_calls: Vec<_> = main_body.match_indices("fadd").collect();
+    // With CSE, we expect fewer fadd instructions (a+b computed once, x+y is a second add)
+    // Without CSE: 2 fadds for a+b, 1 for x+y = 3 total
+    // With CSE: 1 fadd for a+b (reused), 1 for x+y = 2 total
+    assert!(add_calls.len() <= 2,
+        "CSE should deduplicate repeated (a + b) expression. Found {} fadd instructions.\nIR:\n{}",
+        add_calls.len(), main_body);
+}

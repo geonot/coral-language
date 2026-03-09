@@ -82,6 +82,9 @@ pub struct TypeEnv {
     /// Generic type definitions: maps type name to its type parameter names
     /// e.g., "List" -> ["T"], "Map" -> ["K", "V"]
     generic_types: HashMap<String, Vec<String>>,
+    /// T2.2: Generic ADT constructor info: constructor_name → (enum_name, type_params, field_count)
+    /// Used for let-polymorphism: each call site gets fresh type variables.
+    generic_constructors: HashMap<String, (String, Vec<String>, usize)>,
 }
 
 impl Default for TypeEnv {
@@ -92,6 +95,7 @@ impl Default for TypeEnv {
             type_params: HashMap::new(),
             type_param_stack: Vec::new(),
             generic_types: HashMap::new(),
+            generic_constructors: HashMap::new(),
         }
     }
 }
@@ -104,6 +108,7 @@ impl TypeEnv {
             type_params: HashMap::new(),
             type_param_stack: Vec::new(),
             generic_types: HashMap::new(),
+            generic_constructors: HashMap::new(),
         };
         // Register built-in generic types
         env.register_generic_type("List", vec!["T"]);
@@ -130,6 +135,17 @@ impl TypeEnv {
     /// Check if a type is a registered generic type.
     pub fn is_generic_type(&self, type_name: &str) -> bool {
         self.generic_types.contains_key(type_name)
+    }
+
+    /// T2.2: Register a generic ADT constructor for let-polymorphism.
+    /// Each call site will get fresh type variables instead of sharing one monomorphic type.
+    pub fn register_generic_constructor(&mut self, ctor_name: impl Into<String>, enum_name: String, type_params: Vec<String>, field_count: usize) {
+        self.generic_constructors.insert(ctor_name.into(), (enum_name, type_params, field_count));
+    }
+
+    /// T2.2: Get generic constructor info: (enum_name, type_params, field_count).
+    pub fn get_generic_constructor(&self, ctor_name: &str) -> Option<&(String, Vec<String>, usize)> {
+        self.generic_constructors.get(ctor_name)
     }
 
     /// Push a new type parameter scope for entering a generic context.

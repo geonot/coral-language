@@ -74,27 +74,27 @@ pub extern "C" fn coral_map_iter_next(iter: ValueHandle) -> ValueHandle {
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_get(map: ValueHandle, key: ValueHandle) -> ValueHandle {
     if map.is_null() || key.is_null() {
-        return coral_make_unit();
+        return coral_make_absent();
     }
     let map_value = unsafe { &*map };
     if map_value.tag != ValueTag::Map as u8 {
-        return coral_make_unit();
+        return coral_make_absent();
     }
     let ptr = map_value.heap_ptr();
     if ptr.is_null() {
-        return coral_make_unit();
+        return coral_make_absent();
     }
     let map_obj = unsafe { &*(ptr as *const MapObject) };
     if let Some(bucket) = map_get_entry(map_obj, key) {
         if bucket.value.is_null() {
-            return coral_make_unit();
+            return coral_make_absent();
         }
         unsafe {
             coral_value_retain(bucket.value);
         }
         bucket.value
     } else {
-        coral_make_unit()
+        coral_make_absent()
     }
 }
 

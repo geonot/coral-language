@@ -1,0 +1,29 @@
+# Benchmark: List operations
+# Tests: list allocation, push, iteration, map/filter/reduce
+
+*main()
+    start is time_now()
+
+    # Build a large list
+    data is []
+    i is 0
+    while i < 100000
+        data is data.push(i)
+        i is i + 1
+
+    # Sum with reduce
+    total is data.reduce(0, *fn(acc, x) acc + x)
+
+    # Filter even numbers
+    evens is data.filter(*fn(x) x % 2 is 0)
+
+    # Map: square each element (first 1000 to avoid memory pressure)
+    sample is list_slice(data, 0, 1000)
+    squared is sample.map(*fn(x) x * x)
+
+    elapsed is time_now() - start
+    log("list_size = " + to_string(data.length))
+    log("sum = " + to_string(total))
+    log("evens_count = " + to_string(evens.length))
+    log("squared_first = " + to_string(squared.get(0)))
+    log("elapsed_ms: " + to_string(elapsed))

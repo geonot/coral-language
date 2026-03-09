@@ -1,0 +1,39 @@
+# Benchmark: Matrix multiply (3x3)
+# Tests: nested loops, array indexing, numeric computation
+
+*mat_mul(a, b, n)
+    result is []
+    i is 0
+    while i < n
+        row is []
+        j is 0
+        while j < n
+            sum is 0
+            k is 0
+            while k < n
+                sum is sum + a.get(i).get(k) * b.get(k).get(j)
+                k is k + 1
+            row is row.push(sum)
+            j is j + 1
+        result is result.push(row)
+        i is i + 1
+    result
+
+*main()
+    start is time_now()
+
+    a is [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    b is [[9, 8, 7], [6, 5, 4], [3, 2, 1]]
+
+    # Repeat multiplication many times to get measurable time
+    result is a
+    iter is 0
+    while iter < 50000
+        result is mat_mul(a, b, 3)
+        iter is iter + 1
+
+    elapsed is time_now() - start
+    log("result[0][0] = " + to_string(result.get(0).get(0)))
+    log("result[1][1] = " + to_string(result.get(1).get(1)))
+    log("result[2][2] = " + to_string(result.get(2).get(2)))
+    log("elapsed_ms: " + to_string(elapsed))
