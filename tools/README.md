@@ -2,6 +2,41 @@
 
 Helper scripts that improve LLM agent efficiency when working on this codebase.
 
+## coral-dev — All-in-One Helper Script
+
+The primary tool for agents and humans. Wraps build, test, run, search,
+navigation, and documentation workflows into short subcommands.
+
+```bash
+./tools/coral-dev help              # Show all commands
+./tools/coral-dev test summary      # Run tests, one-line pass/fail
+./tools/coral-dev test failures     # Show only failing tests
+./tools/coral-dev test one my_test  # Run single test with output
+./tools/coral-dev test grep pattern # Run tests matching a pattern
+./tools/coral-dev test e2e          # End-to-end tests only
+./tools/coral-dev run file.coral    # Compile + run via JIT
+./tools/coral-dev compile file.coral # Compile to LLVM IR only
+./tools/coral-dev check             # Quick build error check
+./tools/coral-dev codemap compact   # Structural code map
+./tools/coral-dev xref rust         # Cross-reference report
+./tools/coral-dev find sym name     # Find symbol definition
+./tools/coral-dev find callers fn   # Who calls this function?
+./tools/coral-dev find text pattern # Full-text search
+./tools/coral-dev status            # Git + test + line count
+./tools/coral-dev baseline update   # Update test count in docs
+./tools/coral-dev onboard quick     # Fast agent context loading
+```
+
+For shell function aliases, source the env file:
+
+```bash
+source tools/coral-dev.env
+ct summary    # ct = coral test
+cr file.coral # cr = coral run
+cm compact    # cm = codemap
+co quick      # co = onboard
+```
+
 ## codemap.py — Structural Code Map
 
 Generates a Markdown document mapping every source file's structure: classes,

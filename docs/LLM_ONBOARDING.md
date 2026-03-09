@@ -632,13 +632,23 @@ Work on **related tasks together** in a single session. For example, if implemen
 
 ### Agent Navigation Tools
 
-The `tools/` directory contains scripts that help LLM agents navigate the codebase efficiently:
+The `tools/` directory contains a helper script that wraps all common workflows:
 
-- **`python tools/codemap.py src/`** — Generate a structural map of all source files with function/struct/enum definitions, line numbers, parameters, return types, doc comments, and caller/callee relationships.
-- **`python tools/xref.py . --include "*.rs"`** — Build a cross-reference report showing most-referenced symbols, caller graphs, and potentially unused functions.
-- **`python tools/codemap.py . --compact`** — Compact mode for a quick overview (no docs/calls).
+```bash
+./tools/coral-dev help              # Show all commands
+./tools/coral-dev test summary      # Run tests, one-line pass/fail
+./tools/coral-dev test failures     # Show only failing tests
+./tools/coral-dev test one <name>   # Run single test with output
+./tools/coral-dev run file.coral    # Compile + run via JIT
+./tools/coral-dev codemap compact   # Structural code map of src/
+./tools/coral-dev xref rust         # Cross-reference report
+./tools/coral-dev find sym <name>   # Find symbol definition
+./tools/coral-dev find callers <fn> # Who calls this function?
+./tools/coral-dev onboard quick     # Fast context loading (AGENTS.md)
+./tools/coral-dev baseline update   # Update test count in docs
+```
 
-Run these at the start of a session to orient yourself quickly. See `tools/README.md` for full usage.
+Run `./tools/coral-dev help` for the full list. See `tools/README.md` for details.
 
 ### Before Starting Work
 

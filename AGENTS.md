@@ -7,7 +7,8 @@
 - Build compiler:    cargo build
 - Release build:     cargo build --release
 - Single test:       cargo test test_name_here -- --nocapture
-- Run .coral file:   cargo run -- compile examples/hello.coral && lli output.ll
+- Run .coral file:   cargo run -- --jit examples/hello.coral
+- Emit IR:           cargo run -- --emit-ir output.ll examples/hello.coral
 
 ## Test Baseline (update after each session)
 - Tests: 816 pass, 0 failures
@@ -42,10 +43,24 @@
 - Runtime is cdylib (libruntime.so) — linked at compile time
 - Self-hosted compiler in self_hosted/ must stay in sync with src/
 
-## Navigation Tools
-- Code map:   python tools/codemap.py src/ --compact
-- Xref:       python tools/xref.py . --include "*.rs"
-- Full map:   python tools/codemap.py . --output CODEMAP.md
+## Helper Script (./tools/coral-dev)
+- Test summary:   ./tools/coral-dev test summary
+- Test failures:  ./tools/coral-dev test failures
+- Single test:    ./tools/coral-dev test one <test_name>
+- Test by pattern: ./tools/coral-dev test grep <pattern>
+- E2E tests:     ./tools/coral-dev test e2e
+- Run .coral:    ./tools/coral-dev run examples/hello.coral
+- Compile only:  ./tools/coral-dev compile examples/hello.coral
+- Check build:   ./tools/coral-dev check
+- Code map:      ./tools/coral-dev codemap compact
+- Cross-ref:     ./tools/coral-dev xref rust
+- Find symbol:   ./tools/coral-dev find sym <name>
+- Find callers:  ./tools/coral-dev find callers <name>
+- Find text:     ./tools/coral-dev find text <pattern>
+- Project status: ./tools/coral-dev status
+- Update baseline: ./tools/coral-dev baseline update
+- Onboard:       ./tools/coral-dev onboard quick
+- All commands:  ./tools/coral-dev help
 
 ## Planning
 - Roadmap:    docs/LANGUAGE_EVOLUTION_ROADMAP.md (AUTHORITATIVE)

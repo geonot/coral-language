@@ -1,0 +1,640 @@
+#!/usr/bin/env bash
+#
+# coral-dev — Developer helper for the Coral compiler project.
+#
+# Wraps common build/test/run/navigate workflows into short subcommands
+# so that LLM agents (and humans) don't need to compose long pipelines.
+#
+# Usage:  ./tools/coral-dev <command> [args...]
+#         source tools/coral-dev.env   # to load as shell functions
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
+# ──────────────────────────────────────────────────────────────────────
+# Colors (disabled if not a tty)
+# ──────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+    CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; RESET=''
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+info()  { echo -e "${CYAN}▸${RESET} $*"; }
+ok()    { echo -e "${GREEN}✓${RESET} $*"; }
+warn()  { echo -e "${YELLOW}⚠${RESET} $*" >&2; }
+die()   { echo -e "${RED}✗${RESET} $*" >&2; exit 1; }
+
+# ──────────────────────────────────────────────────────────────────────
+# build — Compile the compiler and/or runtime
+# ──────────────────────────────────────────────────────────────────────
+cmd_build() {
+    local target="${1:-all}"
+    case "$target" in
+        all)
+            info "Building runtime + compiler..."
+            cargo build -p runtime 2>&1
+            cargo build 2>&1
+            ;;
+        runtime|rt)
+            info "Building runtime..."
+            cargo build -p runtime 2>&1
+            ;;
+        compiler)
+            info "Building compiler..."
+            cargo build 2>&1
+            ;;
+        release)
+            info "Building release..."
+            cargo build --release 2>&1
+            ;;
+        *)
+            die "Unknown build target: $target (use: all, runtime, compiler, release)"
+            ;;
+    esac
+    ok "Build complete"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# test — Run tests with various filtering/output modes
+# ──────────────────────────────────────────────────────────────────────
+cmd_test() {
+    local mode="${1:-summary}"
+    shift 2>/dev/null || true
+
+    case "$mode" in
+        # Quick summary: just the result line(s)
+        summary|s)
+            info "Running all tests (summary)..."
+            local output
+            output=$(cargo test 2>&1) || true
+            # Show any compilation errors first
+            echo "$output" | grep -E "^error\[" | head -10 2>/dev/null || true
+            # Show aggregate pass/fail
+            local total_pass=0 total_fail=0
+            while IFS= read -r line; do
+                local p f
+                p=$(echo "$line" | grep -oP '\d+ passed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                f=$(echo "$line" | grep -oP '\d+ failed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                total_pass=$((total_pass + p))
+                total_fail=$((total_fail + f))
+            done < <(echo "$output" | grep "^test result:" || true)
+            if [[ $total_fail -eq 0 ]]; then
+                ok "All tests passed: $total_pass passed, 0 failed"
+            else
+                echo -e "${RED}✗${RESET} Tests: $total_pass passed, $total_fail failed"
+                echo "$output" | grep -E "^test .+ FAILED$" 2>/dev/null || true
+            fi
+            ;;
+
+        # Full output — everything
+        full|f)
+            info "Running all tests (full output)..."
+            cargo test 2>&1
+            ;;
+
+        # Only show failures — the most useful mode for remediation
+        failures|fail)
+            info "Running all tests, filtering to failures..."
+            local output
+            output=$(cargo test 2>&1)
+            local result_line
+            result_line=$(echo "$output" | grep "^test result:" | tail -1)
+            echo "$result_line"
+            # Show FAILED tests
+            echo "$output" | grep -E "^test .+ FAILED$" || true
+            # Show failure details
+            echo "$output" | sed -n '/^failures:/,/^test result:/p' || true
+            ;;
+
+        # Run a single named test with full output
+        one|single)
+            local name="${1:?Usage: coral-dev test one <test_name>}"
+            info "Running test: $name"
+            cargo test "$name" -- --nocapture 2>&1
+            ;;
+
+        # Run tests matching a pattern, show names + pass/fail
+        grep|match)
+            local pattern="${1:?Usage: coral-dev test grep <pattern>}"
+            info "Running tests matching: $pattern"
+            local output
+            output=$(cargo test "$pattern" 2>&1) || true
+            # Show only test lines and non-empty results
+            echo "$output" | grep -E "^test .+ \.\.\." || true
+            echo ""
+            # Aggregate results
+            local total_pass=0 total_fail=0
+            while IFS= read -r line; do
+                local p f
+                p=$(echo "$line" | grep -oP '\d+ passed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                f=$(echo "$line" | grep -oP '\d+ failed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                total_pass=$((total_pass + p))
+                total_fail=$((total_fail + f))
+            done < <(echo "$output" | grep "^test result:" || true)
+            echo "Matched: $((total_pass + total_fail)) ($total_pass passed, $total_fail failed)"
+            ;;
+
+        # Run only end-to-end (execution) tests
+        e2e)
+            info "Running end-to-end tests..."
+            local output
+            output=$(cargo test --test execution 2>&1) || true
+            echo "$output" | grep -E "^test .+ \.\.\." || true
+            echo ""
+            echo "$output" | grep "^test result:" | tail -1
+            ;;
+
+        # Run only parser tests
+        parser)
+            info "Running parser tests..."
+            local output
+            output=$(cargo test --test parser_extended --test parser_fixtures --test parser_layout \
+                       --test parser_logic --test parser_low_level --test parser_snapshots 2>&1) || true
+            echo "$output" | grep -E "^test .+ FAILED" || true
+            local total_pass=0 total_fail=0
+            while IFS= read -r line; do
+                local p f
+                p=$(echo "$line" | grep -oP '\d+ passed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                f=$(echo "$line" | grep -oP '\d+ failed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                total_pass=$((total_pass + p))
+                total_fail=$((total_fail + f))
+            done < <(echo "$output" | grep "^test result:" || true)
+            echo "Parser tests: $total_pass passed, $total_fail failed"
+            ;;
+
+        # Run only semantic tests
+        semantic|sem)
+            info "Running semantic tests..."
+            local output
+            output=$(cargo test --test semantic --test semantic_extended 2>&1) || true
+            echo "$output" | grep -E "^test .+ FAILED" || true
+            local total_pass=0 total_fail=0
+            while IFS= read -r line; do
+                local p f
+                p=$(echo "$line" | grep -oP '\d+ passed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                f=$(echo "$line" | grep -oP '\d+ failed' | grep -oP '\d+' 2>/dev/null || echo 0)
+                total_pass=$((total_pass + p))
+                total_fail=$((total_fail + f))
+            done < <(echo "$output" | grep "^test result:" || true)
+            echo "Semantic tests: $total_pass passed, $total_fail failed"
+            ;;
+
+        # Run only codegen tests
+        codegen|cg)
+            info "Running codegen tests..."
+            local output
+            output=$(cargo test --test codegen_extended 2>&1) || true
+            echo "$output" | grep -E "^test .+ FAILED" || true
+            echo "$output" | grep "^test result:" | tail -1
+            ;;
+
+        # Run runtime tests
+        runtime|rt)
+            info "Running runtime tests..."
+            cargo test -p runtime 2>&1
+            ;;
+
+        # Count total tests
+        count)
+            info "Counting tests..."
+            local output
+            output=$(cargo test 2>&1) || true
+            local passed failed
+            passed=$(echo "$output" | grep -c "^test .* ok$" 2>/dev/null || echo 0)
+            failed=$(echo "$output" | grep -c "^test .* FAILED$" 2>/dev/null || echo 0)
+            echo "Passed: $passed"
+            echo "Failed: $failed"
+            echo "Total:  $((passed + failed))"
+            ;;
+
+        *)
+            die "Unknown test mode: $mode
+Modes: summary, full, failures, one <name>, grep <pattern>,
+       e2e, parser, semantic, codegen, runtime, count"
+            ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# run — Compile and execute a .coral file
+# ──────────────────────────────────────────────────────────────────────
+cmd_run() {
+    local file="${1:?Usage: coral-dev run <file.coral>}"
+    shift
+
+    if [[ ! -f "$file" ]]; then
+        die "File not found: $file"
+    fi
+
+    info "Compiling and running $file via JIT..."
+    cargo run --quiet -- --jit "$file" "$@" 2>&1
+    local rc=$?
+    [[ $rc -eq 0 ]] && ok "Exit code: 0" || warn "Exit code: $rc"
+    return $rc
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# compile — Compile a .coral file to LLVM IR (without running)
+# ──────────────────────────────────────────────────────────────────────
+cmd_compile() {
+    local file="${1:?Usage: coral-dev compile <file.coral>}"
+    local ir_out="${2:-output.ll}"
+
+    if [[ ! -f "$file" ]]; then
+        die "File not found: $file"
+    fi
+
+    info "Compiling $file → LLVM IR..."
+    cargo run --quiet -- --emit-ir "$ir_out" "$file" 2>&1
+    if [[ -f "$ir_out" ]]; then
+        ok "Output: $ir_out ($(wc -l < "$ir_out") lines)"
+    fi
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# check — Quick compile check (no codegen, just parse + semantic)
+# ──────────────────────────────────────────────────────────────────────
+cmd_check() {
+    info "Checking for compile errors..."
+    local output
+    output=$(cargo build 2>&1)
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        ok "No compile errors"
+    else
+        echo "$output" | grep -E "^error" | head -20
+        die "Compile errors found"
+    fi
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# errors — Extract and display Rust compiler errors cleanly
+# ──────────────────────────────────────────────────────────────────────
+cmd_errors() {
+    info "Checking for errors across all crates..."
+    local output
+    output=$(cargo build 2>&1)
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        ok "No errors"
+        return 0
+    fi
+    # Show errors grouped by file
+    echo "$output" | grep -E "^error\[|^error:|^\s+-->" | head -40
+    echo ""
+    echo "$output" | grep -cE "^error\[" | xargs -I{} echo "Total errors: {}"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# codemap — Generate structural code map
+# ──────────────────────────────────────────────────────────────────────
+cmd_codemap() {
+    local mode="${1:-compact}"
+    shift 2>/dev/null || true
+
+    case "$mode" in
+        # Compact map of src/ only — quick orientation
+        compact|c)
+            info "Generating compact code map (src/)..."
+            python3 "$SCRIPT_DIR/codemap.py" src/ --compact "$@"
+            ;;
+
+        # Full map of entire project
+        full|f)
+            info "Generating full code map..."
+            python3 "$SCRIPT_DIR/codemap.py" . --output CODEMAP.md "$@"
+            ok "Written to CODEMAP.md"
+            ;;
+
+        # Map specific directory
+        dir|d)
+            local dir="${1:?Usage: coral-dev codemap dir <directory>}"
+            shift
+            info "Generating code map for $dir..."
+            python3 "$SCRIPT_DIR/codemap.py" "$dir" "$@"
+            ;;
+
+        # Rust source files only
+        rust|rs)
+            info "Generating Rust code map..."
+            python3 "$SCRIPT_DIR/codemap.py" . --include "*.rs" "$@"
+            ;;
+
+        # Coral files only
+        coral)
+            info "Generating Coral code map..."
+            python3 "$SCRIPT_DIR/codemap.py" . --include "*.coral" "$@"
+            ;;
+
+        *)
+            die "Unknown codemap mode: $mode (use: compact, full, dir, rust, coral)"
+            ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# xref — Generate cross-reference report
+# ──────────────────────────────────────────────────────────────────────
+cmd_xref() {
+    local mode="${1:-rust}"
+    shift 2>/dev/null || true
+
+    case "$mode" in
+        rust|rs)
+            info "Building Rust cross-reference..."
+            python3 "$SCRIPT_DIR/xref.py" . --include "*.rs" "$@"
+            ;;
+        all)
+            info "Building full cross-reference..."
+            python3 "$SCRIPT_DIR/xref.py" . "$@"
+            ;;
+        json)
+            python3 "$SCRIPT_DIR/xref.py" . --include "*.rs" --format json "$@"
+            ;;
+        *)
+            die "Unknown xref mode: $mode (use: rust, all, json)"
+            ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# onboard — Print onboarding context for a new agent session
+# ──────────────────────────────────────────────────────────────────────
+cmd_onboard() {
+    local level="${1:-quick}"
+
+    case "$level" in
+        # Minimal: just AGENTS.md — fastest possible context load
+        quick|q)
+            cat "$ROOT_DIR/AGENTS.md"
+            ;;
+
+        # Standard: AGENTS.md + current test status + roadmap status
+        standard|std)
+            cat "$ROOT_DIR/AGENTS.md"
+            echo ""
+            echo "═══════════════════════════════════════════════════"
+            echo " Current Test Status"
+            echo "═══════════════════════════════════════════════════"
+            cargo test 2>&1 | grep "^test result:" | tail -1
+            echo ""
+            echo "═══════════════════════════════════════════════════"
+            echo " Recent Progress (last 10 entries)"
+            echo "═══════════════════════════════════════════════════"
+            grep -A2 "^### Session" "$ROOT_DIR/docs/EVOLUTION_PROGRESS.md" | tail -30
+            ;;
+
+        # Full: everything an agent needs
+        full|f)
+            cat "$ROOT_DIR/AGENTS.md"
+            echo ""
+            echo "═══════════════════════════════════════════════════"
+            echo " Current Test Status"
+            echo "═══════════════════════════════════════════════════"
+            cargo test 2>&1 | grep "^test result:" | tail -1
+            echo ""
+            echo "═══════════════════════════════════════════════════"
+            echo " docs/LLM_ONBOARDING.md"
+            echo "═══════════════════════════════════════════════════"
+            cat "$ROOT_DIR/docs/LLM_ONBOARDING.md"
+            ;;
+
+        *)
+            die "Unknown onboard level: $level (use: quick, standard, full)"
+            ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# status — Quick project health check
+# ──────────────────────────────────────────────────────────────────────
+cmd_status() {
+    echo -e "${BOLD}Coral Project Status${RESET}"
+    echo "─────────────────────────────────"
+
+    # Git status
+    local branch
+    branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+    local dirty
+    dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "Branch:    ${CYAN}$branch${RESET} ($dirty uncommitted files)"
+
+    # Last commit
+    echo -e "Last commit: $(git log --oneline -1 2>/dev/null)"
+
+    # Line counts
+    local rust_lines coral_lines test_lines
+    rust_lines=$(find src/ runtime/src/ -name '*.rs' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')
+    coral_lines=$(find self_hosted/ std/ -name '*.coral' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')
+    test_lines=$(find tests/ -name '*.rs' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')
+    echo "Source:    ${rust_lines} Rust + ${coral_lines} Coral lines"
+    echo "Tests:     ${test_lines} lines of test code"
+
+    # Quick test count (from last cargo test, or run it)
+    echo ""
+    info "Running tests..."
+    local test_output
+    test_output=$(cargo test 2>&1)
+    echo "$test_output" | grep "^test result:" | tail -1
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# baseline — Show/update the test baseline in AGENTS.md
+# ──────────────────────────────────────────────────────────────────────
+cmd_baseline() {
+    local action="${1:-show}"
+
+    case "$action" in
+        show)
+            grep "Tests:" "$ROOT_DIR/AGENTS.md" | head -1
+            echo ""
+            info "Actual:"
+            cargo test 2>&1 | grep "^test result:" | tail -1
+            ;;
+
+        update)
+            info "Running tests to get current count..."
+            local result
+            result=$(cargo test 2>&1 | grep "^test result:" | tail -1)
+            local passed
+            passed=$(echo "$result" | grep -oP '\d+ passed' | grep -oP '\d+')
+            local failed
+            failed=$(echo "$result" | grep -oP '\d+ failed' | grep -oP '\d+' || echo "0")
+
+            if [[ -z "$passed" ]]; then
+                die "Could not parse test results: $result"
+            fi
+
+            # Update AGENTS.md
+            sed -i "s/^- Tests: .*/- Tests: ${passed} pass, ${failed} failures/" "$ROOT_DIR/AGENTS.md"
+            ok "Updated AGENTS.md: ${passed} pass, ${failed} failures"
+
+            # Also update LLM_ONBOARDING.md baseline
+            sed -i "s/expect [0-9]* pass, [0-9]* failures/expect ${passed} pass, ${failed} failures/" \
+                "$ROOT_DIR/docs/LLM_ONBOARDING.md"
+            ok "Updated LLM_ONBOARDING.md baseline"
+            ;;
+
+        *)
+            die "Unknown baseline action: $action (use: show, update)"
+            ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# find — Search the codebase efficiently
+# ──────────────────────────────────────────────────────────────────────
+cmd_find() {
+    local what="${1:?Usage: coral-dev find <symbol|text|file> [pattern]}"
+    shift
+
+    case "$what" in
+        # Search for a symbol definition (fn, struct, enum, trait, impl)
+        sym|symbol|def)
+            local pattern="${1:?Usage: coral-dev find sym <name>}"
+            info "Searching for symbol: $pattern"
+            grep -rnE "^\s*(pub\s+)?(\bfn\b|\bstruct\b|\benum\b|\btrait\b|\bimpl\b|\bconst\b|\btype\b|\bmod\b)\s+$pattern\b" \
+                src/ runtime/src/ --include='*.rs' | head -20
+            # Also search Coral files
+            grep -rnE "^\s*\*$pattern\(|^\s*(type|enum|actor|store|trait)\s+$pattern\b" \
+                self_hosted/ std/ --include='*.coral' 2>/dev/null | head -10
+            ;;
+
+        # Full-text search
+        text|grep)
+            local pattern="${1:?Usage: coral-dev find text <pattern>}"
+            shift
+            grep -rn "$pattern" src/ runtime/src/ tests/ --include='*.rs' "$@" | head -30
+            ;;
+
+        # Search for a file by name
+        file)
+            local pattern="${1:?Usage: coral-dev find file <pattern>}"
+            find . -name "$pattern" -not -path '*/target/*' -not -path '*/.git/*' 2>/dev/null
+            ;;
+
+        # Search for all callers of a function
+        callers)
+            local fn_name="${1:?Usage: coral-dev find callers <function_name>}"
+            info "Searching for callers of: $fn_name"
+            grep -rn "${fn_name}\s*(" src/ runtime/src/ --include='*.rs' \
+                | grep -v "^\s*\(pub\s\+\)\?fn\s\+${fn_name}" | head -20
+            ;;
+
+        # Search tests for a pattern
+        test|tests)
+            local pattern="${1:?Usage: coral-dev find test <pattern>}"
+            grep -rn "$pattern" tests/ --include='*.rs' | head -30
+            ;;
+
+        *)
+            die "Unknown find target: $what (use: sym, text, file, callers, test)"
+            ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# diff — Show recent changes
+# ──────────────────────────────────────────────────────────────────────
+cmd_diff() {
+    local scope="${1:-staged}"
+    case "$scope" in
+        staged)     git diff --cached --stat ;;
+        unstaged)   git diff --stat ;;
+        all)        git diff HEAD --stat ;;
+        full)       git diff HEAD ;;
+        files)      git status --porcelain ;;
+        last)       git diff HEAD~1 --stat ;;
+        *)          die "Unknown diff scope: $scope (use: staged, unstaged, all, full, files, last)" ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# help
+# ──────────────────────────────────────────────────────────────────────
+cmd_help() {
+    cat <<'EOF'
+coral-dev — Coral project helper for LLM agents and humans
+
+Usage: ./tools/coral-dev <command> [args...]
+
+COMMANDS:
+  build [target]         Build the project
+                         Targets: all (default), runtime, compiler, release
+
+  test [mode] [args]     Run tests
+                         Modes: summary (default), full, failures, count,
+                                one <name>, grep <pattern>,
+                                e2e, parser, semantic, codegen, runtime
+
+  run <file.coral>       Compile and execute a .coral file via lli
+  compile <file.coral>   Compile a .coral file to LLVM IR only
+  check                  Quick build check (are there compile errors?)
+  errors                 Show compiler errors grouped by file
+
+  codemap [mode]         Generate structural code map
+                         Modes: compact (default), full, dir <path>, rust, coral
+  xref [mode]            Cross-reference report
+                         Modes: rust (default), all, json
+
+  onboard [level]        Print agent onboarding context
+                         Levels: quick (default), standard, full
+
+  status                 Project health check (git, lines, tests)
+  baseline [action]      Show/update test baseline
+                         Actions: show (default), update
+
+  find <what> <pattern>  Search the codebase
+                         Targets: sym, text, file, callers, test
+
+  diff [scope]           Show changes
+                         Scopes: staged (default), unstaged, all, full, files, last
+
+  help                   Show this help message
+
+EXAMPLES:
+  ./tools/coral-dev test failures       # Show only failing tests
+  ./tools/coral-dev test one my_test    # Run one test with full output
+  ./tools/coral-dev run examples/hello.coral
+  ./tools/coral-dev codemap compact     # Quick structural overview
+  ./tools/coral-dev find sym compile    # Find definition of 'compile'
+  ./tools/coral-dev baseline update     # Update test count in docs
+  ./tools/coral-dev onboard quick       # Fast agent context loading
+EOF
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Main dispatch
+# ──────────────────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        build)      cmd_build "$@" ;;
+        test|t)     cmd_test "$@" ;;
+        run)        cmd_run "$@" ;;
+        compile)    cmd_compile "$@" ;;
+        check)      cmd_check "$@" ;;
+        errors)     cmd_errors "$@" ;;
+        codemap|cm) cmd_codemap "$@" ;;
+        xref)       cmd_xref "$@" ;;
+        onboard|ob) cmd_onboard "$@" ;;
+        status|st)  cmd_status "$@" ;;
+        baseline)   cmd_baseline "$@" ;;
+        find)       cmd_find "$@" ;;
+        diff)       cmd_diff "$@" ;;
+        help|-h|--help) cmd_help ;;
+        *)          die "Unknown command: $cmd (try: ./tools/coral-dev help)" ;;
+    esac
+}
+
+main "$@"
