@@ -57,6 +57,13 @@
 - Find symbol:   ./tools/coral-dev find sym <name>
 - Find callers:  ./tools/coral-dev find callers <name>
 - Find text:     ./tools/coral-dev find text <pattern>
+- Goto symbol:   ./tools/coral-dev goto <file> <symbol>
+- Extract fn:    ./tools/coral-dev extract <file> <symbol> [-c N]
+- File index:    ./tools/coral-dev context <file> [--brief]
+- List symbols:  ./tools/coral-dev symbols <file> [--kind fn|enum|...]
+- Checklist:     ./tools/coral-dev checklist new-syntax [--enrich]
+- Scaffold test: ./tools/coral-dev scaffold e2e <name>
+- Parse errors:  ./tools/coral-dev parse-errors build [--format json]
 - Project status: ./tools/coral-dev status
 - Update baseline: ./tools/coral-dev baseline update
 - Onboard:       ./tools/coral-dev onboard quick

@@ -558,6 +558,40 @@ cmd_diff() {
 }
 
 # ──────────────────────────────────────────────────────────────────────
+# goto / extract / context / symbols — Forwarded to coral-helpers.py
+# ──────────────────────────────────────────────────────────────────────
+cmd_goto() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" goto "$@"
+}
+
+cmd_extract() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" extract "$@"
+}
+
+cmd_context() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" context "$@"
+}
+
+cmd_symbols() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" symbols "$@"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# checklist / scaffold / parse-errors — Forwarded to coral-helpers.py
+# ──────────────────────────────────────────────────────────────────────
+cmd_checklist() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" checklist "$@"
+}
+
+cmd_scaffold() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" scaffold "$@"
+}
+
+cmd_parse_errors() {
+    python3 "$SCRIPT_DIR/coral-helpers.py" parse-errors "$@"
+}
+
+# ──────────────────────────────────────────────────────────────────────
 # help
 # ──────────────────────────────────────────────────────────────────────
 cmd_help() {
@@ -580,6 +614,11 @@ COMMANDS:
   check                  Quick build check (are there compile errors?)
   errors                 Show compiler errors grouped by file
 
+  goto <file> <symbol>   Find symbol location with line range
+  extract <file> <sym>   Extract function/symbol body to stdout
+  context <file> [-b]    Structural index of a file (codemap-powered)
+  symbols <file> [-k K]  List all symbols in a file, optionally by kind
+
   codemap [mode]         Generate structural code map
                          Modes: compact (default), full, dir <path>, rust, coral
   xref [mode]            Cross-reference report
@@ -595,6 +634,11 @@ COMMANDS:
   find <what> <pattern>  Search the codebase
                          Targets: sym, text, file, callers, test
 
+  checklist [task]       Edit checklist for a task type
+                         Tasks: new-syntax, new-builtin, new-type, fix-bug, ... (or 'list')
+  scaffold <type> <name> Generate test boilerplate (e2e, codegen, semantic, parser)
+  parse-errors [cmd]     Parse cargo build/test output into structured errors
+
   diff [scope]           Show changes
                          Scopes: staged (default), unstaged, all, full, files, last
 
@@ -606,6 +650,12 @@ EXAMPLES:
   ./tools/coral-dev run examples/hello.coral
   ./tools/coral-dev codemap compact     # Quick structural overview
   ./tools/coral-dev find sym compile    # Find definition of 'compile'
+  ./tools/coral-dev goto src/parser.rs parse_match_arm
+  ./tools/coral-dev extract src/codegen/mod.rs compile_call -c 5
+  ./tools/coral-dev context src/semantic.rs --brief
+  ./tools/coral-dev symbols src/ast.rs --kind enum
+  ./tools/coral-dev checklist new-syntax --enrich
+  ./tools/coral-dev scaffold e2e my_feature
   ./tools/coral-dev baseline update     # Update test count in docs
   ./tools/coral-dev onboard quick       # Fast agent context loading
 EOF
@@ -632,6 +682,13 @@ main() {
         baseline)   cmd_baseline "$@" ;;
         find)       cmd_find "$@" ;;
         diff)       cmd_diff "$@" ;;
+        goto)       cmd_goto "$@" ;;
+        extract|ex) cmd_extract "$@" ;;
+        context|ctx) cmd_context "$@" ;;
+        symbols|sym) cmd_symbols "$@" ;;
+        checklist|cl) cmd_checklist "$@" ;;
+        scaffold|sc) cmd_scaffold "$@" ;;
+        parse-errors|pe) cmd_parse_errors "$@" ;;
         help|-h|--help) cmd_help ;;
         *)          die "Unknown command: $cmd (try: ./tools/coral-dev help)" ;;
     esac
