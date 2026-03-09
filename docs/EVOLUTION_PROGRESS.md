@@ -10,7 +10,7 @@
 | Metric | Value | Date |
 |--------|-------|------|
 | Initial tests passing | 203 | 2026-03-08 |
-| Current tests passing | 816 | 2026-03-09 |
+| Current tests passing | 816 + 7 runtime | 2026-03-09 |
 | Pre-existing failures | 0 |
 | Runtime build | debug + release |
 
@@ -379,3 +379,35 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
   - Exhaustiveness checking helper handles or-patterns by checking if any sub-pattern covers a constructor
   - 3 new tests: basic or-pattern, or-pattern with bindings, exhaustiveness with or-patterns
 - **Results**: 816 tests pass (813 + 3 new), 0 failures
+
+### Session 27 — Documentation Consolidation & Tooling
+- Built `tools/coral-dev` bash helper (22 subcommands)
+- Built `tools/coral-helpers.py` Python helper (7 subcommands with codemap integration)
+- Consolidated AGENTS.md with quick reference for LLM agents
+- **Results**: 816 tests pass, 0 failures
+
+### Session 28 — M2.1-M2.4 Non-Atomic RC Fast Path
+- **M2.4 COMPLETE** (Gate diagnostic counters):
+  - Added `metrics` feature to runtime Cargo.toml
+  - `retain_events: AtomicU32` and `release_events: AtomicU32` now gated behind `#[cfg(feature = "metrics")]`
+  - All 9 Value constructors, Clone impl, and recycle_value_box updated with cfg gates
+  - `coral_value_metrics` FFI returns 0 for per-value metrics when feature is disabled
+  - Saves 8 bytes per Value in production builds (40 → 32 bytes without metrics)
+- **M2.1 COMPLETE** (Thread-ownership flag):
+  - Added `owner_thread: u32` field to Value struct after `reserved: u16`
+  - Fills alignment padding before AtomicU64 — adds 0 bytes to struct size
+  - Thread-local ID system: `THREAD_ID_COUNTER: AtomicU32` assigns unique IDs starting at 1
+  - ID 0 is sentinel for "shared/atomic mode" (after freeze or cross-thread access)
+  - All Value constructors stamp `owner_thread: current_thread_id()`
+  - recycle_value_box resets `owner_thread` to 0 on pool return
+- **M2.2 COMPLETE** (Non-atomic retain/release):
+  - `coral_value_retain`: when `owner_thread != 0 && owner_thread == current_thread_id()`, uses plain `load+store` instead of `fetch_add` (~5-10x faster on x86, avoids `lock` prefix)
+  - `coral_value_release`: when thread-local, uses plain `load+store` instead of `compare_exchange_weak` CAS loop (~10-20x faster), skips Acquire fence on final drop
+  - `drop_heap_value` child release loop also uses non-atomic path for thread-local children
+  - Shared/frozen values (owner_thread == 0) fall through to existing atomic path unchanged
+- **M2.3 COMPLETE** (Atomic promotion at freeze):
+  - `freeze_value` now sets `value.owner_thread = 0` alongside `FLAG_FROZEN`
+  - One-way transition: once frozen for actor sharing, all subsequent RC ops use atomic path
+  - Recursive freeze propagates to list items and map key/value pairs
+- **7 new tests**: owner_thread stamping, non-atomic retain/release round-trip, heap string RC, freeze-to-atomic promotion, freeze-list-promotes-children, unique thread IDs across threads, cross-thread retain/release on frozen values
+- **Results**: 816 tests pass (workspace), 7 new M2 runtime tests all pass, 0 failures

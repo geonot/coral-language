@@ -90,16 +90,29 @@ pub unsafe extern "C" fn coral_value_retain(value: ValueHandle) {
         return;
     }
     let value = unsafe { &*value };
-    // Relaxed is sufficient for retain: no data needs to be visible to other
-    // threads at this point. The matching Release in coral_value_release
-    // ensures proper visibility when the refcount drops.
+
+    // ── Non-atomic fast path (M2.2) ──────────────────────────────────────
+    // When the value is still owned by the current thread, use plain
+    // load+store instead of atomic fetch_add. On x86-64 this eliminates
+    // the `lock` prefix (~5-10x faster). On ARM it avoids the ldxr/stxr
+    // exclusive-monitor loop.
+    let owner = value.owner_thread;
+    if owner != 0 && owner == current_thread_id() {
+        let rc = value.refcount.load(Ordering::Relaxed);
+        debug_assert!(rc > 0, "retain on freed value");
+        if rc == u64::MAX {
+            RETAIN_SATURATED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        value.refcount.store(rc + 1, Ordering::Relaxed);
+        RETAIN_COUNT.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    // ── Atomic path (shared/frozen values) ───────────────────────────────
     let rc = value.refcount.load(Ordering::Relaxed);
     debug_assert!(rc > 0, "retain on freed value");
     if rc == u64::MAX {
-        // Saturation guard: practically unreachable (2^64 retains).
-        // Best-effort check — the TOCTOU race here is benign since
-        // hitting u64::MAX requires concurrent threads to each hold
-        // ~u64::MAX/N references simultaneously.
         RETAIN_SATURATED.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -114,6 +127,56 @@ pub unsafe extern "C" fn coral_value_release(value: ValueHandle) {
         return;
     }
     let value_ref = unsafe { &*value };
+
+    // ── Non-atomic fast path (M2.2) ──────────────────────────────────────
+    // When the value is still owned by the current thread, skip the CAS
+    // loop entirely. Plain load+store is sufficient since no other thread
+    // can access this value.
+    let owner = value_ref.owner_thread;
+    if owner != 0 && owner == current_thread_id() {
+        let rc = value_ref.refcount.load(Ordering::Relaxed);
+        if rc == 0 {
+            RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
+            debug_assert!(false, "release underflow on value tag {}", value_ref.tag);
+            return;
+        }
+        RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
+        value_ref.refcount.store(rc - 1, Ordering::Relaxed);
+        if rc > 1 {
+            cycle_detector::possible_root(value);
+            if cycle_detector::auto_cycle_collection_enabled() {
+                let count = CYCLE_COLLECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+                if count % CYCLE_COLLECTION_THRESHOLD == 0 {
+                    cycle_detector::collect_cycles();
+                }
+            }
+            return;
+        }
+        // rc == 1: last reference — fall through to deallocation
+        // No acquire fence needed: single-threaded ownership guarantees
+        // all writes are visible to this thread.
+        weak_ref::notify_value_deallocated(value);
+        cycle_detector::notify_value_freed(value);
+        let value_ref_mut = unsafe { &mut *value };
+        RELEASE_QUEUE.with(|queue| {
+            if let Ok(mut guard) = queue.try_borrow_mut() {
+                if let Some(q) = &mut *guard {
+                    if let Some(nn) = ptr::NonNull::new(value as *mut c_void) {
+                        q.push(nn);
+                        return;
+                    }
+                }
+            }
+            unsafe { drop_heap_value(value_ref_mut); }
+            LIVE_VALUE_COUNT.fetch_sub(1, Ordering::Relaxed);
+            if !recycle_value_box(value) {
+                unsafe { drop(Box::from_raw(value)); }
+            }
+        });
+        return;
+    }
+
+    // ── Atomic path (shared/frozen values) ───────────────────────────────
     // Use compare_exchange loop to safely decrement the refcount,
     // avoiding the TOCTOU race between a Relaxed load and a subsequent
     // fetch_sub (which would wrap on underflow).

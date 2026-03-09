@@ -159,6 +159,21 @@ const USAGE_WINDOW_SECS: u64 = 60;
 static CYCLE_COLLECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const CYCLE_COLLECTION_THRESHOLD: u64 = 1000; // Trigger cycle collection every 1000 releases
 
+// ── Thread-local ownership ID for non-atomic RC fast path (M2.1) ─────────────
+// Thread IDs start at 1; 0 is the sentinel for "shared/atomic mode".
+// Assigned once per thread via a global counter.
+static THREAD_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+thread_local! {
+    static LOCAL_THREAD_ID: u32 = THREAD_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Get the current thread's unique ownership ID. Cached in thread-local storage.
+#[inline]
+pub(crate) fn current_thread_id() -> u32 {
+    LOCAL_THREAD_ID.with(|&id| id)
+}
+
 pub type ValueHandle = *mut Value;
 
 // Wrapper to mark ValueHandle as Send when explicitly intended to cross threads.
@@ -311,9 +326,16 @@ pub struct Value {
     pub tag: u8,
     pub flags: u8,
     pub reserved: u16,
-    /// Reference count - uses atomic operations for thread-safe actor sharing.
+    /// Thread that owns this value. Non-zero means thread-local (non-atomic RC).
+    /// Zero means shared/atomic mode (promoted at freeze or cross-thread access).
+    /// Fills alignment padding before AtomicU64, so adds 0 bytes to struct size.
+    pub owner_thread: u32,
+    /// Reference count - uses atomic operations only when owner_thread == 0 (shared mode).
+    /// When owner_thread matches current thread, plain load/store is used (fast path).
     pub refcount: AtomicU64,
+    #[cfg(feature = "metrics")]
     pub retain_events: AtomicU32,
+    #[cfg(feature = "metrics")]
     pub release_events: AtomicU32,
     pub payload: Payload,
 }
@@ -328,8 +350,11 @@ impl Clone for Value {
             tag: self.tag,
             flags: self.flags,
             reserved: self.reserved,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(self.refcount.load(Ordering::Relaxed)),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(self.retain_events.load(Ordering::Relaxed)),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(self.release_events.load(Ordering::Relaxed)),
             payload: self.payload,
         }
@@ -342,8 +367,11 @@ impl Value {
             tag: ValueTag::Unit as u8,
             flags: 0,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { inline: [0; 16] },
         }
@@ -354,8 +382,11 @@ impl Value {
             tag: ValueTag::Number as u8,
             flags: 0,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { number: value },
         }
@@ -369,8 +400,11 @@ impl Value {
             tag: ValueTag::Bool as u8,
             flags: 0,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { inline },
         }
@@ -381,8 +415,11 @@ impl Value {
             tag: tag as u8,
             flags: 0,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { ptr },
         }
@@ -393,8 +430,11 @@ impl Value {
             tag: tag as u8,
             flags,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { ptr },
         }
@@ -408,8 +448,11 @@ impl Value {
             tag: ValueTag::String as u8,
             flags: FLAG_INLINE_STRING | ((bytes.len() as u8) << 1),
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { inline },
         }
@@ -450,8 +493,11 @@ impl Value {
             tag: ValueTag::Unit as u8,  // Error values have unit as base type
             flags: FLAG_ERR,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { ptr: metadata as *mut c_void },
         }
@@ -463,8 +509,11 @@ impl Value {
             tag: ValueTag::Unit as u8,
             flags: FLAG_ABSENT,
             reserved: 0,
+            owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
+            #[cfg(feature = "metrics")]
             retain_events: AtomicU32::new(0),
+            #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
             payload: Payload { inline: [0; 16] },
         }
@@ -519,8 +568,11 @@ fn recycle_value_box(handle: ValueHandle) -> bool {
             if p.len() < LOCAL_POOL_LIMIT {
                 unsafe {
                     (*handle).refcount.store(0, Ordering::Relaxed);
-                    (*handle).retain_events.store(0, Ordering::Relaxed);
-                    (*handle).release_events.store(0, Ordering::Relaxed);
+                    (*handle).owner_thread = 0;
+                    #[cfg(feature = "metrics")] {
+                        (*handle).retain_events.store(0, Ordering::Relaxed);
+                        (*handle).release_events.store(0, Ordering::Relaxed);
+                    }
                 }
                 p.push(handle);
                 return true;
@@ -535,8 +587,11 @@ fn recycle_value_box(handle: ValueHandle) -> bool {
         if slots.0.len() < VALUE_POOL_LIMIT {
             unsafe {
                 (*handle).refcount.store(0, Ordering::Relaxed);
-                (*handle).retain_events.store(0, Ordering::Relaxed);
-                (*handle).release_events.store(0, Ordering::Relaxed);
+                (*handle).owner_thread = 0;
+                #[cfg(feature = "metrics")] {
+                    (*handle).retain_events.store(0, Ordering::Relaxed);
+                    (*handle).release_events.store(0, Ordering::Relaxed);
+                }
             }
             slots.0.push(handle);
             return true;
@@ -870,14 +925,28 @@ unsafe fn drop_heap_value(value: &mut Value) {
             continue;
         }
         RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
-        let prev = child_ref.refcount.fetch_sub(1, Ordering::Release);
+
+        // Non-atomic fast path for thread-local children (M2.2)
+        let owner = child_ref.owner_thread;
+        let is_local = owner != 0 && owner == current_thread_id();
+
+        let prev = if is_local {
+            // Plain store: no other thread can see this value
+            child_ref.refcount.store(rc - 1, Ordering::Relaxed);
+            rc
+        } else {
+            child_ref.refcount.fetch_sub(1, Ordering::Release)
+        };
+
         if prev > 1 {
             // Still referenced — mark as possible cycle root
             cycle_detector::possible_root(child);
             continue;
         }
         // prev == 1: this child is being freed
-        std::sync::atomic::fence(Ordering::Acquire);
+        if !is_local {
+            std::sync::atomic::fence(Ordering::Acquire);
+        }
         weak_ref::notify_value_deallocated(child);
         cycle_detector::notify_value_freed(child);
         let child_mut = unsafe { &mut *child };
@@ -1125,6 +1194,11 @@ fn freeze_value(handle: ValueHandle) {
     }
     let value = unsafe { &mut *handle };
     value.flags |= FLAG_FROZEN;
+    // M2.3: Promote to atomic mode — all subsequent retain/release on this
+    // value will use atomic operations since owner_thread == 0 means "shared".
+    // This is a one-way transition: once frozen, a value never goes back to
+    // thread-local mode.
+    value.owner_thread = 0;
     match ValueTag::try_from(value.tag) {
         Ok(ValueTag::List) => {
             if let Some(list) = list_from_value(value) {
@@ -1719,8 +1793,11 @@ pub extern "C" fn coral_make_tagged(
         tag: ValueTag::Tagged as u8,
         flags: 0,
         reserved: 0,
+        owner_thread: current_thread_id(),
         refcount: AtomicU64::new(1),
+        #[cfg(feature = "metrics")]
         retain_events: AtomicU32::new(0),
+        #[cfg(feature = "metrics")]
         release_events: AtomicU32::new(0),
         payload: Payload { ptr: Box::into_raw(tagged) as *mut c_void },
     };
@@ -2824,5 +2901,164 @@ mod tests {
                 coral_value_release(map);   // drop make_map ref (rc 1→0, frees map+children)
             }
         });
+    }
+
+    // ── M2: Non-Atomic RC Fast Path Tests ────────────────────────────────
+
+    #[test]
+    fn m2_value_has_owner_thread() {
+        // M2.1: New values should be stamped with the current thread's ID
+        let val = coral_make_number(1.0);
+        let value_ref = unsafe { &*val };
+        let tid = current_thread_id();
+        assert_ne!(tid, 0, "thread ID should never be 0 (reserved for shared)");
+        assert_eq!(value_ref.owner_thread, tid);
+        unsafe { coral_value_release(val); }
+    }
+
+    #[test]
+    fn m2_nonatomic_retain_release() {
+        // M2.2: Retain and release should work correctly on thread-local values
+        let val = coral_make_number(42.0);
+        let value_ref = unsafe { &*val };
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 1);
+
+        // Retain should increment
+        unsafe { coral_value_retain(val); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 2);
+
+        // Another retain
+        unsafe { coral_value_retain(val); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 3);
+
+        // Release back down
+        unsafe { coral_value_release(val); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 2);
+
+        unsafe { coral_value_release(val); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 1);
+
+        // Final release frees
+        unsafe { coral_value_release(val); }
+    }
+
+    #[test]
+    fn m2_string_nonatomic_rc() {
+        // Heap-allocated string should also use non-atomic fast path
+        let s = coral_make_string("hello world testing".as_ptr(), 19);
+        let value_ref = unsafe { &*s };
+        assert_eq!(value_ref.owner_thread, current_thread_id());
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 1);
+
+        unsafe { coral_value_retain(s); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 2);
+
+        unsafe { coral_value_release(s); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 1);
+
+        unsafe { coral_value_release(s); }
+    }
+
+    #[test]
+    fn m2_freeze_promotes_to_atomic() {
+        // M2.3: freeze_value should set owner_thread to 0 (shared mode)
+        let val = coral_make_string("freeze me".as_ptr(), 9);
+        let value_ref = unsafe { &*val };
+        assert_ne!(value_ref.owner_thread, 0, "before freeze, should be thread-local");
+
+        freeze_value(val);
+
+        let value_ref = unsafe { &*val };
+        assert_eq!(value_ref.owner_thread, 0, "after freeze, should be in shared mode");
+        assert!(is_frozen(val), "should be flagged as frozen");
+
+        // Retain/release should still work (via atomic path now)
+        unsafe { coral_value_retain(val); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 2);
+
+        unsafe { coral_value_release(val); }
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 1);
+
+        unsafe { coral_value_release(val); }
+    }
+
+    #[test]
+    fn m2_freeze_list_promotes_children() {
+        // M2.3: Freezing a list should also promote all children
+        let items: Vec<ValueHandle> = vec![
+            coral_make_number(1.0),
+            coral_make_string("hello".as_ptr(), 5),
+        ];
+        let list = coral_make_list(items.as_ptr(), items.len());
+
+        freeze_value(list);
+
+        // List itself should be promoted
+        let list_ref = unsafe { &*list };
+        assert_eq!(list_ref.owner_thread, 0);
+
+        // Children should also be promoted
+        if let Some(list_obj) = list_from_value(list_ref) {
+            for &item in &list_obj.items {
+                if !item.is_null() {
+                    let child_ref = unsafe { &*item };
+                    assert_eq!(child_ref.owner_thread, 0,
+                        "child should be promoted to shared mode after freeze");
+                }
+            }
+        }
+
+        unsafe { coral_value_release(list); }
+    }
+
+    #[test]
+    fn m2_thread_ids_are_unique() {
+        // M2.1: Thread IDs should be unique across threads
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel();
+
+        for _ in 0..4 {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                tx.send(current_thread_id()).unwrap();
+            });
+        }
+        drop(tx);
+
+        let mut ids: Vec<u32> = rx.iter().collect();
+        let main_id = current_thread_id();
+        ids.push(main_id);
+        ids.sort();
+        ids.dedup();
+        // All thread IDs should be unique (no duplicates removed)
+        assert_eq!(ids.len(), 5, "5 threads should have 5 unique IDs");
+        assert!(!ids.contains(&0), "no thread should have ID 0 (reserved for shared)");
+    }
+
+    #[test]
+    fn m2_cross_thread_retain_release() {
+        // Frozen values should be safely retainable/releasable from other threads
+        let val = coral_make_string("shared data".as_ptr(), 11);
+        freeze_value(val);
+
+        // Retain so the spawned thread can release
+        unsafe { coral_value_retain(val); }
+        let value_ref = unsafe { &*val };
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 2);
+
+        // Use usize to safely send the raw pointer across threads
+        let val_addr = val as usize;
+        let handle = std::thread::spawn(move || {
+            let ptr = val_addr as ValueHandle;
+            // This thread sees owner_thread == 0, uses atomic path
+            unsafe { coral_value_release(ptr); }
+        });
+        handle.join().unwrap();
+
+        // Should be back to rc=1
+        let value_ref = unsafe { &*val };
+        assert_eq!(value_ref.refcount.load(Ordering::Relaxed), 1);
+
+        unsafe { coral_value_release(val); }
     }
 }

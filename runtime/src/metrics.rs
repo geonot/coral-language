@@ -126,8 +126,14 @@ pub extern "C" fn coral_value_metrics(value: ValueHandle, out: *mut CoralHandleM
     unsafe {
         *out = CoralHandleMetrics {
             refcount: value_ref.refcount.load(Ordering::Relaxed),
+            #[cfg(feature = "metrics")]
             retains: value_ref.retain_events.load(Ordering::Relaxed) as u64,
+            #[cfg(not(feature = "metrics"))]
+            retains: 0,
+            #[cfg(feature = "metrics")]
             releases: value_ref.release_events.load(Ordering::Relaxed) as u64,
+            #[cfg(not(feature = "metrics"))]
+            releases: 0,
         };
     }
 }

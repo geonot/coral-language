@@ -478,7 +478,7 @@ All Phase Alpha tasks have been completed:
 | C3.1, C3.3-C3.5 (Inlining, TCO, CSE, dead function elim) | ✅ Complete |
 | C3.2 (Lambda inlining in higher-order functions) | Not started |
 | S2.2-S2.7 (Collection expressions) | Not started |
-| M2.1-M2.4 (Non-atomic RC fast path) | **Next up** |
+| M2.1-M2.4 (Non-atomic RC fast path) | ✅ Complete |
 
 ### Phase Gamma (Months 9-12): Runtime & Ecosystem
 
