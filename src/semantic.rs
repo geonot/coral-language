@@ -503,6 +503,9 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // CC5.2/S6: Check member access validity on known store/type fields
     check_member_access_validity(&globals, &functions, &store_field_names, &mut warnings);
 
+    // T3.3: Nullability tracking — warn on functions that may return none on some paths
+    check_nullability_returns(&functions, &mut warnings);
+
     // Inject default trait method bodies into types/stores that don't override them
     inject_trait_default_methods(&mut type_defs, &mut stores, &trait_defs);
 
@@ -1112,19 +1115,36 @@ fn collect_constraints_expr(
             // bypass the CallableAt constraint (which would fail because e.g. "length" 
             // returns Int, not a callable type). Instead, directly return the method's
             // result type. This fixes `log(s.length())` and similar nested method calls.
+            // S4.4: Return precise types for chainable methods to enable method chaining.
             if let Expression::Member { target, property, .. } = callee.as_ref() {
-                let _target_ty = collect_constraints_expr(target, constraints, types, graph);
+                let target_ty = collect_constraints_expr(target, constraints, types, graph);
                 // Collect arg constraints regardless
                 for arg in args {
                     collect_constraints_expr(arg, constraints, types, graph);
                 }
                 match property.as_str() {
-                    "length" | "count" | "size" => return TypeId::Primitive(Primitive::Int),
-                    "err" => return TypeId::Primitive(Primitive::Bool),
-                    "equals" | "not_equals" | "contains" | "any" | "all" => return TypeId::Primitive(Primitive::Bool),
-                    "push" | "pop" | "get" | "set" | "append" | "remove" | "insert" 
-                    | "clear" | "join" | "map" | "filter" | "reduce" | "find" | "sort"
-                    | "keys" | "values" | "not" | "iter" | "to_string" | "or" | "unwrap_or" => {
+                    // Int-returning methods
+                    "length" | "count" | "size" | "index_of" => return TypeId::Primitive(Primitive::Int),
+                    // Bool-returning methods
+                    "err" | "equals" | "not_equals" | "contains" | "any" | "all"
+                    | "starts_with" | "ends_with" | "is_empty" => return TypeId::Primitive(Primitive::Bool),
+                    // String-returning methods (chainable on strings)
+                    "trim" | "lower" | "upper" | "strip" | "lstrip" | "rstrip"
+                    | "replace" | "pad_left" | "pad_right" | "reverse" | "repeat"
+                    | "to_string" | "join" | "slice" | "substr" | "char_at"
+                    | "concat" => return TypeId::Primitive(Primitive::String),
+                    // List-returning methods (chainable on lists)
+                    "split" | "map" | "filter" | "sort" | "keys" | "values"
+                    | "find_all" | "chars" | "lines" | "bytes" => {
+                        return TypeId::List(Box::new(TypeId::Unknown));
+                    }
+                    // Methods that return same type as target (preserve chain type)
+                    "push" | "pop" | "append" | "remove" | "insert" | "clear" => {
+                        return target_ty;
+                    }
+                    // Unknown-returning (unresolvable without more context)
+                    "get" | "set" | "at" | "reduce" | "find" | "not" | "iter"
+                    | "or" | "unwrap_or" | "first" | "last" => {
                         return TypeId::Unknown;
                     }
                     _ => {
@@ -1171,10 +1191,17 @@ fn collect_constraints_expr(
                 // Return a function type that will be checked by Callable constraint
                 // when used in a Call expression. For bare method access (unusual),
                 // just return Unknown to avoid false unification.
+                // S4.4: Include all known method names to prevent false map-constraint fallthrough.
                 "push" | "pop" | "get" | "set" | "append" | "remove" | "insert" 
                 | "contains" | "keys" | "values" | "clear" | "join"
                 | "map" | "filter" | "reduce" | "find" | "any" | "all" | "sort"
-                | "equals" | "not_equals" | "not" | "iter" => {
+                | "equals" | "not_equals" | "not" | "iter"
+                | "split" | "trim" | "lower" | "upper" | "strip" | "lstrip" | "rstrip"
+                | "replace" | "pad_left" | "pad_right" | "reverse" | "repeat"
+                | "starts_with" | "ends_with" | "index_of" | "is_empty"
+                | "to_string" | "concat" | "chars" | "lines" | "bytes"
+                | "slice" | "substr" | "char_at" | "find_all"
+                | "or" | "unwrap_or" | "first" | "last" | "at" => {
                     // Don't constrain target type - let the Call expression handle it
                     TypeId::Unknown
                 }
@@ -1271,6 +1298,14 @@ fn collect_constraints_expr(
                             }
                         } else {
                             // Non-generic constructor: original behavior
+                            // T3.1: Extract constructor parameter types for field narrowing.
+                            let ctor_param_types: Option<Vec<TypeId>> = types.get(name).and_then(|ctor_ty| {
+                                match ctor_ty {
+                                    TypeId::Func(param_types, _) => Some(param_types.clone()),
+                                    _ => None,
+                                }
+                            });
+
                             if let Some(ctor_ty) = types.get(name) {
                                 let adt_ty = match ctor_ty {
                                     TypeId::Adt(adt_name, args) => TypeId::Adt(adt_name.clone(), args.clone()),
@@ -1283,9 +1318,19 @@ fn collect_constraints_expr(
                                     match_span,
                                 ));
                             }
-                            // Bind field variables (fields are dynamically typed for now)
-                            for pat in fields {
-                                collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                            // T3.1: Bind field variables to constructor parameter types
+                            // (narrowed types) instead of Any when the constructor signature is known.
+                            if let Some(ref param_types) = ctor_param_types {
+                                for (i, pat) in fields.iter().enumerate() {
+                                    let field_ty = param_types.get(i)
+                                        .cloned()
+                                        .unwrap_or(TypeId::Primitive(Primitive::Any));
+                                    collect_pattern_bindings(pat, &field_ty, types);
+                                }
+                            } else {
+                                for pat in fields {
+                                    collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                }
                             }
                         }
                     }
@@ -1336,8 +1381,24 @@ fn collect_constraints_expr(
                                         let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
                                         constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), adt_ty, match_span));
                                     }
-                                    for pat in fields {
-                                        collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                    // T3.1: Narrow or-pattern constructor fields too
+                                    let ctor_param_types: Option<Vec<TypeId>> = types.get(name).and_then(|ctor_ty| {
+                                        match ctor_ty {
+                                            TypeId::Func(param_types, _) => Some(param_types.clone()),
+                                            _ => None,
+                                        }
+                                    });
+                                    if let Some(ref param_types) = ctor_param_types {
+                                        for (i, pat) in fields.iter().enumerate() {
+                                            let field_ty = param_types.get(i)
+                                                .cloned()
+                                                .unwrap_or(TypeId::Primitive(Primitive::Any));
+                                            collect_pattern_bindings(pat, &field_ty, types);
+                                        }
+                                    } else {
+                                        for pat in fields {
+                                            collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                        }
                                     }
                                 }
                                 crate::ast::MatchPattern::Range { .. } => {
@@ -1923,7 +1984,10 @@ fn is_builtin_name(name: &str) -> bool {
         "path_resolve" | "resolve" |
         "path_is_absolute" | "is_absolute" |
         "path_parent" |
-        "path_stem" | "stem"
+        "path_stem" | "stem" |
+        // Regex operations (L2.2)
+        "regex_match" | "regex_find" | "regex_find_all" |
+        "regex_replace" | "regex_split"
     )
 }
 
@@ -3337,6 +3401,109 @@ fn types_compatible_for_branch(a: &TypeId, b: &TypeId) -> bool {
         // Same type
         _ => a == b,
     }
+}
+
+// ====================== T3.3: Nullability Tracking ======================
+
+/// Check functions whose return paths include both `none` and a non-none type.
+/// Emits a warning when a function may implicitly return `none` alongside a
+/// concrete type, indicating potential nullability issues.
+fn check_nullability_returns(
+    functions: &[Function],
+    warnings: &mut Vec<Diagnostic>,
+) {
+    for function in functions {
+        // Skip main — it's entry point, no meaningful return
+        if function.name == "main" {
+            continue;
+        }
+        let mut has_none_return = false;
+        let mut has_value_return = false;
+        let mut none_span: Option<Span> = None;
+
+        // Check trailing block value
+        if let Some(ref val) = function.body.value {
+            if expr_is_none(val) {
+                has_none_return = true;
+                none_span = Some(val.span());
+            } else {
+                has_value_return = true;
+            }
+        }
+
+        // Walk body for return statements
+        collect_return_nullability(
+            &function.body,
+            &mut has_none_return,
+            &mut has_value_return,
+            &mut none_span,
+        );
+
+        // If function has no explicit returns and no trailing value, it returns
+        // unit implicitly — that's fine, not a nullability issue.
+        if has_none_return && has_value_return {
+            let span = none_span.unwrap_or(function.span);
+            warnings.push(
+                Diagnostic::categorized_warning(
+                    format!(
+                        "function '{}' may return 'none' on some paths",
+                        function.name
+                    ),
+                    span,
+                    WarningCategory::Nullability,
+                )
+                .with_help("consider returning an explicit default value or using an Option type"),
+            );
+        }
+    }
+}
+
+/// Walk a block's statements recursively to find return statements and
+/// classify them as none-returning or value-returning.
+fn collect_return_nullability(
+    block: &Block,
+    has_none: &mut bool,
+    has_value: &mut bool,
+    none_span: &mut Option<Span>,
+) {
+    for stmt in &block.statements {
+        match stmt {
+            crate::ast::Statement::Return(expr, span) => {
+                if expr_is_none(expr) {
+                    *has_none = true;
+                    if none_span.is_none() {
+                        *none_span = Some(*span);
+                    }
+                } else {
+                    *has_value = true;
+                }
+            }
+            crate::ast::Statement::If { body, elif_branches, else_body, .. } => {
+                collect_return_nullability(body, has_none, has_value, none_span);
+                for (_, blk) in elif_branches {
+                    collect_return_nullability(blk, has_none, has_value, none_span);
+                }
+                if let Some(eb) = else_body {
+                    collect_return_nullability(eb, has_none, has_value, none_span);
+                }
+            }
+            crate::ast::Statement::While { body, .. } => {
+                collect_return_nullability(body, has_none, has_value, none_span);
+            }
+            crate::ast::Statement::For { body, .. } => {
+                collect_return_nullability(body, has_none, has_value, none_span);
+            }
+            crate::ast::Statement::ForRange { body, .. } => {
+                collect_return_nullability(body, has_none, has_value, none_span);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Check if an expression is the `none` literal.
+fn expr_is_none(expr: &Expression) -> bool {
+    matches!(expr, Expression::None(_))
 }
 
 // ====================== T3.2: Definite Assignment Analysis ======================

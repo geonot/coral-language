@@ -7,6 +7,64 @@ use crate::module_loader::ModuleSource;
 use crate::parser::Parser;
 use crate::semantic;
 use inkwell::context::Context;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+// ═══════════════════════════════════════════════════════════════════════
+// CC3.5: Incremental Compilation — Module Cache
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Manages a disk-based compilation cache in `.coral-cache/`.
+/// Caches the final LLVM IR keyed by a fingerprint of all source modules.
+#[derive(Debug)]
+pub struct ModuleCache {
+    cache_dir: PathBuf,
+}
+
+impl ModuleCache {
+    /// Create a cache backed by `base_dir/.coral-cache/`.
+    pub fn new(base_dir: &Path) -> Self {
+        Self {
+            cache_dir: base_dir.join(".coral-cache"),
+        }
+    }
+
+    /// Compute a combined fingerprint of all module sources.
+    pub fn fingerprint(sources: &[ModuleSource]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for ms in sources {
+            ms.name.hash(&mut hasher);
+            ms.source.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Look up cached IR for the given fingerprint.
+    /// Returns `Some(ir_string)` on cache hit, `None` on miss.
+    pub fn get(&self, fingerprint: u64) -> Option<String> {
+        let ir_path = self.cache_dir.join(format!("{:016x}.ll", fingerprint));
+        std::fs::read_to_string(ir_path).ok()
+    }
+
+    /// Store compiled IR for the given fingerprint.
+    pub fn put(&self, fingerprint: u64, ir: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.cache_dir)?;
+        let ir_path = self.cache_dir.join(format!("{:016x}.ll", fingerprint));
+        let mut f = std::fs::File::create(ir_path)?;
+        f.write_all(ir.as_bytes())?;
+        Ok(())
+    }
+
+    /// Invalidate the entire cache.
+    pub fn invalidate_all(&self) -> std::io::Result<()> {
+        if self.cache_dir.exists() {
+            std::fs::remove_dir_all(&self.cache_dir)?;
+        }
+        Ok(())
+    }
+}
 
 /// Purity classification for functions (C1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +75,75 @@ pub enum Purity {
     ReadOnly,
     /// Has side effects (I/O, mutation, actor messaging).
     Effectful,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// C4.4: Link-Time Optimization (LTO)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Optimization level for LTO passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LtoOptLevel {
+    O1,
+    O2,
+    O3,
+}
+
+impl LtoOptLevel {
+    /// The LLVM pass pipeline string for the new pass manager.
+    pub fn pipeline_string(self) -> &'static str {
+        match self {
+            LtoOptLevel::O1 => "default<O1>",
+            LtoOptLevel::O2 => "default<O2>",
+            LtoOptLevel::O3 => "default<O3>",
+        }
+    }
+}
+
+/// Run LLVM optimization passes on an already-compiled module.
+/// Uses the new LLVM pass manager (`Module::run_passes`).
+/// Returns the optimized IR string.
+pub fn optimize_module(ir: &str, opt_level: LtoOptLevel) -> Result<String, String> {
+    use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
+    use inkwell::OptimizationLevel;
+    use inkwell::passes::PassBuilderOptions;
+
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| format!("failed to initialize native target: {}", e))?;
+
+    let context = Context::create();
+    let memory_buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        ir.as_bytes(),
+        "input_ir",
+    );
+    let module = context.create_module_from_ir(memory_buffer)
+        .map_err(|e| format!("failed to parse IR: {}", e))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple)
+        .map_err(|e| format!("failed to create target from triple: {}", e))?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Aggressive,
+            inkwell::targets::RelocMode::Default,
+            inkwell::targets::CodeModel::Default,
+        )
+        .ok_or_else(|| "failed to create target machine".to_string())?;
+
+    let pass_options = PassBuilderOptions::create();
+    pass_options.set_verify_each(false);
+    pass_options.set_loop_vectorization(true);
+    pass_options.set_loop_unrolling(true);
+    pass_options.set_merge_functions(true);
+
+    module
+        .run_passes(opt_level.pipeline_string(), &machine, pass_options)
+        .map_err(|e| format!("LLVM pass pipeline failed: {}", e))?;
+
+    Ok(module.print_to_string().to_string())
 }
 
 /// Known pure builtin functions and their constant-evaluation rules.
@@ -172,6 +299,31 @@ impl Compiler {
             .compile(&model)
             .map_err(|diag| CompileError::with_source(Stage::Codegen, diag, &all_source))?;
         Ok((module.print_to_string().to_string(), warnings))
+    }
+
+    /// CC3.5: Compile modules with disk caching. If a cached IR exists for the
+    /// same set of module sources, returns the cached version. Otherwise compiles
+    /// and stores the result in the cache. Pass `cache_dir` as the project root.
+    pub fn compile_modules_to_ir_cached(
+        &self,
+        module_sources: &[ModuleSource],
+        cache_dir: &Path,
+    ) -> Result<(String, Vec<crate::diagnostics::Diagnostic>, bool), CompileError> {
+        let cache = ModuleCache::new(cache_dir);
+        let fingerprint = ModuleCache::fingerprint(module_sources);
+
+        // Check cache
+        if let Some(cached_ir) = cache.get(fingerprint) {
+            return Ok((cached_ir, vec![], true));
+        }
+
+        // Cache miss — full compilation
+        let (ir, warnings) = self.compile_modules_to_ir(module_sources)?;
+
+        // Store in cache (best-effort — don't fail compilation if cache write fails)
+        let _ = cache.put(fingerprint, &ir);
+
+        Ok((ir, warnings, false))
     }
 
     fn maybe_emit_alloc_report(&self, model: &semantic::SemanticModel) {

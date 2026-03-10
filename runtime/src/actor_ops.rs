@@ -55,7 +55,16 @@ pub extern "C" fn coral_actor_spawn(handler: ValueHandle) -> ValueHandle {
                         }
                     }
                 }
-                Some(actor::Message::GracefulStop) => break,
+                Some(actor::Message::GracefulStop) => {
+                    // R2.10: Drain remaining mailbox messages before stopping
+                    ctx.drain_and_stop(|msg| {
+                        let args = [self_value, msg];
+                        let result = coral_closure_invoke(handler, args.as_ptr(), args.len());
+                        unsafe { coral_value_release(result); }
+                        unsafe { coral_value_release(msg); }
+                    });
+                    break;
+                }
                 Some(actor::Message::ActorDown { .. }) => { /* ignored */ }
             }
         }
@@ -98,6 +107,23 @@ pub extern "C" fn coral_actor_stop(actor_value: ValueHandle) -> ValueHandle {
     let ok = actor_obj
         .system
         .send(&actor_obj.handle, actor::Message::Exit)
+        .is_ok();
+    coral_make_bool(if ok { 1 } else { 0 })
+}
+
+/// R2.10: Graceful stop — sends GracefulStop message which tells the actor to
+/// drain its mailbox (process remaining messages) before terminating.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_graceful_stop(actor_value: ValueHandle) -> ValueHandle {
+    if actor_value.is_null() {
+        return coral_make_bool(0);
+    }
+    let Some(actor_obj) = actor_from_value(unsafe { &*actor_value }) else {
+        return coral_make_bool(0);
+    };
+    let ok = actor_obj
+        .system
+        .send(&actor_obj.handle, actor::Message::GracefulStop)
         .is_ok();
     coral_make_bool(if ok { 1 } else { 0 })
 }
@@ -184,7 +210,16 @@ pub extern "C" fn coral_actor_spawn_named(name_value: ValueHandle, handler: Valu
                         }
                     }
                 }
-                Some(actor::Message::GracefulStop) => break,
+                Some(actor::Message::GracefulStop) => {
+                    // R2.10: Drain remaining mailbox messages before stopping
+                    ctx.drain_and_stop(|msg| {
+                        let args = [self_value, msg];
+                        let result = coral_closure_invoke(handler, args.as_ptr(), args.len());
+                        unsafe { coral_value_release(result); }
+                        unsafe { coral_value_release(msg); }
+                    });
+                    break;
+                }
                 Some(actor::Message::ActorDown { .. }) => { /* ignored */ }
             }
         }

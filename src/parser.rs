@@ -1752,12 +1752,31 @@ impl Parser {
         let mut expr = self.parse_primary()?;
         loop {
             if self.matches(TokenKind::LParen) {
-                let (args, arg_names) = self.parse_arguments()?;
+                let (mut args, mut arg_names) = self.parse_arguments()?;
+                // S5.5: Check for trailing `do..end` block after call arguments
+                self.skip_newlines();
+                if self.matches(TokenKind::KeywordDo) {
+                    let do_block = self.parse_do_end_block()?;
+                    args.push(do_block);
+                    if !arg_names.is_empty() {
+                        arg_names.push(None);
+                    }
+                }
                 let span = expr.span().join(self.previous_span());
                 expr = Expression::Call {
                     callee: Box::new(expr),
                     args,
                     arg_names,
+                    span,
+                };
+            } else if self.matches(TokenKind::KeywordDo) {
+                // S5.5: `identifier do ... end` without parens — desugar to call(lambda)
+                let do_block = self.parse_do_end_block()?;
+                let span = expr.span().join(self.previous_span());
+                expr = Expression::Call {
+                    callee: Box::new(expr),
+                    args: vec![do_block],
+                    arg_names: vec![],
                     span,
                 };
             } else if self.matches(TokenKind::Dot) {
@@ -1797,6 +1816,77 @@ impl Parser {
             }
         }
         Ok(expr)
+    }
+
+    /// S5.5: Parse a `do..end` block. The `do` keyword has already been consumed.
+    /// Returns a Lambda expression with zero params wrapping the block body.
+    fn parse_do_end_block(&mut self) -> ParseResult<Expression> {
+        let do_span = self.previous_span();
+        let mut statements = Vec::new();
+        let mut trailing_value: Option<Expression> = None;
+
+        // Skip newlines and indent tokens that the layout engine inserts after `do`
+        self.skip_newlines();
+        if self.check(TokenKind::Indent) {
+            self.layout_depth += 1;
+            self.advance();
+        }
+
+        loop {
+            self.skip_newlines();
+
+            // Check for `end` keyword
+            if self.check(TokenKind::KeywordEnd) {
+                // Consume any remaining dedent before end
+                break;
+            }
+            // Also break on dedent that precedes `end`
+            if self.check(TokenKind::Dedent) {
+                self.leave_layout_block(self.current_span());
+                self.advance();
+                self.skip_newlines();
+                // After dedent, `end` should follow
+                break;
+            }
+            if self.check(TokenKind::Eof) {
+                return Err(Diagnostic::new(
+                    "expected `end` to close `do` block",
+                    do_span,
+                ));
+            }
+
+            let stmt = self.parse_statement()?;
+            match stmt {
+                Statement::Expression(expr) => {
+                    if let Some(prev) = trailing_value.take() {
+                        statements.push(Statement::Expression(prev));
+                    }
+                    trailing_value = Some(expr);
+                }
+                other => {
+                    if let Some(value) = trailing_value.take() {
+                        statements.push(Statement::Expression(value));
+                    }
+                    statements.push(other);
+                }
+            }
+        }
+
+        self.expect(TokenKind::KeywordEnd, "expected `end` to close `do` block")?;
+        let end_span = self.previous_span();
+        let span = do_span.join(end_span);
+
+        let body = Block {
+            statements,
+            value: trailing_value.map(Box::new),
+            span,
+        };
+
+        Ok(Expression::Lambda {
+            params: vec![],
+            body,
+            span,
+        })
     }
 
     /// Parse function call arguments, supporting both positional and named args.

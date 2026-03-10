@@ -66,6 +66,10 @@ struct Args {
     /// CC2.4: Enable specific warning categories (overrides --allow)
     #[arg(long = "warn", value_name = "CATEGORY")]
     warn: Vec<String>,
+
+    /// C4.4: Enable link-time optimization (runs LLVM optimization passes on the IR)
+    #[arg(long = "lto")]
+    lto: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -78,6 +82,19 @@ fn main() -> anyhow::Result<()> {
     let compiler = Compiler;
     match compiler.compile_modules_to_ir(&module_sources) {
         Ok((ir, warnings)) => {
+            // C4.4: Apply LTO optimization passes if requested.
+            let ir = if args.lto {
+                let opt_level = match args.opt_level.unwrap_or(2) {
+                    0 | 1 => coralc::compiler::LtoOptLevel::O1,
+                    2 => coralc::compiler::LtoOptLevel::O2,
+                    _ => coralc::compiler::LtoOptLevel::O3,
+                };
+                coralc::compiler::optimize_module(&ir, opt_level)
+                    .map_err(|e| anyhow::anyhow!("LTO optimization failed: {}", e))?
+            } else {
+                ir
+            };
+
             // CC2.4: Build suppressed categories set.
             let suppressed: HashSet<WarningCategory> = args.allow.iter()
                 .filter_map(|s| WarningCategory::from_str(s))

@@ -160,6 +160,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+        // KI-1: Type-aware method dispatch — if the target has a known store type
+        // and that store defines this method, dispatch to the store method BEFORE
+        // checking built-in names.  This prevents store/extension methods whose
+        // names collide with built-in methods (e.g. `get`, `set`, `push`, `map`,
+        // `length`, `filter`, `reduce`, etc.) from being unreachable.
+        if let Expression::Identifier(target_name, _) = target {
+            if let Some(crate::types::core::TypeId::Store(store_name)) =
+                self.resolved_types.get(target_name.as_str())
+            {
+                let store_name = store_name.clone();
+                let mangled = format!("{}_{}", store_name, property);
+                if self.functions.contains_key(&mangled) {
+                    // Verify argument count from store_methods (or infer from fn sig)
+                    let expected_params = self.functions[&mangled].count_params() as usize - 1; // minus self
+                    if args.len() != expected_params {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "method `{}` on `{}` expects {} argument(s), but {} were provided",
+                                property, store_name, expected_params, args.len()
+                            ),
+                            span,
+                        ));
+                    }
+                    let target_value = self.emit_expression(ctx, target)?;
+                    let mut call_args: Vec<BasicMetadataValueEnum> = vec![target_value.into()];
+                    for arg in args {
+                        let saved_tail = ctx.in_tail_position;
+                        ctx.in_tail_position = false;
+                        let arg_val = self.emit_expression(ctx, arg)?;
+                        ctx.in_tail_position = saved_tail;
+                        call_args.push(arg_val.into());
+                    }
+                    let store_method = self.functions[&mangled];
+                    let result = self
+                        .builder
+                        .build_call(store_method, &call_args, "store_method_call")
+                        .unwrap()
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap()
+                        .into_int_value();
+                    return Ok(result);
+                }
+            }
+        }
         match property {
             // x.equals(y) - value equality comparison
             "equals" => {
@@ -348,6 +393,80 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length"))
+            }
+            // S4.4: String methods dispatched as member calls for chaining support
+            "split" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(".split() expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.string_split, &[target_value, arg_value], "string_split_method"))
+            }
+            "trim" => {
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_bridged(self.runtime.string_trim, &[target_value], "string_trim_method"))
+            }
+            "lower" => {
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_bridged(self.runtime.string_to_lower, &[target_value], "string_lower_method"))
+            }
+            "upper" => {
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_bridged(self.runtime.string_to_upper, &[target_value], "string_upper_method"))
+            }
+            "replace" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(".replace() expects two arguments (old, new)", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let old_value = self.emit_expression(ctx, &args[0])?;
+                let new_value = self.emit_expression(ctx, &args[1])?;
+                Ok(self.call_bridged(self.runtime.string_replace, &[target_value, old_value, new_value], "string_replace_method"))
+            }
+            "contains" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(".contains() expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.string_contains, &[target_value, arg_value], "string_contains_method"))
+            }
+            "starts_with" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(".starts_with() expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.string_starts_with, &[target_value, arg_value], "string_starts_with_method"))
+            }
+            "ends_with" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(".ends_with() expects exactly one argument", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.string_ends_with, &[target_value, arg_value], "string_ends_with_method"))
+            }
+            "reverse" => {
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_bridged(self.runtime.string_reverse, &[target_value], "string_reverse_method"))
+            }
+            "join" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(".join() expects exactly one argument (separator)", span));
+                }
+                let target_value = self.emit_expression(ctx, target)?;
+                let arg_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.list_join, &[target_value, arg_value], "list_join_method"))
+            }
+            "sort" => {
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_bridged(self.runtime.list_sort, &[target_value], "list_sort_method"))
+            }
+            "to_string" => {
+                let target_value = self.emit_expression(ctx, target)?;
+                Ok(self.call_bridged(self.runtime.value_to_string, &[target_value], "value_to_string_method"))
             }
             _ => {
                 // Check if this is a store method call
@@ -1573,6 +1692,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     _ => Err(Diagnostic::new("range expects 1 or 2 arguments", span)),
                 }
+            }
+            // Regex operations (L2.2)
+            "regex_match" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("regex_match expects (pattern, text)", span));
+                }
+                let pat = self.emit_expression(ctx, &args[0])?;
+                let txt = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.regex_match, &[pat, txt], "regex_match")))
+            }
+            "regex_find" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("regex_find expects (pattern, text)", span));
+                }
+                let pat = self.emit_expression(ctx, &args[0])?;
+                let txt = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.regex_find, &[pat, txt], "regex_find")))
+            }
+            "regex_find_all" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("regex_find_all expects (pattern, text)", span));
+                }
+                let pat = self.emit_expression(ctx, &args[0])?;
+                let txt = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.regex_find_all, &[pat, txt], "regex_find_all")))
+            }
+            "regex_replace" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("regex_replace expects (pattern, replacement, text)", span));
+                }
+                let pat = self.emit_expression(ctx, &args[0])?;
+                let rep = self.emit_expression(ctx, &args[1])?;
+                let txt = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_bridged(self.runtime.regex_replace, &[pat, rep, txt], "regex_replace")))
+            }
+            "regex_split" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("regex_split expects (pattern, text)", span));
+                }
+                let pat = self.emit_expression(ctx, &args[0])?;
+                let txt = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.regex_split, &[pat, txt], "regex_split")))
             }
             _ => {
                 // Check if it's a store/actor constructor (not arbitrary make_* functions)

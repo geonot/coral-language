@@ -1,4 +1,5 @@
 # HTTP Server - Simple HTTP server using Coral actors
+# Requires: std.net (L3.1), full actor system (R2.x) — not yet compilable
 
 use std.net
 

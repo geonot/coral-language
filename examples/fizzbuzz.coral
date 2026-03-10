@@ -4,13 +4,12 @@
     div3 is (n % 3).equals(0)
     div5 is (n % 5).equals(0)
     if div3 and div5
-        'FizzBuzz'
+        return "FizzBuzz"
     elif div3
-        'Fizz'
+        return "Fizz"
     elif div5
-        'Buzz'
-    else
-        '{n}'
+        return "Buzz"
+    return '{n}'
 
 *range(start, end)
     result is []

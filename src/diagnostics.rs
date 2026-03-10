@@ -16,6 +16,7 @@ pub enum WarningCategory {
     ShadowedBinding,
     TypeMismatchBranch,
     UnreachableCode,
+    Nullability,
     General,
 }
 
@@ -28,6 +29,7 @@ impl WarningCategory {
             "shadowed_binding" | "shadow" => Some(Self::ShadowedBinding),
             "type_mismatch_branch" | "branch_types" => Some(Self::TypeMismatchBranch),
             "unreachable_code" | "unreachable" => Some(Self::UnreachableCode),
+            "nullability" | "nullable" => Some(Self::Nullability),
             "general" => Some(Self::General),
             _ => None,
         }
@@ -41,6 +43,7 @@ impl WarningCategory {
             Self::ShadowedBinding => "shadowed_binding",
             Self::TypeMismatchBranch => "type_mismatch_branch",
             Self::UnreachableCode => "unreachable_code",
+            Self::Nullability => "nullability",
             Self::General => "general",
         }
     }

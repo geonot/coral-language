@@ -75,17 +75,7 @@ impl Default for RestartTracker {
     }
 }
 
-/// Information about a supervised child.
-#[derive(Clone)]
-struct SupervisedChild {
-    id: ActorId,
-    handle: ActorHandle,
-    /// Factory function to recreate the child on restart.
-    /// Stored as an Arc to allow cloning.
-    factory: Arc<dyn Fn(ActorContext) + Send + Sync + 'static>,
-    config: SupervisionConfig,
-    tracker: RestartTracker,
-}
+// R2.6: SupervisedChild struct removed — factory now lives in SupervisedChildInfo.
 
 /// Configuration for spawning actors.
 #[derive(Debug, Clone)]
@@ -838,10 +828,12 @@ pub struct ActorContext {
     supervision_config: Option<SupervisionConfig>,
 }
 
-/// Runtime info for a supervised child (separate from factory).
+/// Runtime info for a supervised child, including restart factory.
 #[derive(Clone)]
 struct SupervisedChildInfo {
     handle: ActorHandle,
+    /// R2.6: Factory function to recreate the child on restart.
+    factory: Arc<dyn Fn(ActorContext) + Send + Sync + 'static>,
     config: SupervisionConfig,
     tracker: RestartTracker,
 }
@@ -875,6 +867,31 @@ impl ActorContext {
         }
     }
 
+    /// R2.10: Drain all remaining messages from the mailbox via the handler,
+    /// then stop. Call this when you receive `Message::GracefulStop`.
+    /// The `handler` is called for each `Message::User` message that's
+    /// still in the mailbox. Other control messages are discarded.
+    pub fn drain_and_stop<F>(&self, mut handler: F)
+    where
+        F: FnMut(crate::ValueHandle),
+    {
+        loop {
+            match self.rx.try_recv() {
+                Ok(Message::User(val)) => handler(val),
+                Ok(Message::GracefulStop) => {
+                    // Another GracefulStop while draining — ignore
+                }
+                Ok(Message::Exit) => break,
+                Ok(_) => {} // discard other control messages
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        // Unregister from the registry
+        self.system.registry.lock().unwrap().remove(&self.id);
+        self.system.notify_monitors(self.id, "graceful_stop");
+    }
+
     pub fn spawn_child<F>(&self, f: F) -> ActorHandle
     where
         F: FnOnce(ActorContext) + Send + 'static,
@@ -890,17 +907,20 @@ impl ActorContext {
         self.system.spawn_with_config(Some(self.id), config, f)
     }
 
-    /// Spawn a supervised child that will be restarted on failure.
+    /// R2.6: Spawn a supervised child that will be restarted on failure.
+    /// The factory is `Fn` (not `FnOnce`) so it can be called again on restart.
     pub fn spawn_supervised_child<F>(&self, f: F) -> ActorHandle
     where
-        F: FnOnce(ActorContext) + Send + 'static,
+        F: Fn(ActorContext) + Send + Sync + 'static,
     {
-        let handle = self.system.spawn(Some(self.id), f);
+        let factory: Arc<dyn Fn(ActorContext) + Send + Sync + 'static> = Arc::new(f);
+        let factory_clone = factory.clone();
+        let handle = self.system.spawn(Some(self.id), move |ctx| factory_clone(ctx));
         let config = self.supervision_config.clone().unwrap_or_default();
         
-        // Track this child for supervision
         let info = SupervisedChildInfo {
             handle: handle.clone(),
+            factory,
             config,
             tracker: RestartTracker::default(),
         };
@@ -909,15 +929,18 @@ impl ActorContext {
         handle
     }
 
-    /// Spawn a supervised child with custom supervision config.
+    /// R2.6: Spawn a supervised child with custom supervision config.
     pub fn spawn_supervised_child_with_config<F>(&self, config: SupervisionConfig, f: F) -> ActorHandle
     where
-        F: FnOnce(ActorContext) + Send + 'static,
+        F: Fn(ActorContext) + Send + Sync + 'static,
     {
-        let handle = self.system.spawn(Some(self.id), f);
+        let factory: Arc<dyn Fn(ActorContext) + Send + Sync + 'static> = Arc::new(f);
+        let factory_clone = factory.clone();
+        let handle = self.system.spawn(Some(self.id), move |ctx| factory_clone(ctx));
         
         let info = SupervisedChildInfo {
             handle: handle.clone(),
+            factory,
             config,
             tracker: RestartTracker::default(),
         };
@@ -936,6 +959,10 @@ impl ActorContext {
                 &child_info.config,
                 &mut child_info.tracker,
             );
+            // Clone what we need before releasing the mutable borrow
+            let factory = child_info.factory.clone();
+            let config = child_info.config.clone();
+            let tracker = child_info.tracker.clone();
             
             match decision {
                 SupervisionDecision::Stop => {
@@ -950,7 +977,22 @@ impl ActorContext {
                         }
                     }
                 }
-                _ => {}
+                SupervisionDecision::Restart => {
+                    // R2.6: Actually restart the child using its factory.
+                    let factory_clone = factory.clone();
+                    let new_handle = self.system.spawn(Some(self.id), move |ctx| factory_clone(ctx));
+                    // Remove old entry, insert new one with updated handle
+                    children.remove(&child_id);
+                    children.insert(new_handle.id, SupervisedChildInfo {
+                        handle: new_handle,
+                        factory,
+                        config,
+                        tracker,
+                    });
+                }
+                SupervisionDecision::Resume => {
+                    // Do nothing — actor continues (if still alive)
+                }
             }
             
             decision
@@ -1145,4 +1187,262 @@ pub fn current_actor() -> Option<ActorId> {
 pub fn global_system() -> &'static ActorSystem {
     static INSTANCE: OnceLock<ActorSystem> = OnceLock::new();
     INSTANCE.get_or_init(ActorSystem::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn r26_supervised_child_restarts_after_failure() {
+        let system = ActorSystem::new();
+        let invocation_count = Arc::new(AtomicU32::new(0));
+        let count_clone = invocation_count.clone();
+
+        // Supervisor actor that spawns a supervised child
+        let sup_handle = system.spawn(None, move |ctx: ActorContext| {
+            let cc = count_clone.clone();
+            let child = ctx.spawn_supervised_child(move |_child_ctx: ActorContext| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                // Simulate work then terminate normally on 2nd+ invocation
+                // First invocation: immediate exit (simulating failure)
+            });
+
+            // Simulate child failure notification
+            ctx.handle_child_failure_msg(child.id, "test crash");
+
+            // Give time for restarted child to run
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        // Wait for supervisor
+        std::thread::sleep(Duration::from_millis(300));
+        // Factory should have been invoked at least twice (original + restart)
+        assert!(
+            invocation_count.load(Ordering::SeqCst) >= 2,
+            "expected at least 2 invocations, got {}",
+            invocation_count.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn r26_restart_budget_escalates() {
+        let system = ActorSystem::new();
+        let escalated = Arc::new(AtomicU32::new(0));
+        let esc_clone = escalated.clone();
+
+        system.spawn(None, move |ctx: ActorContext| {
+            let config = SupervisionConfig {
+                strategy: SupervisionStrategy::Restart,
+                max_restarts: 2,
+                restart_window_secs: 60,
+            };
+            let child = ctx.spawn_supervised_child_with_config(config, |_ctx: ActorContext| {
+                // noop
+            });
+
+            // Exhaust restart budget
+            let d1 = ctx.handle_child_failure_msg(child.id, "crash1");
+            assert!(matches!(d1, SupervisionDecision::Restart));
+
+            // After restart, the child has a new ID. We can find it in supervised_children.
+            // Simulate failure of the new child
+            let children = ctx.supervised_children.lock().unwrap();
+            let new_child_id = children.keys().next().copied();
+            drop(children);
+
+            if let Some(new_id) = new_child_id {
+                let d2 = ctx.handle_child_failure_msg(new_id, "crash2");
+                assert!(matches!(d2, SupervisionDecision::Restart));
+
+                let children = ctx.supervised_children.lock().unwrap();
+                let third_child_id = children.keys().next().copied();
+                drop(children);
+
+                if let Some(third_id) = third_child_id {
+                    let d3 = ctx.handle_child_failure_msg(third_id, "crash3");
+                    // Budget exhausted (max_restarts=2), should escalate
+                    assert!(
+                        matches!(d3, SupervisionDecision::Escalate),
+                        "expected Escalate after budget exceeded, got {:?}",
+                        d3
+                    );
+                    esc_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(escalated.load(Ordering::SeqCst), 1, "escalation should have happened");
+    }
+
+    #[test]
+    fn r26_non_supervised_child_no_restart() {
+        let system = ActorSystem::new();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+
+        system.spawn(None, move |ctx: ActorContext| {
+            let cc = count_clone.clone();
+            // spawn_child (not supervised) — one-shot
+            let _child = ctx.spawn_child(move |_ctx: ActorContext| {
+                cc.fetch_add(1, Ordering::SeqCst);
+            });
+
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        std::thread::sleep(Duration::from_millis(300));
+        // Should only have been invoked once (no restart possible)
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn r26_restarted_child_receives_messages() {
+        let system = ActorSystem::new();
+        let msg_received = Arc::new(AtomicU32::new(0));
+        let msg_clone = msg_received.clone();
+
+        system.spawn(None, move |ctx: ActorContext| {
+            let mc = msg_clone.clone();
+            let child = ctx.spawn_supervised_child(move |child_ctx: ActorContext| {
+                // Try to receive a single message
+                if let Some(Message::User(_)) = child_ctx.recv() {
+                    mc.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+
+            // Simulate failure and restart
+            ctx.handle_child_failure_msg(child.id, "crash");
+            std::thread::sleep(Duration::from_millis(50));
+
+            // Send message to restarted child (find new handle)
+            let children = ctx.supervised_children.lock().unwrap();
+            if let Some(info) = children.values().next() {
+                let new_handle = info.handle.clone();
+                drop(children);
+                // Send a user message (unit value = 0x7FF8000000000001)
+                let _ = ctx.send(&new_handle, Message::User(std::ptr::null_mut()));
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            msg_received.load(Ordering::SeqCst) >= 1,
+            "restarted child should have received a message"
+        );
+    }
+
+    // ---- R2.10 Graceful Stop Tests ----
+
+    #[test]
+    fn r210_graceful_stop_drains_mailbox() {
+        let system = ActorSystem::new();
+        let processed = Arc::new(AtomicUsize::new(0));
+        let pc = processed.clone();
+
+        let handle = system.spawn(None, move |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::User(_)) => {
+                        pc.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Some(Message::GracefulStop) => {
+                        // Drain remaining messages via drain_and_stop
+                        let pc2 = pc.clone();
+                        ctx.drain_and_stop(move |_val| {
+                            pc2.fetch_add(1, Ordering::SeqCst);
+                        });
+                        break;
+                    }
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        // Send several messages, then GracefulStop
+        for _ in 0..5 {
+            let _ = system.send(&handle, Message::User(std::ptr::null_mut()));
+        }
+        let _ = system.send(&handle, Message::GracefulStop);
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            processed.load(Ordering::SeqCst),
+            5,
+            "all 5 messages should be processed before stopping"
+        );
+    }
+
+    #[test]
+    fn r210_graceful_stop_removes_from_registry() {
+        let system = ActorSystem::new();
+        let sys2 = system.clone();
+
+        let handle = system.spawn(None, move |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::GracefulStop) => {
+                        ctx.drain_and_stop(|_| {});
+                        break;
+                    }
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let id = handle.id;
+        assert!(
+            sys2.registry.lock().unwrap().contains_key(&id),
+            "actor should be in registry before stop"
+        );
+
+        let _ = system.send(&handle, Message::GracefulStop);
+        std::thread::sleep(Duration::from_millis(200));
+
+        assert!(
+            !sys2.registry.lock().unwrap().contains_key(&id),
+            "actor should be removed from registry after graceful stop"
+        );
+    }
+
+    #[test]
+    fn r210_exit_does_not_drain() {
+        let system = ActorSystem::new();
+        let processed = Arc::new(AtomicUsize::new(0));
+        let pc = processed.clone();
+
+        let handle = system.spawn(None, move |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::User(_)) => {
+                        pc.fetch_add(1, Ordering::SeqCst);
+                        // Simulate slow processing
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        // Send messages then immediately Exit (abrupt)
+        for _ in 0..10 {
+            let _ = system.send(&handle, Message::User(std::ptr::null_mut()));
+        }
+        let _ = system.send(&handle, Message::Exit);
+
+        std::thread::sleep(Duration::from_millis(300));
+        let count = processed.load(Ordering::SeqCst);
+        assert!(
+            count < 10,
+            "Exit should not drain all messages (got {})",
+            count
+        );
+    }
 }

@@ -27,6 +27,7 @@ pub mod math_ops;
 pub mod metrics;
 pub mod random_ops;
 pub mod rc_ops;
+pub mod regex_ops;
 pub mod string_ops;
 pub mod tagged_ops;
 pub mod time_ops;

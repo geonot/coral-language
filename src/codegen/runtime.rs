@@ -305,6 +305,12 @@ pub struct RuntimeBindings<'ctx> {
     pub string_repeat: FunctionValue<'ctx>,
     pub string_reverse: FunctionValue<'ctx>,
     pub value_to_string: FunctionValue<'ctx>,
+    // Regex operations (L2.2)
+    pub regex_match: FunctionValue<'ctx>,
+    pub regex_find: FunctionValue<'ctx>,
+    pub regex_find_all: FunctionValue<'ctx>,
+    pub regex_replace: FunctionValue<'ctx>,
+    pub regex_split: FunctionValue<'ctx>,
 }
 
 impl<'ctx> RuntimeBindings<'ctx> {
@@ -1425,6 +1431,33 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Regex operations (L2.2)
+        let regex_match = module.add_function(
+            "coral_regex_match",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let regex_find = module.add_function(
+            "coral_regex_find",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let regex_find_all = module.add_function(
+            "coral_regex_find_all",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let regex_replace = module.add_function(
+            "coral_regex_replace",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let regex_split = module.add_function(
+            "coral_regex_split",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
         // Map extensions
         let map_remove = module.add_function(
             "coral_map_remove",
@@ -2037,6 +2070,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
             string_repeat,
             string_reverse,
             value_to_string,
+            regex_match,
+            regex_find,
+            regex_find_all,
+            regex_replace,
+            regex_split,
         }
     }
 }

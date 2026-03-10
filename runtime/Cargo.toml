@@ -22,3 +22,4 @@ metrics = []
 libc = "0.2"
 serde_json = "1"
 base64 = "0.22"
+regex = "1"

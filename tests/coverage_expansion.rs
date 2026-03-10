@@ -1704,3 +1704,635 @@ extend Builder
     log(b.result())
 "#, &["hello world"]);
 }
+
+// ── KI-1: Type-aware method dispatch (built-in name shadowing fix) ──
+
+#[test]
+fn e2e_ki1_store_method_get_shadows_builtin() {
+    // Store method named `get` should dispatch to the store method, not the
+    // built-in list/map `.get(index)` which expects 1 arg.
+    assert_output(r#"
+store Config
+    data ? "default"
+
+extend Config
+    *get()
+        return self.data
+
+*main()
+    c is make_Config()
+    log(c.get())
+"#, &["default"]);
+}
+
+#[test]
+fn e2e_ki1_store_method_set_shadows_builtin() {
+    // Store method named `set` with 1 arg (built-in map.set expects 2).
+    assert_output(r#"
+store Counter
+    val ? 0
+
+extend Counter
+    *set(n)
+        self.val is n
+
+*main()
+    c is make_Counter()
+    c.set(42)
+    log(c.val)
+"#, &["42"]);
+}
+
+#[test]
+fn e2e_ki1_store_method_length_shadows_builtin() {
+    // Store method `length` should override built-in `.length()`.
+    assert_output(r#"
+store Rope
+    text ? ""
+
+extend Rope
+    *length()
+        return 999
+
+*main()
+    r is make_Rope()
+    log(r.length())
+"#, &["999"]);
+}
+
+#[test]
+fn e2e_ki1_builtin_length_still_works() {
+    // Built-in `.length()` should still work on non-store values.
+    assert_output(r#"
+*main()
+    xs is [1, 2, 3]
+    log(xs.length())
+    s is "hello"
+    log(s.length())
+"#, &["3", "5"]);
+}
+
+#[test]
+fn e2e_ki1_store_method_push_shadows_builtin() {
+    // Store `push` method with different semantics than list.push.
+    assert_output(r#"
+store Adder
+    total ? 0
+
+extend Adder
+    *push(val)
+        self.total is self.total + val
+
+*main()
+    a is make_Adder()
+    a.push(10)
+    a.push(20)
+    log(a.total)
+"#, &["30"]);
+}
+
+// ── CC5.3: All examples compile and run ──
+
+#[test]
+fn e2e_cc53_hello_example() {
+    let source = std::fs::read_to_string(
+        PathBuf::from(WORKSPACE).join("examples/hello.coral")
+    ).expect("read hello.coral");
+    let (stdout, _stderr, code) = run_coral(&source);
+    assert_eq!(code, 0, "hello.coral should exit 0");
+    assert!(stdout.contains("Hello, Coral!"), "hello.coral should greet");
+}
+
+#[test]
+fn e2e_cc53_fizzbuzz_example() {
+    let source = std::fs::read_to_string(
+        PathBuf::from(WORKSPACE).join("examples/fizzbuzz.coral")
+    ).expect("read fizzbuzz.coral");
+    let (stdout, _stderr, code) = run_coral(&source);
+    assert_eq!(code, 0, "fizzbuzz.coral should exit 0");
+    assert!(stdout.contains("FizzBuzz"), "fizzbuzz.coral should contain FizzBuzz");
+    assert!(stdout.contains("Fizz"), "fizzbuzz.coral should contain Fizz");
+    assert!(stdout.contains("Buzz"), "fizzbuzz.coral should contain Buzz");
+}
+
+#[test]
+fn e2e_cc53_calculator_example() {
+    let source = std::fs::read_to_string(
+        PathBuf::from(WORKSPACE).join("examples/calculator.coral")
+    ).expect("read calculator.coral");
+    let (stdout, _stderr, code) = run_coral(&source);
+    assert_eq!(code, 0, "calculator.coral should exit 0");
+    assert!(stdout.contains("Calculator demo complete!"), "calculator.coral should complete");
+}
+
+#[test]
+fn e2e_cc53_data_pipeline_example() {
+    let source = std::fs::read_to_string(
+        PathBuf::from(WORKSPACE).join("examples/data_pipeline.coral")
+    ).expect("read data_pipeline.coral");
+    let (stdout, _stderr, code) = run_coral(&source);
+    assert_eq!(code, 0, "data_pipeline.coral should exit 0");
+    assert!(stdout.contains("Demo complete!"), "data_pipeline.coral should complete");
+}
+
+#[test]
+fn e2e_cc53_traits_demo_example() {
+    let source = std::fs::read_to_string(
+        PathBuf::from(WORKSPACE).join("examples/traits_demo.coral")
+    ).expect("read traits_demo.coral");
+    let (stdout, _stderr, code) = run_coral(&source);
+    assert_eq!(code, 0, "traits_demo.coral should exit 0");
+    assert!(stdout.contains("Demo complete!"), "traits_demo.coral should complete");
+}
+
+// ── L2.2: Regex operations ──
+
+#[test]
+fn e2e_regex_match_full() {
+    assert_output(r#"
+*main()
+    log(regex_match("^hello$", "hello"))
+    log(regex_match("^hello$", "hello world"))
+    log(regex_match("[0-9]+", "42"))
+"#, &["true", "false", "true"]);
+}
+
+#[test]
+fn e2e_regex_find_first() {
+    assert_output(r#"
+*main()
+    log(regex_find("[0-9]+", "abc 123 def 456"))
+"#, &["123"]);
+}
+
+#[test]
+fn e2e_regex_find_all_matches() {
+    assert_output(r#"
+*main()
+    matches is regex_find_all("[0-9]+", "abc 12 def 345 ghi 6")
+    log(matches.length())
+"#, &["3"]);
+}
+
+#[test]
+fn e2e_regex_replace_all() {
+    assert_output(r#"
+*main()
+    result is regex_replace("[0-9]+", "NUM", "abc 12 def 345")
+    log(result)
+"#, &["abc NUM def NUM"]);
+}
+
+#[test]
+fn e2e_regex_split_pattern() {
+    assert_output(r#"
+*main()
+    parts is regex_split("\\s+", "hello   world   foo")
+    log(parts.length())
+    log(parts.get(0))
+    log(parts.get(1))
+    log(parts.get(2))
+"#, &["3", "hello", "world", "foo"]);
+}
+
+// ── T3.1: Type narrowing in match conditionals ──
+
+#[test]
+fn e2e_t31_match_pattern_binding_type() {
+    // Variables bound in match patterns via constructors should work correctly.
+    assert_output(r#"
+enum Shape
+    Circle(radius)
+    Rect(w, h)
+
+*area(s)
+    return match s
+        Circle(r) ? 3 * r * r
+        Rect(w, h) ? w * h
+
+*main()
+    c is Circle(5)
+    r is Rect(3, 4)
+    log(area(c))
+    log(area(r))
+"#, &["75", "12"]);
+}
+
+#[test]
+fn e2e_t31_nested_pattern_narrowing() {
+    // Nested destructuring through constructors.
+    assert_output(r#"
+enum Wrapper
+    Box(inner)
+
+enum Inner
+    Val(n)
+
+*unwrap(w)
+    return match w
+        Box(v) ? match v
+            Val(n) ? n
+            _ ? 0
+
+*main()
+    w is Box(Val(42))
+    log(unwrap(w))
+"#, &["42"]);
+}
+
+#[test]
+fn e2e_t31_or_pattern_with_bindings() {
+    // Or-patterns preserve binding types.
+    assert_output(r#"
+enum Expr
+    Num(v)
+    Neg(v)
+    Zero
+
+*eval(e)
+    return match e
+        Num(v) or Neg(v) ? v
+        Zero ? 0
+
+*main()
+    log(eval(Num(7)))
+    log(eval(Neg(3)))
+    log(eval(Zero))
+"#, &["7", "3", "0"]);
+}
+
+#[test]
+fn e2e_t31_guard_does_not_narrow_incorrectly() {
+    // Multiple arms for the same constructor with different field usage.
+    assert_output(r#"
+enum Token
+    Word(text)
+    Number(val)
+
+*describe(t)
+    return match t
+        Word(s) ? s
+        Number(n) ? '{n}'
+
+*main()
+    log(describe(Word("hello")))
+    log(describe(Number(42)))
+"#, &["hello", "42"]);
+}
+
+#[test]
+fn e2e_t31_narrowed_type_does_not_leak() {
+    // Variables bound inside a match arm don't leak to other arms.
+    assert_output(r#"
+enum Val
+    Str(text)
+    Num(n)
+
+*show(v)
+    return match v
+        Str(text) ? text
+        Num(n) ? '{n}'
+
+*main()
+    log(show(Str("hello")))
+    log(show(Num(42)))
+"#, &["hello", "42"]);
+}
+
+// ── T3.3: Nullability tracking ──
+
+fn warnings_for(source: &str) -> Vec<String> {
+    let compiler = Compiler;
+    match compiler.compile_to_ir_with_warnings(source) {
+        Ok((_ir, warnings)) => warnings.iter().map(|w| w.message.clone()).collect(),
+        Err(e) => panic!("compilation failed: {}", e.diagnostic.message),
+    }
+}
+
+#[test]
+fn e2e_t33_none_return_path_warns() {
+    let source = r#"
+*lookup(key)
+    key.equals("a") ? return "found"
+    return none
+
+*main()
+    log(lookup("a"))
+"#;
+    let ws = warnings_for(source);
+    assert!(
+        ws.iter().any(|w| w.contains("may return 'none'") && w.contains("lookup")),
+        "expected nullability warning for 'lookup', got: {:?}", ws
+    );
+}
+
+#[test]
+fn e2e_t33_no_none_return_no_warning() {
+    let source = r#"
+*add(a, b)
+    return a + b
+
+*main()
+    log(add(1, 2))
+"#;
+    let ws = warnings_for(source);
+    assert!(
+        !ws.iter().any(|w| w.contains("may return 'none'")),
+        "did NOT expect nullability warning, got: {:?}", ws
+    );
+}
+
+#[test]
+fn e2e_t33_none_in_branch_warns() {
+    let source = r#"
+*find(items, target)
+    i is 0
+    while i < items.length()
+        items.get(i).equals(target) ? return items.get(i)
+        i += 1
+    return none
+
+*main()
+    log(find([1, 2, 3], 2))
+"#;
+    let ws = warnings_for(source);
+    assert!(
+        ws.iter().any(|w| w.contains("may return 'none'") && w.contains("find")),
+        "expected nullability warning for 'find', got: {:?}", ws
+    );
+}
+
+#[test]
+fn e2e_t33_main_not_warned() {
+    // main() is excluded from nullability checks
+    let source = r#"
+*main()
+    log("hello")
+"#;
+    let ws = warnings_for(source);
+    assert!(
+        !ws.iter().any(|w| w.contains("may return 'none'") && w.contains("main")),
+        "should not warn on main(), got: {:?}", ws
+    );
+}
+
+// ── S4.4: Method chaining fluency ──
+
+#[test]
+fn e2e_s44_split_length_chain() {
+    assert_output(r#"
+*main()
+    x is "hello world foo".split(" ").length()
+    log(x)
+"#, &["3"]);
+}
+
+#[test]
+fn e2e_s44_string_trim_lower() {
+    assert_output(r#"
+*main()
+    x is "  Hello World  ".trim().lower()
+    log(x)
+"#, &["hello world"]);
+}
+
+#[test]
+fn e2e_s44_string_upper_chain() {
+    assert_output(r#"
+*main()
+    x is "hello".upper()
+    log(x)
+"#, &["HELLO"]);
+}
+
+#[test]
+fn e2e_s44_list_filter_length_chain() {
+    assert_output(r#"
+*main()
+    x is [1, 2, 3, 4, 5].filter($ > 2).length()
+    log(x)
+"#, &["3"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// S5.5: do..end BLOCK SYNTAX
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e2e_s55_do_end_basic_trailing_block() {
+    // func(arg) do ... end desugars to func(arg, lambda)
+    assert_output(r#"
+*run(label, callback)
+    log(label)
+    callback()
+
+*main()
+    run("hello") do
+        log("world")
+    end
+"#, &["hello", "world"]);
+}
+
+#[test]
+fn e2e_s55_do_end_multiple_statements() {
+    assert_output(r#"
+*run(callback)
+    callback()
+
+*main()
+    run() do
+        log("one")
+        log("two")
+        log("three")
+    end
+"#, &["one", "two", "three"]);
+}
+
+#[test]
+fn e2e_s55_do_end_nested() {
+    assert_output(r#"
+*outer(callback)
+    log("outer")
+    callback()
+
+*inner(callback)
+    log("inner")
+    callback()
+
+*main()
+    outer() do
+        inner() do
+            log("deep")
+        end
+    end
+"#, &["outer", "inner", "deep"]);
+}
+
+#[test]
+fn e2e_s55_do_end_missing_end_error() {
+    let result = compile(r#"
+*main()
+    run() do
+        log("oops")
+"#);
+    assert!(result.is_err(), "do without end should produce a parse error");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CC3.5: INCREMENTAL COMPILATION — MODULE CACHE
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e2e_cc35_cache_miss_falls_back_to_full_compile() {
+    use coralc::module_loader::ModuleSource;
+
+    let cache_dir = tempfile::tempdir().expect("create temp dir");
+    let compiler = Compiler;
+    let sources = vec![ModuleSource {
+        name: "main".to_string(),
+        path: std::path::PathBuf::from("test.coral"),
+        source: "*main()\n    log(42)\n".to_string(),
+        import_directives: vec![],
+        imports: vec![],
+        exports: vec![],
+    }];
+    let (ir, _warnings, cached) = compiler
+        .compile_modules_to_ir_cached(&sources, cache_dir.path())
+        .expect("compilation should succeed");
+    assert!(!cached, "first compilation should be a cache miss");
+    assert!(ir.contains("define"), "IR should contain function definitions");
+}
+
+#[test]
+fn e2e_cc35_cache_hit_returns_cached_ir() {
+    use coralc::module_loader::ModuleSource;
+
+    let cache_dir = tempfile::tempdir().expect("create temp dir");
+    let compiler = Compiler;
+    let sources = vec![ModuleSource {
+        name: "main".to_string(),
+        path: std::path::PathBuf::from("test.coral"),
+        source: "*main()\n    log(99)\n".to_string(),
+        import_directives: vec![],
+        imports: vec![],
+        exports: vec![],
+    }];
+
+    // First compile — cache miss
+    let (ir1, _, cached1) = compiler
+        .compile_modules_to_ir_cached(&sources, cache_dir.path())
+        .expect("first compile");
+    assert!(!cached1);
+
+    // Second compile with same sources — cache hit
+    let (ir2, _, cached2) = compiler
+        .compile_modules_to_ir_cached(&sources, cache_dir.path())
+        .expect("second compile");
+    assert!(cached2, "second compilation should be a cache hit");
+    assert_eq!(ir1, ir2, "cached IR should match original IR");
+}
+
+#[test]
+fn e2e_cc35_changed_module_invalidates_cache() {
+    use coralc::module_loader::ModuleSource;
+
+    let cache_dir = tempfile::tempdir().expect("create temp dir");
+    let compiler = Compiler;
+    let sources_v1 = vec![ModuleSource {
+        name: "main".to_string(),
+        path: std::path::PathBuf::from("test.coral"),
+        source: "*main()\n    log(1)\n".to_string(),
+        import_directives: vec![],
+        imports: vec![],
+        exports: vec![],
+    }];
+
+    // Compile v1
+    let (ir1, _, cached1) = compiler
+        .compile_modules_to_ir_cached(&sources_v1, cache_dir.path())
+        .expect("v1 compile");
+    assert!(!cached1);
+
+    // Compile v2 — changed source
+    let sources_v2 = vec![ModuleSource {
+        name: "main".to_string(),
+        path: std::path::PathBuf::from("test.coral"),
+        source: "*main()\n    log(2)\n".to_string(),
+        import_directives: vec![],
+        imports: vec![],
+        exports: vec![],
+    }];
+    let (ir2, _, cached2) = compiler
+        .compile_modules_to_ir_cached(&sources_v2, cache_dir.path())
+        .expect("v2 compile");
+    assert!(!cached2, "changed source should be a cache miss");
+    assert_ne!(ir1, ir2, "IR should differ for different source");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// C4.4: LINK-TIME OPTIMIZATION (LTO)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e2e_c44_lto_produces_valid_ir() {
+    let compiler = Compiler;
+    let ir = compiler.compile_to_ir(r#"
+*main()
+    x is 1 + 2
+    log(x)
+"#).expect("compilation should succeed");
+    let optimized = coralc::compiler::optimize_module(&ir, coralc::compiler::LtoOptLevel::O2)
+        .expect("LTO optimization should succeed");
+    assert!(optimized.contains("define"), "optimized IR should contain function definitions");
+}
+
+#[test]
+fn e2e_c44_lto_optimized_ir_runs_correctly() {
+    // Compile, optimize, then run through lli
+    let compiler = Compiler;
+    let ir = compiler.compile_to_ir(r#"
+*main()
+    x is 10 + 20
+    log(x)
+"#).expect("compilation should succeed");
+    let optimized = coralc::compiler::optimize_module(&ir, coralc::compiler::LtoOptLevel::O2)
+        .expect("LTO optimization should succeed");
+
+    // Write optimized IR to temp file and run with lli
+    let mut ir_file = tempfile::NamedTempFile::new().expect("create temp file");
+    ir_file.write_all(optimized.as_bytes()).expect("write IR");
+    ir_file.flush().expect("flush IR");
+    let runtime = runtime_lib();
+    let output = std::process::Command::new("lli")
+        .arg("-load").arg(&runtime)
+        .arg(ir_file.path())
+        .output().expect("failed to run lli");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(stdout.trim(), "30", "optimized code should produce correct output");
+}
+
+#[test]
+fn e2e_c44_lto_reduces_ir_size() {
+    let compiler = Compiler;
+    let ir = compiler.compile_to_ir(r#"
+*add(a, b)
+    return a + b
+
+*mul(a, b)
+    return a * b
+
+*main()
+    x is add(1, 2)
+    y is mul(x, 3)
+    log(y)
+"#).expect("compilation should succeed");
+    let optimized = coralc::compiler::optimize_module(&ir, coralc::compiler::LtoOptLevel::O2)
+        .expect("LTO optimization should succeed");
+    // LTO should at least not make the IR significantly larger
+    // (in practice it often inlines and simplifies, making it shorter)
+    assert!(
+        optimized.len() <= ir.len() * 2,
+        "optimized IR should not be dramatically larger (original: {}, optimized: {})",
+        ir.len(), optimized.len()
+    );
+}

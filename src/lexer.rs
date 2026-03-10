@@ -59,6 +59,8 @@ pub enum TokenKind {
     KeywordLoop,
     KeywordWhen,
     KeywordExtend,
+    KeywordDo,
+    KeywordEnd,
     Placeholder(u32),
     Star,
     Ampersand,
@@ -480,6 +482,8 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                     "loop" => TokenKind::KeywordLoop,
                     "when" => TokenKind::KeywordWhen,
                     "extend" => TokenKind::KeywordExtend,
+                    "do" => TokenKind::KeywordDo,
+                    "end" => TokenKind::KeywordEnd,
                     _ => TokenKind::Identifier(slice.to_string()),
                 };
                 tokens.push(Token::new(kind, Span::new(start, pos)));

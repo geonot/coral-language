@@ -10,7 +10,7 @@
 | Metric | Value | Date |
 |--------|-------|------|
 | Initial tests passing | 203 | 2026-03-08 |
-| Current tests passing | 920 + 7 runtime | 2026-03-10 |
+| Current tests passing | 1016 + 7 runtime | 2026-03-10 |
 | Pre-existing failures | 0 |
 | Runtime build | debug + release |
 
@@ -137,6 +137,47 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **CC3.2 — Namespacing / Qualified Access**: Complete. `module.func()` resolved in codegen via `module_exports` map in `emit_member_call`.
 - **CC3.3 — Selective Imports**: Complete. `use std.math.{sin, cos}` syntax via `ImportDirective` struct with module_path + selections.
 - **CC2.5 — LSP MVP (Diagnostics)**: Complete. `coral-lsp` workspace crate using tower-lsp + tokio. Diagnostics on open/change/save with span→position via `LineIndex`.
+
+---
+
+## Completed Work Stream: Sprint 2 (Post-Beta Gamma Batch 2)
+
+| ID | Task | Status | Notes |
+|----|------|--------|-------|
+| S5.6 | Postfix `if`/`unless` | **DONE** | `log("debug") if verbose` — pure parser desugaring |
+| S1.5 | Augmented assignment | **DONE** | `+=`, `-=`, `*=`, `/=` desugar to `x is x op val` |
+| T4.4 | Return type unification across branches | **DONE** | if/elif/else branches unify return types |
+| L2.1 | `std.random` | **DONE** | xoshiro256** PRNG, seedable, random/random_int/shuffle |
+| L2.3 | `std.time` enhancements | **DONE** | Proper `sleep()` FFI, Duration, ISO 8601 parsing |
+| L2.6 | `std.testing` enhancements | **DONE** | assert_close, test suites, before_each/after_each |
+| C4.2 | LLVM function attributes | **DONE** | nounwind, readnone, willreturn based on purity analysis |
+| CC2.4 | Warning categories | **DONE** | Classified warnings with optional suppression |
+| T3.2 | Definite assignment analysis | **DONE** | Tracks uninitialized variable usage across all paths |
+| S4.3 | Multi-line lambda syntax | **DONE** | Indented lambda bodies with multiple statements |
+| S4.6 | Return expressions in lambdas | **DONE** | `return` in lambda returns from lambda, not enclosing fn |
+| M3.4 | Closure cycle tracking | **DONE** | Closures in `is_container()`, `get_children()` for captures |
+
+---
+
+## Completed Work Stream: Sprint 3 (Type Quality, GC & Extension Methods)
+
+| ID | Task | Status | Notes |
+|----|------|--------|-------|
+| T4.3 | Ranked unification | **DONE** | Union-by-rank in TypeGraph with information-aware heuristic |
+| T4.1 | Multi-error recovery in type solving | **DONE** | Solver accumulates all errors; semantic emits one Diagnostic per TypeError |
+| T4.2 | Better type error messages | **DONE** | Constraint provenance with origin span and description |
+| L2.4 | `std.io` enhancements | **DONE** | stderr, file_size, rename, copy, mkdirs, temp_dir FFI + Coral wrappers |
+| L2.5 | `std.process` enhancements | **DONE** | exec, cwd, chdir, pid, hostname FFI + Coral wrappers |
+| L4.2 | `std.path` module | **DONE** | normalize, resolve, is_absolute, parent, stem via Rust std::path |
+| C4.3 | LLVM alias analysis hints | **DONE** | `noalias` on function params and allocator returns |
+| M3.1 | Thread-local cycle root buffers | **DONE** | Thread-local root buffers eliminate global mutex contention |
+| M3.2 | Generational epoch tracking | **DONE** | Young/old root partitioning with configurable promotion policy |
+| CC3.4 | Circular dependency enhancement | **DONE** | Line numbers in circular import errors; multi-cycle detection |
+| R3.9 | WeakRef clone semantics fix | **DONE** | Each clone gets unique registry ID; invalidation via `notify_value_deallocated` |
+| CC5.2 | Fix medium bugs (S6, S8) | **DONE** | S6: member access warns on unknown fields; S8: pipeline `CallableAt` constraint |
+| S4.5 | Extension methods | **DONE** | `extend TypeName` keyword, parser, AST, semantic merge, codegen via store_methods. 6 E2E tests. |
+
+**Known issue discovered (KI-1)**: Built-in method name shadowing — store methods named `set`, `get`, `push`, `pop`, `map`, `filter`, `length`, etc. are shadowed by hardcoded built-in dispatch in `emit_member_call()`. Workaround: avoid these ~20 names for user-defined methods. Fix requires type-aware dispatch.
 
 ---
 
@@ -439,3 +480,34 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **CC3.3 COMPLETE** (Selective imports): `use std.math.{sin, cos}` syntax. `ImportDirective` struct tracks module_path + selections. Parser handles `{...}` braced symbol lists. 7 new tests in module_namespaces.rs.
 - **CC2.5 COMPLETE** (LSP MVP): `coral-lsp` workspace crate using tower-lsp + tokio. Provides diagnostics on open/change/save with proper span→position conversion via `LineIndex`. Module-aware compilation for saved files, direct compilation for unsaved buffers.
 - **Results**: 920 tests pass (905 prior + 8 modules + 7 module_namespaces), 0 failures
+
+### Sprint 2 Session — SPRINT_NEXT_PLAN_2.md Implementation
+- **S5.6 COMPLETE** (Postfix if/unless): `log("debug") if verbose` — pure parser desugaring.
+- **S1.5 COMPLETE** (Augmented assignment): `+=`, `-=`, `*=`, `/=` operators, desugar to `x is x op val`.
+- **T4.4 COMPLETE** (Return type unification): if/elif/else branches unify return types.
+- **L2.1 COMPLETE** (`std.random`): xoshiro256** PRNG, seedable, random/random_int/shuffle.
+- **L2.3 COMPLETE** (`std.time` enhancements): Proper `sleep()` FFI, Duration, ISO 8601 parsing.
+- **L2.6 COMPLETE** (`std.testing` enhancements): assert_close, test suites, before_each/after_each.
+- **C4.2 COMPLETE** (LLVM function attributes): nounwind, readnone, willreturn based on purity.
+- **CC2.4 COMPLETE** (Warning categories): Classified warnings with optional suppression.
+- **T3.2 COMPLETE** (Definite assignment analysis): Tracks uninitialized variable usage.
+- **S4.3 COMPLETE** (Multi-line lambdas): Indented lambda bodies.
+- **S4.6 COMPLETE** (Return in lambdas): Return from lambda, not enclosing function.
+- **M3.4 COMPLETE** (Closure cycle tracking): Closures added to cycle detection.
+- **Results**: 971 tests pass, 0 failures
+
+### Sprint 3 Sessions — SPRINT_NEXT_PLAN_3.md Implementation
+- **T4.3 COMPLETE** (Ranked unification): Union-by-rank in TypeGraph; information-aware root selection.
+- **T4.1 COMPLETE** (Multi-error recovery): Solver accumulates all type errors; semantic emits individual diagnostics.
+- **T4.2 COMPLETE** (Better type error messages): Constraint provenance tracking with origin spans.
+- **L2.4 COMPLETE** (`std.io` enhancements): stderr, file_size, rename, copy, mkdirs, temp_dir — 6 runtime FFI functions + Coral wrappers.
+- **L2.5 COMPLETE** (`std.process` enhancements): exec, cwd, chdir, pid, hostname — 5 runtime FFI functions + Coral wrappers. 6 E2E tests.
+- **L4.2 COMPLETE** (`std.path` module): normalize, resolve, is_absolute, parent, stem — backed by Rust std::path. 5 tests.
+- **C4.3 COMPLETE** (LLVM alias analysis hints): `noalias` on function parameters and allocator returns, `nonnull` on heap pointers. 4 IR verification tests.
+- **M3.1 COMPLETE** (Thread-local cycle root buffers): Thread-local `Vec<usize>` root buffers with flush threshold. Eliminates global mutex contention on `possible_root()`. 3 runtime tests.
+- **M3.2 COMPLETE** (Generational epoch tracking): Young/old root partitioning with `birth_epoch` stamps. Young-gen collected every cycle, old-gen every K cycles. 3 runtime tests.
+- **CC3.4 COMPLETE** (Circular dependency enhancement): Error messages now include `use` line numbers (`a.coral line 1 → b.coral line 3 → a.coral`). Multi-cycle detection. 3 new tests + 2 updated.
+- **R3.9 COMPLETE** (WeakRef clone fix): Each `WeakRef::clone()` registers a unique registry ID. Original invalidation doesn't affect clones. 3 new runtime tests.
+- **CC5.2 COMPLETE** (Fix medium bugs): S6 — member access on stores warns on unknown fields with `check_member_access_validity()` semantic pass. S8 — pipeline fallthrough emits `CallableAt` constraint. 4 tests.
+- **S4.5 COMPLETE** (Extension methods): Full pipeline — `extend` keyword in lexer, `ExtensionDefinition` AST node, `parse_extension_def()` parser method, semantic merges methods into target store/type (or creates synthetic store for built-ins), codegen picks up via existing `store_methods` loop. 6 E2E tests. Discovered KI-1 (built-in method name shadowing).
+- **Results**: 1016 tests pass, 0 failures

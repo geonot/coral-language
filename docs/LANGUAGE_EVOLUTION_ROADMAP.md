@@ -443,6 +443,12 @@ These improvements span multiple pillars and must be addressed holistically.
 | CC5.2 | **Fix remaining medium bugs** | P6 (single-error model), S6 (member access fallback), S8 (pipeline type inference). These are quality-of-life issues that affect real programs. | Medium |
 | CC5.3 | **All examples compile and run** | Ensure all 7 example programs (calculator, chat_server, data_pipeline, fizzbuzz, hello, http_server, traits_demo) compile and produce correct output. | High |
 
+### Known Issues
+
+| ID | Issue | Description | Severity | Discovered |
+|----|-------|-------------|----------|------------|
+| KI-1 | **Built-in method name shadowing** | In `emit_member_call()` (`src/codegen/builtins.rs`), built-in method names (`set`, `get`, `push`, `pop`, `map`, `filter`, `reduce`, `length`, `keys`, `equals`, `not`, `iter`, `at`, `read`, `write`, `exists`, `log`, `concat`, `size`, `err`, `not_equals`) are matched in a hardcoded `match property` block that dispatches **before** checking `store_methods`. This means a user-defined store method named `set` is shadowed by the built-in `map.set(key, value)` — the built-in captures the call and fails with an arity error ("map.set expects exactly two arguments"). **Workaround**: Avoid naming store/extension methods with any of the ~20 built-in method names. **Fix**: Method dispatch should be type-aware — check if the target is a known store instance and prefer store methods, falling back to built-ins only for untyped or built-in-typed values. Requires threading store type information from semantic analysis into codegen's `emit_member_call()`. | Medium | Sprint 3 (S4.5) |
+
 ---
 
 ## Implementation Phases
@@ -496,9 +502,13 @@ All Phase Alpha tasks have been completed:
 | Priority | Tasks | Rationale | Status |
 |----------|-------|-----------|--------|
 | **Month 9-10** | R2.1-R2.12 (Actor performance & completion) | Work-stealing, typed messages, monitoring, supervision | Not started |
-| **Month 9-10** | L2.1-L2.6 (Core module completion) | Random, regex, time, io, process, testing | Not started |
-| **Month 10-11** | R3.1-R3.9 (Store performance & completion) | Indexes, compaction, transactions, query syntax | Not started |
+| ~~Month 9-10~~ | ~~L2.1 (std.random), L2.3 (std.time), L2.6 (std.testing)~~ | ~~Random, time, testing~~ | ✅ Done (Sprint 2) |
+| ~~Month 9-10~~ | ~~L2.4 (std.io), L2.5 (std.process)~~ | ~~I/O enhancements, process management~~ | ✅ Done (Sprint 3) |
+| **Month 9-10** | L2.2 (std.regex) | Regex support | Not started |
+| **Month 10-11** | R3.1-R3.8 (Store performance & completion) | Indexes, compaction, transactions, query syntax | Not started |
+| ~~Month 10-11~~ | ~~R3.9 (WeakRef clone fix)~~ | ~~Fix use-after-free in WeakRef clones~~ | ✅ Done (Sprint 3) |
 | ~~Month 10-12~~ | ~~CC3.1-CC3.3 (Module system)~~ | ~~Proper namespacing, selective imports~~ | ✅ Done (Sprint 1) |
+| ~~Month 10-12~~ | ~~CC3.4 (Circular dependency enhancement)~~ | ~~Better cycle error messages with line numbers~~ | ✅ Done (Sprint 3) |
 | **Month 11-12** | L3.1-L3.4 (Networking & data) | HTTP client/server, crypto | Not started |
 | ~~Month 11-12~~ | ~~CC2.5 (LSP)~~ | ~~Editor integration for adoption~~ | ✅ Done (Sprint 1) |
 
@@ -510,18 +520,33 @@ All Phase Alpha tasks have been completed:
 |----------|-------|-----------|
 | Priority | Tasks | Rationale | Status |
 |----------|-------|-----------|--------|
-| **Month 13-14** | T3.1-T3.4 (Flow-sensitive typing) | Null safety, error exhaustiveness | Not started |
+| **Month 13-14** | T3.1, T3.3-T3.4 (Flow-sensitive typing) | Null safety, error exhaustiveness | Not started |
+| ~~Month 13-14~~ | ~~T3.2 (Definite assignment analysis)~~ | ~~Uninitialized variable detection~~ | ✅ Done (Sprint 2) |
 | ~~Month 13-14~~ | ~~T3.5 (Dead code detection)~~ | ~~Dead code warnings~~ | ✅ Done (Sprint 1) |
-| **Month 13-14** | M3.1-M3.5 (Generational cycle detection) | Eliminates GC pauses | Not started |
+| ~~Month 13-14~~ | ~~T4.1-T4.3 (Type solver quality)~~ | ~~Multi-error, better messages, ranked unification~~ | ✅ Done (Sprint 3) |
+| ~~Month 13-14~~ | ~~T4.4 (Return type unification)~~ | ~~Unify if/elif/else branch types~~ | ✅ Done (Sprint 2) |
+| ~~Month 13-14~~ | ~~M3.1-M3.2 (Thread-local buffers, generational GC)~~ | ~~Eliminate mutex contention, epoch tracking~~ | ✅ Done (Sprint 3) |
+| ~~Month 13-14~~ | ~~M3.4 (Closure cycle tracking)~~ | ~~Detect closure↔value cycles~~ | ✅ Done (Sprint 2) |
+| **Month 13-14** | M3.3, M3.5 (Incremental GC, weak ref optimization) | Eliminates GC pauses | Not started |
 | ~~Month 14-15~~ | ~~C4.1 (Optimization flags)~~ | ~~-O flag for JIT/binary~~ | ✅ Done (Sprint 1) |
-| **Month 14-15** | C4.2-C4.5 (LLVM optimization) | PGO, LTO, function attributes | Not started |
+| ~~Month 14-15~~ | ~~C4.2 (LLVM function attributes)~~ | ~~nounwind, readnone, willreturn~~ | ✅ Done (Sprint 2) |
+| ~~Month 14-15~~ | ~~C4.3 (LLVM alias analysis hints)~~ | ~~noalias on params and allocators~~ | ✅ Done (Sprint 3) |
+| **Month 14-15** | C4.4-C4.5 (LTO, PGO) | Link-time and profile-guided optimization | Not started |
 | **Month 14-16** | M4.1-M4.4 (Escape analysis) | Stack allocation, region-based memory | Not started |
 | ~~Month 15-16~~ | ~~S4.1-S4.2 (Named args, defaults)~~ | ~~Named arguments, default params~~ | ✅ Done (Sprint 1) |
-| **Month 15-16** | S4.3-S4.6 (Function expressiveness) | Multi-line lambdas, extension methods | Not started |
+| ~~Month 15-16~~ | ~~S4.3 (Multi-line lambdas)~~ | ~~Indented lambda bodies~~ | ✅ Done (Sprint 2) |
+| ~~Month 15-16~~ | ~~S4.5 (Extension methods)~~ | ~~extend TypeName with new methods~~ | ✅ Done (Sprint 3) |
+| ~~Month 15-16~~ | ~~S4.6 (Return in lambdas)~~ | ~~Return from lambda, not enclosing fn~~ | ✅ Done (Sprint 2) |
+| **Month 15-16** | S4.4 (Method chaining fluency) | Fluent method chains on typed values | Not started |
 | ~~Month 15-16~~ | ~~S5.1-S5.4 (Conversational sugar)~~ | ~~unless/until/loop/when~~ | ✅ Done (Sprint 1) |
+| ~~Month 15-16~~ | ~~S5.6 (Postfix if/unless)~~ | ~~Statement-level conditionals~~ | ✅ Done (Sprint 2) |
+| ~~Month 15-16~~ | ~~S1.5 (Augmented assignment)~~ | ~~+=, -=, *=, /= operators~~ | ✅ Done (Sprint 2) |
+| ~~Month 15-16~~ | ~~CC2.4 (Warning categories)~~ | ~~Classified warnings with suppression~~ | ✅ Done (Sprint 2) |
+| ~~Month 15-16~~ | ~~CC5.2 (Fix medium bugs S6/S8)~~ | ~~Member access fallback, pipeline inference~~ | ✅ Done (Sprint 3) |
 | **Month 16-17** | C5.1-C5.4 (Advanced comptime) | Compile-time code generation | Not started |
 | **Month 17-18** | CC4.1-CC4.4 (Compilation targets) | WASM, macOS, Windows, static linking | Not started |
-| **Month 17-18** | L4.1-L4.5 (Developer experience) | Docs, packages, debug tools | Not started |
+| ~~Month 17-18~~ | ~~L4.2 (std.path)~~ | ~~Path manipulation module~~ | ✅ Done (Sprint 3) |
+| **Month 17-18** | L4.1, L4.3-L4.5 (Developer experience) | Docs, collections, packages, debug tools | Not started |
 
 ### Phase Epsilon (Months 19-24): Self-Hosted Runtime & Full Independence
 
@@ -554,7 +579,7 @@ All Phase Alpha tasks have been completed:
 
 | Metric | Current | Alpha | Beta | Delta |
 |--------|---------|-------|------|-------|
-| Tests | 920 | 1500+ | 3000+ | 5000+ |
+| Tests | 1016 | 1500+ | 3000+ | 5000+ |
 | Examples that compile | 5/7 | 7/7 | 15+ | 30+ |
 | Type errors caught (true positives) | ~30% | ~70% | ~90% | ~99% |
 | Type errors missed (false negatives) | ~70% | ~30% | ~10% | ~1% |

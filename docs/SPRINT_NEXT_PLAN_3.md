@@ -3,6 +3,7 @@
 > **Baseline**: 971 tests passing, 0 failures. Sprint 2 complete.
 > **Sprint 2 recap**: S5.6, S1.5, T4.4, L2.1, L2.3, L2.6, C4.2, CC2.4, T3.2, S4.3, S4.6, M3.4 — all done (CC5.3 skipped).
 > **Focus**: Type system error quality, generational cycle detection, stdlib I/O & process expansion, extension methods.
+> **Final result**: ✅ All 13 items complete. 1016 tests passing, 0 failures. (+45 tests)
 
 ---
 
@@ -469,23 +470,25 @@ Bug fixes and infrastructure hardening.
 
 ## Implementation Order (Recommended)
 
-| Order | Item | Est. Effort | Cumulative Tests |
-|-------|------|-------------|-----------------|
-| 1 | T4.3 (ranked unification) | ~45 min | ~974 |
-| 2 | T4.1 (multi-error recovery in solver) | ~90 min | ~978 |
-| 3 | T4.2 (better type error messages) | ~2 hours | ~982 |
-| 4 | L2.4 (`std.io` enhancements) | ~2 hours | ~988 |
-| 5 | L2.5 (`std.process` enhancements) | ~2 hours | ~994 |
-| 6 | L4.2 (`std.path` module) | ~90 min | ~999 |
-| 7 | C4.3 (LLVM alias analysis hints) | ~2 hours | ~1003 |
-| 8 | M3.1 (thread-local cycle root buffers) | ~2 hours | ~1006 |
-| 9 | M3.2 (generational hypothesis) | ~2 hours | ~1009 |
-| 10 | CC3.4 (circular dependency enhancement) | ~90 min | ~1013 |
-| 11 | R3.9 (WeakRef clone fix) | ~90 min | ~1016 |
-| 12 | CC5.2 (fix medium bugs) | ~2 hours | ~1020 |
-| 13 | S4.5 (extension methods) | ~3 hours | ~1026 |
+| Order | Item | Est. Effort | Actual Tests | Status |
+|-------|------|-------------|-------------|--------|
+| 1 | T4.3 (ranked unification) | ~45 min | 974 | ✅ Done |
+| 2 | T4.1 (multi-error recovery in solver) | ~90 min | 978 | ✅ Done |
+| 3 | T4.2 (better type error messages) | ~2 hours | 982 | ✅ Done |
+| 4 | L2.4 (`std.io` enhancements) | ~2 hours | 988 | ✅ Done |
+| 5 | L2.5 (`std.process` enhancements) | ~2 hours | 994 | ✅ Done |
+| 6 | L4.2 (`std.path` module) | ~90 min | 999 | ✅ Done |
+| 7 | C4.3 (LLVM alias analysis hints) | ~2 hours | 1003 | ✅ Done |
+| 8 | M3.1 (thread-local cycle root buffers) | ~2 hours | 1006 | ✅ Done |
+| 9 | M3.2 (generational hypothesis) | ~2 hours | 1006 | ✅ Done |
+| 10 | CC3.4 (circular dependency enhancement) | ~90 min | 1006 | ✅ Done |
+| 11 | R3.9 (WeakRef clone fix) | ~90 min | 1006 | ✅ Done |
+| 12 | CC5.2 (fix medium bugs) | ~2 hours | 1010 | ✅ Done |
+| 13 | S4.5 (extension methods) | ~3 hours | 1016 | ✅ Done |
 
-**Target**: 971 → ~1026 tests (~55 new tests)
+**Result**: 971 → 1016 tests (+45 new tests). All 13 items complete.
+
+**Known issue discovered**: KI-1 (built-in method name shadowing) — documented in `LANGUAGE_EVOLUTION_ROADMAP.md` Known Issues section.
 
 ---
 

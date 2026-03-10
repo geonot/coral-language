@@ -1,4 +1,5 @@
 # Chat Server - Multi-user chat demonstrating actors, stores, and error handling
+# Requires: std.net (L3.1), full actor system (R2.x) — not yet compilable
 
 use std.net
 
