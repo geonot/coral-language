@@ -504,7 +504,7 @@ All Phase Alpha tasks have been completed:
 | **Month 9-10** | R2.1-R2.12 (Actor performance & completion) | Work-stealing, typed messages, monitoring, supervision | Not started |
 | ~~Month 9-10~~ | ~~L2.1 (std.random), L2.3 (std.time), L2.6 (std.testing)~~ | ~~Random, time, testing~~ | ✅ Done (Sprint 2) |
 | ~~Month 9-10~~ | ~~L2.4 (std.io), L2.5 (std.process)~~ | ~~I/O enhancements, process management~~ | ✅ Done (Sprint 3) |
-| **Month 9-10** | L2.2 (std.regex) | Regex support | Not started |
+| ~~Month 9-10~~ | ~~L2.2 (std.regex)~~ | ~~Regex support~~ | ✅ Done (Sprint 4) |
 | **Month 10-11** | R3.1-R3.8 (Store performance & completion) | Indexes, compaction, transactions, query syntax | Not started |
 | ~~Month 10-11~~ | ~~R3.9 (WeakRef clone fix)~~ | ~~Fix use-after-free in WeakRef clones~~ | ✅ Done (Sprint 3) |
 | ~~Month 10-12~~ | ~~CC3.1-CC3.3 (Module system)~~ | ~~Proper namespacing, selective imports~~ | ✅ Done (Sprint 1) |
@@ -520,24 +520,27 @@ All Phase Alpha tasks have been completed:
 |----------|-------|-----------|
 | Priority | Tasks | Rationale | Status |
 |----------|-------|-----------|--------|
-| **Month 13-14** | T3.1, T3.3-T3.4 (Flow-sensitive typing) | Null safety, error exhaustiveness | Not started |
+| ~~Month 13-14~~ | ~~T3.1 (Type narrowing), T3.3 (Nullability)~~ | ~~Type narrowing in match, nullable return warnings~~ | ✅ Done (Sprint 4) |
+| **Month 13-14** | T3.4 (Error type tracking) | Error taxonomy types, exhaustive handling | Not started |
 | ~~Month 13-14~~ | ~~T3.2 (Definite assignment analysis)~~ | ~~Uninitialized variable detection~~ | ✅ Done (Sprint 2) |
 | ~~Month 13-14~~ | ~~T3.5 (Dead code detection)~~ | ~~Dead code warnings~~ | ✅ Done (Sprint 1) |
 | ~~Month 13-14~~ | ~~T4.1-T4.3 (Type solver quality)~~ | ~~Multi-error, better messages, ranked unification~~ | ✅ Done (Sprint 3) |
 | ~~Month 13-14~~ | ~~T4.4 (Return type unification)~~ | ~~Unify if/elif/else branch types~~ | ✅ Done (Sprint 2) |
 | ~~Month 13-14~~ | ~~M3.1-M3.2 (Thread-local buffers, generational GC)~~ | ~~Eliminate mutex contention, epoch tracking~~ | ✅ Done (Sprint 3) |
 | ~~Month 13-14~~ | ~~M3.4 (Closure cycle tracking)~~ | ~~Detect closure↔value cycles~~ | ✅ Done (Sprint 2) |
-| **Month 13-14** | M3.3, M3.5 (Incremental GC, weak ref optimization) | Eliminates GC pauses | Not started |
+| ~~Month 13-14~~ | ~~M3.3 (Incremental GC)~~ | ~~Skipped — GC-free design decision~~ | SKIP (Sprint 4) |
+| **Month 13-14** | M3.5 (Weak ref optimization) | Epoch-based reclamation | Not started |
 | ~~Month 14-15~~ | ~~C4.1 (Optimization flags)~~ | ~~-O flag for JIT/binary~~ | ✅ Done (Sprint 1) |
 | ~~Month 14-15~~ | ~~C4.2 (LLVM function attributes)~~ | ~~nounwind, readnone, willreturn~~ | ✅ Done (Sprint 2) |
 | ~~Month 14-15~~ | ~~C4.3 (LLVM alias analysis hints)~~ | ~~noalias on params and allocators~~ | ✅ Done (Sprint 3) |
-| **Month 14-15** | C4.4-C4.5 (LTO, PGO) | Link-time and profile-guided optimization | Not started |
+| ~~Month 14-15~~ | ~~C4.4 (LTO)~~ | ~~Link-time optimization~~ | ✅ Done (Sprint 4) |
+| **Month 14-15** | C4.5 (PGO) | Profile-guided optimization | Not started |
 | **Month 14-16** | M4.1-M4.4 (Escape analysis) | Stack allocation, region-based memory | Not started |
 | ~~Month 15-16~~ | ~~S4.1-S4.2 (Named args, defaults)~~ | ~~Named arguments, default params~~ | ✅ Done (Sprint 1) |
 | ~~Month 15-16~~ | ~~S4.3 (Multi-line lambdas)~~ | ~~Indented lambda bodies~~ | ✅ Done (Sprint 2) |
 | ~~Month 15-16~~ | ~~S4.5 (Extension methods)~~ | ~~extend TypeName with new methods~~ | ✅ Done (Sprint 3) |
 | ~~Month 15-16~~ | ~~S4.6 (Return in lambdas)~~ | ~~Return from lambda, not enclosing fn~~ | ✅ Done (Sprint 2) |
-| **Month 15-16** | S4.4 (Method chaining fluency) | Fluent method chains on typed values | Not started |
+| ~~Month 15-16~~ | ~~S4.4 (Method chaining fluency)~~ | ~~Precise return types for chainable methods~~ | ✅ Done (Sprint 4) |
 | ~~Month 15-16~~ | ~~S5.1-S5.4 (Conversational sugar)~~ | ~~unless/until/loop/when~~ | ✅ Done (Sprint 1) |
 | ~~Month 15-16~~ | ~~S5.6 (Postfix if/unless)~~ | ~~Statement-level conditionals~~ | ✅ Done (Sprint 2) |
 | ~~Month 15-16~~ | ~~S1.5 (Augmented assignment)~~ | ~~+=, -=, *=, /= operators~~ | ✅ Done (Sprint 2) |
@@ -594,7 +597,7 @@ All Phase Alpha tasks have been completed:
 | `list ~ map($*2) ~ sum()` | Pipeline desugared in lowering pass ✅ | Zero-allocation pipeline |
 | `for i in 1..100` | `for..to..step` counted loop ✅ | Counted loop, no allocation |
 | `match x / Some(v) if v > 0 ? ...` | Guard clauses + or-patterns ✅ | Full guard + narrowing |
-| `{name, age} is user` | Not implemented | Destructuring with type inference |
+| `{name, age} is user` | ✅ Destructuring assignment (S2.4) | Destructuring with type inference |
 | `server.handle(path: '/', method: 'GET')` | ✅ Named args implemented (S4.1) | Named arguments |
 | `*connect(host, port ? 5432)` | ✅ Default params implemented (S4.2) | Default parameter values |
 | `unless ready ? return` | ✅ Desugared to if-not (S5.1) | Conversational sugar |
