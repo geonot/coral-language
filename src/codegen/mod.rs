@@ -775,6 +775,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let nounwind = self.context.create_enum_attribute(nounwind_id, 0);
         llvm_fn.add_attribute(AttributeLoc::Function, nounwind);
 
+        // C4.3: noalias on all function parameters.
+        // In Coral's NaN-boxed model, function arguments are i64 values passed
+        // by value — they never alias any existing memory location.
+        let noalias_id = Attribute::get_named_enum_kind_id("noalias");
+        let noalias = self.context.create_enum_attribute(noalias_id, 0);
+        let param_count = llvm_fn.count_params();
+        for i in 0..param_count {
+            llvm_fn.add_attribute(AttributeLoc::Param(i), noalias);
+        }
+
         if is_pure {
             // Pure functions: no observable side effects, reads no external state
             let readnone_id = Attribute::get_named_enum_kind_id("memory");
@@ -788,7 +798,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// C4.2: Apply attributes to known-pure runtime FFI declarations.
+    /// C4.2 + C4.3: Apply attributes to runtime FFI declarations.
     fn apply_runtime_attributes(&self) {
         let nounwind_id = Attribute::get_named_enum_kind_id("nounwind");
         let nounwind = self.context.create_enum_attribute(nounwind_id, 0);
@@ -809,6 +819,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         ];
         for f in &nounwind_fns {
             f.add_attribute(AttributeLoc::Function, nounwind);
+        }
+
+        // C4.3: noalias on return values of allocation functions.
+        // Freshly allocated objects don't alias any existing pointer.
+        let noalias_id = Attribute::get_named_enum_kind_id("noalias");
+        let noalias = self.context.create_enum_attribute(noalias_id, 0);
+        let allocator_fns = [
+            self.runtime.make_string,
+            self.runtime.make_list,
+            self.runtime.make_map,
+            self.runtime.make_bytes,
+            self.runtime.make_number,
+            self.runtime.make_bool,
+            self.runtime.make_unit,
+        ];
+        for f in &allocator_fns {
+            f.add_attribute(AttributeLoc::Return, noalias);
         }
     }
 

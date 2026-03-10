@@ -166,9 +166,10 @@ fn module_loader_detects_circular_imports() {
     
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("circular import"));
-    // Check for helpful hint
-    assert!(err.contains("Hint:") || err.contains("restructur"));
+    assert!(err.contains("circular import"), "msg: {}", err);
+    // CC3.4: Check for helpful hint and line numbers
+    assert!(err.contains("Hint:") || err.contains("restructur"), "should have hint: {}", err);
+    assert!(err.contains("line 1"), "should include line number: {}", err);
 }
 
 #[test]

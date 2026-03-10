@@ -2,8 +2,10 @@ use crate::ast::{
     Binding,
     Block,
     ErrorDefinition,
+    ExtensionDefinition,
     Field,
     Function,
+    FunctionKind,
     Item,
     MatchExpression,
     Parameter,
@@ -346,6 +348,76 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                 // Store trait definitions for method resolution and validation
                 trait_defs.push(trait_def);
             }
+            Item::Extension(ext) => {
+                // S4.5: Merge extension methods into the target type/store.
+                // Extension methods have lower priority — only add if not already defined.
+                let target = &ext.target_type;
+                let mut merged = false;
+
+                // Try to merge into a store definition
+                for store in stores.iter_mut() {
+                    if store.name == *target {
+                        for method in &ext.methods {
+                            let already_exists = store.methods.iter().any(|m| m.name == method.name);
+                            if !already_exists {
+                                let mut m = method.clone();
+                                m.kind = FunctionKind::Method;
+                                store.methods.push(m);
+                            }
+                        }
+                        merged = true;
+                        break;
+                    }
+                }
+
+                // Try to merge into a type definition
+                if !merged {
+                    for type_def in type_defs.iter_mut() {
+                        if type_def.name == *target {
+                            for method in &ext.methods {
+                                let already_exists = type_def.methods.iter().any(|m| m.name == method.name);
+                                if !already_exists {
+                                    let mut m = method.clone();
+                                    m.kind = FunctionKind::Method;
+                                    type_def.methods.push(m);
+                                }
+                            }
+                            merged = true;
+                            break;
+                        }
+                    }
+                }
+
+                // For built-in types (String, List, Map, Int, Float, Bool),
+                // create a synthetic store entry so codegen registers the methods.
+                if !merged {
+                    let builtin_types = ["String", "List", "Map", "Int", "Float", "Bool", "Number", "Bytes"];
+                    if builtin_types.contains(&target.as_str()) {
+                        let methods: Vec<Function> = ext.methods.iter().map(|m| {
+                            let mut func = m.clone();
+                            func.kind = FunctionKind::Method;
+                            func
+                        }).collect();
+                        let synthetic = crate::ast::StoreDefinition {
+                            name: target.clone(),
+                            with_traits: vec![],
+                            fields: vec![],
+                            methods,
+                            is_actor: false,
+                            is_persistent: false,
+                            span: ext.span,
+                        };
+                        stores.push(synthetic);
+                        merged = true;
+                    }
+                }
+
+                // If target type not found, silently skip (warning deferred)
+                if !merged {
+                    // Store for later warning (after warnings vec is initialized)
+                    // For now, silently ignore — the type may be from a module
+                }
+            }
         }
     }
     let mut constraints = ConstraintSet::default();
@@ -354,10 +426,40 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     let mut branch_type_hints: Vec<(Vec<TypeId>, Span)> = Vec::new();
     collect_program_constraints(&globals, &functions, &mut constraints, &mut types, &mut graph, &mut branch_type_hints);
     if let Err(errors) = crate::types::solve_constraints(&constraints, &mut graph) {
-        // Use the first error's span for precise location, list all messages.
-        let first_span = errors.first().map(|e| e.span).unwrap_or(program.span);
-        let msg = errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; ");
-        return Err(Diagnostic::new(format!("type inference failed: {msg}"), first_span));
+        // T4.1 + T4.2: Emit one diagnostic per type error with provenance.
+        let first = &errors[0];
+        let mut msg = format!("type inference failed: {}", first.message);
+        // T4.2: Append provenance info if available
+        if let Some(ref origin) = first.expected_origin {
+            msg.push_str(&format!("\n  {} inferred from: {}",
+                first.expected.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
+                origin.description));
+        }
+        if let Some(ref origin) = first.found_origin {
+            msg.push_str(&format!("\n  {} required by: {}",
+                first.found.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
+                origin.description));
+        }
+        let mut primary = Diagnostic::new(msg, first.span);
+        // Attach remaining errors as related diagnostics
+        for error in errors.iter().skip(1) {
+            let mut related_msg = error.message.clone();
+            if let Some(ref origin) = error.expected_origin {
+                related_msg.push_str(&format!("\n  {} inferred from: {}",
+                    error.expected.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
+                    origin.description));
+            }
+            if let Some(ref origin) = error.found_origin {
+                related_msg.push_str(&format!("\n  {} required by: {}",
+                    error.found.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
+                    origin.description));
+            }
+            primary.related.push(Diagnostic::new(
+                related_msg,
+                error.span,
+            ));
+        }
+        return Err(primary);
     }
     // Resolve types after solving for easier diagnostics downstream.
     let mut resolved = TypeEnv::default();
@@ -397,6 +499,9 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     check_definite_assignment(&functions, &mut warnings);
     // T4.4: Check branch type consistency for if/elif/else
     check_branch_type_consistency(&branch_type_hints, &mut graph, &mut warnings);
+
+    // CC5.2/S6: Check member access validity on known store/type fields
+    check_member_access_validity(&globals, &functions, &store_field_names, &mut warnings);
 
     // Inject default trait method bodies into types/stores that don't override them
     inject_trait_default_methods(&mut type_defs, &mut stores, &trait_defs);
@@ -1296,8 +1401,6 @@ fn collect_constraints_expr(
         }
         Expression::Pipeline { left, right, span } => {
             // Pipeline `a ~ f(args)` desugars to `f(a, args)`
-            // Collect constraints for left side
-            let _left_ty = collect_constraints_expr(left, constraints, types, graph);
             // Handle the right side based on its form:
             match right.as_ref() {
                 Expression::Call { callee, args, span: call_span, .. } => {
@@ -1324,10 +1427,18 @@ fn collect_constraints_expr(
                     collect_constraints_expr(&desugared, constraints, types, graph)
                 }
                 _ => {
-                    // For any other expression on the right, collect constraints
-                    // and use the result type (best effort)
+                    // CC5.2/S8: For any other expression on the right, treat as callable
+                    // with left as argument — emit proper callable constraint
+                    let left_ty = collect_constraints_expr(left, constraints, types, graph);
                     let right_ty = collect_constraints_expr(right, constraints, types, graph);
-                    right_ty
+                    let result_ty = TypeId::TypeVar(graph.fresh());
+                    constraints.push(ConstraintKind::CallableAt(
+                        right_ty,
+                        vec![left_ty],
+                        result_ty.clone(),
+                        *span,
+                    ));
+                    result_ty
                 }
             }
         }
@@ -1794,7 +1905,25 @@ fn is_builtin_name(name: &str) -> bool {
         "string_join_list" | "join_list" |
         "string_repeat" | "repeat_string" |
         "string_reverse" | "reverse_string" |
-        "value_to_string"
+        "value_to_string" |
+        // L2.4: std.io enhancements
+        "stderr_write" | "eprint" |
+        "fs_size" | "file_size" |
+        "fs_rename" | "fs_copy" |
+        "fs_mkdirs" | "make_dirs" |
+        "fs_temp_dir" | "temp_dir" |
+        // L2.5: std.process enhancements
+        "process_exec" | "exec" |
+        "process_cwd" | "cwd" |
+        "process_chdir" | "chdir" |
+        "process_pid" |
+        "process_hostname" | "hostname" |
+        // L4.2: std.path operations
+        "path_normalize" | "normalize" |
+        "path_resolve" | "resolve" |
+        "path_is_absolute" | "is_absolute" |
+        "path_parent" |
+        "path_stem" | "stem"
     )
 }
 
@@ -3488,6 +3617,218 @@ fn check_expr_for_dead_code(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
         }
         Expression::Lambda { body, .. } => {
             check_block_for_dead_code(body, warnings);
+        }
+        _ => {}
+    }
+}
+
+/// CC5.2/S6: Check member accesses on store/type instances for validity.
+/// If a member access targets a known store constructor and the property
+/// is not a known field, emit a warning.
+fn check_member_access_validity(
+    globals: &[Binding],
+    functions: &[Function],
+    store_field_names: &HashMap<String, Vec<String>>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    // Known method names that apply to all values — don't warn on these
+    static UNIVERSAL_MEMBERS: &[&str] = &[
+        "length", "count", "size", "err", "push", "pop", "get", "set",
+        "append", "remove", "insert", "contains", "keys", "values", "clear",
+        "join", "map", "filter", "reduce", "find", "any", "all", "sort",
+        "equals", "not_equals", "not", "iter", "to_string", "type",
+        "trim", "split", "starts_with", "ends_with", "replace", "to_upper",
+        "to_lower", "chars", "bytes", "slice", "reverse", "flat_map",
+        "enumerate", "zip", "take", "skip", "head", "tail", "last",
+        "is_empty", "has_key", "entries",
+    ];
+
+    // Track variable name → store type name
+    let mut var_types: HashMap<String, String> = HashMap::new();
+
+    for binding in globals {
+        if let Some(store_name) = extract_store_type(&binding.value, store_field_names) {
+            var_types.insert(binding.name.clone(), store_name);
+        }
+        check_member_access_in_expr(&binding.value, store_field_names, UNIVERSAL_MEMBERS, &var_types, warnings);
+    }
+    for func in functions {
+        let mut local_var_types = var_types.clone();
+        for stmt in &func.body.statements {
+            collect_store_bindings(stmt, store_field_names, &mut local_var_types);
+            check_member_access_in_statement(stmt, store_field_names, UNIVERSAL_MEMBERS, &local_var_types, warnings);
+        }
+        if let Some(ref val_expr) = func.body.value {
+            check_member_access_in_expr(val_expr, store_field_names, UNIVERSAL_MEMBERS, &local_var_types, warnings);
+        }
+    }
+}
+
+/// If an expression is a call to `make_StoreName()`, return the store name.
+fn extract_store_type(expr: &Expression, store_field_names: &HashMap<String, Vec<String>>) -> Option<String> {
+    if let Expression::Call { callee, .. } = expr {
+        if let Expression::Identifier(name, _) = callee.as_ref() {
+            let type_name = name.strip_prefix("make_")?;
+            if store_field_names.contains_key(type_name) {
+                return Some(type_name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Scan a statement for bindings to store constructors.
+fn collect_store_bindings(
+    stmt: &Statement,
+    store_field_names: &HashMap<String, Vec<String>>,
+    var_types: &mut HashMap<String, String>,
+) {
+    if let Statement::Binding(binding) = stmt {
+        if let Some(store_name) = extract_store_type(&binding.value, store_field_names) {
+            var_types.insert(binding.name.clone(), store_name);
+        }
+    }
+}
+
+fn check_member_access_in_statement(
+    stmt: &Statement,
+    store_field_names: &HashMap<String, Vec<String>>,
+    universal: &[&str],
+    var_types: &HashMap<String, String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    match stmt {
+        Statement::Expression(expr) => {
+            check_member_access_in_expr(expr, store_field_names, universal, var_types, warnings);
+        }
+        Statement::Binding(binding) => {
+            check_member_access_in_expr(&binding.value, store_field_names, universal, var_types, warnings);
+        }
+        Statement::If { condition, body, elif_branches, else_body, .. } => {
+            check_member_access_in_expr(condition, store_field_names, universal, var_types, warnings);
+            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+            if let Some(ref v) = body.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+            for (cond, block) in elif_branches {
+                check_member_access_in_expr(cond, store_field_names, universal, var_types, warnings);
+                for s in &block.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+                if let Some(ref v) = block.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+            }
+            if let Some(block) = else_body {
+                for s in &block.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+                if let Some(ref v) = block.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+            }
+        }
+        Statement::Return(expr, _) => {
+            check_member_access_in_expr(expr, store_field_names, universal, var_types, warnings);
+        }
+        Statement::While { condition, body, .. } => {
+            check_member_access_in_expr(condition, store_field_names, universal, var_types, warnings);
+            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+        }
+        Statement::For { iterable, body, .. } | Statement::ForKV { iterable, body, .. } => {
+            check_member_access_in_expr(iterable, store_field_names, universal, var_types, warnings);
+            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+        }
+        Statement::ForRange { start, end, step, body, .. } => {
+            check_member_access_in_expr(start, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(end, store_field_names, universal, var_types, warnings);
+            if let Some(s) = step { check_member_access_in_expr(s, store_field_names, universal, var_types, warnings); }
+            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+        }
+        Statement::FieldAssign { target, value, .. } => {
+            check_member_access_in_expr(target, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(value, store_field_names, universal, var_types, warnings);
+        }
+        Statement::PatternBinding { value, .. } => {
+            check_member_access_in_expr(value, store_field_names, universal, var_types, warnings);
+        }
+        Statement::Break(_) | Statement::Continue(_) => {}
+    }
+}
+
+fn check_member_access_in_expr(
+    expr: &Expression,
+    store_field_names: &HashMap<String, Vec<String>>,
+    universal: &[&str],
+    var_types: &HashMap<String, String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        Expression::Member { target, property, span } => {
+            // Check the target for nested member accesses first
+            check_member_access_in_expr(target, store_field_names, universal, var_types, warnings);
+
+            // Determine the store type name from the target expression
+            let store_type = match target.as_ref() {
+                // Direct call: make_Point().z
+                Expression::Call { callee, .. } => {
+                    if let Expression::Identifier(name, _) = callee.as_ref() {
+                        name.strip_prefix("make_")
+                            .and_then(|t| store_field_names.get(t).map(|_| t.to_string()))
+                    } else {
+                        None
+                    }
+                }
+                // Variable: p.z where p was bound to make_Point()
+                Expression::Identifier(var_name, _) => {
+                    var_types.get(var_name.as_str()).cloned()
+                }
+                _ => None,
+            };
+
+            if let Some(type_name) = store_type {
+                if let Some(fields) = store_field_names.get(&type_name) {
+                    if !fields.contains(property) && !universal.contains(&property.as_str()) {
+                        warnings.push(Diagnostic::categorized_warning(
+                            format!(
+                                "type `{}` has no field `{}`; known fields: {}",
+                                type_name,
+                                property,
+                                fields.join(", ")
+                            ),
+                            *span,
+                            WarningCategory::General,
+                        ));
+                    }
+                }
+            }
+        }
+        Expression::Call { callee, args, .. } => {
+            check_member_access_in_expr(callee, store_field_names, universal, var_types, warnings);
+            for arg in args { check_member_access_in_expr(arg, store_field_names, universal, var_types, warnings); }
+        }
+        Expression::Binary { left, right, .. } => {
+            check_member_access_in_expr(left, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(right, store_field_names, universal, var_types, warnings);
+        }
+        Expression::Unary { expr, .. } => {
+            check_member_access_in_expr(expr, store_field_names, universal, var_types, warnings);
+        }
+        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+            check_member_access_in_expr(condition, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(then_branch, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(else_branch, store_field_names, universal, var_types, warnings);
+        }
+        Expression::Pipeline { left, right, .. } => {
+            check_member_access_in_expr(left, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(right, store_field_names, universal, var_types, warnings);
+        }
+        Expression::List(items, _) => {
+            for item in items { check_member_access_in_expr(item, store_field_names, universal, var_types, warnings); }
+        }
+        Expression::Map(entries, _) => {
+            for (k, v) in entries {
+                check_member_access_in_expr(k, store_field_names, universal, var_types, warnings);
+                check_member_access_in_expr(v, store_field_names, universal, var_types, warnings);
+            }
+        }
+        Expression::Index { target, index, .. } => {
+            check_member_access_in_expr(target, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(index, store_field_names, universal, var_types, warnings);
+        }
+        Expression::Lambda { body, .. } => {
+            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+            if let Some(ref v) = body.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
         }
         _ => {}
     }

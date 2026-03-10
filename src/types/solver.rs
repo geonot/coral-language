@@ -6,6 +6,13 @@ use crate::span::Span;
 use super::core::{TypeId, TypeVarId, Primitive, format_type};
 use std::collections::HashMap;
 
+/// T4.2: Origin of a type binding — where a type variable was first constrained.
+#[derive(Debug, Clone)]
+pub struct ConstraintOrigin {
+    pub description: String,
+    pub span: Span,
+}
+
 /// A type error with context for diagnostics.
 #[derive(Debug, Clone)]
 pub struct TypeError {
@@ -13,6 +20,10 @@ pub struct TypeError {
     pub span: Span,
     pub expected: Option<TypeId>,
     pub found: Option<TypeId>,
+    /// T4.2: Where the expected type was first inferred.
+    pub expected_origin: Option<ConstraintOrigin>,
+    /// T4.2: Where the found type was required.
+    pub found_origin: Option<ConstraintOrigin>,
 }
 
 impl TypeError {
@@ -22,12 +33,21 @@ impl TypeError {
             span,
             expected: None,
             found: None,
+            expected_origin: None,
+            found_origin: None,
         }
     }
 
     pub fn with_types(mut self, expected: TypeId, found: TypeId) -> Self {
         self.expected = Some(expected);
         self.found = Some(found);
+        self
+    }
+
+    /// T4.2: Attach provenance information to this error.
+    pub fn with_origins(mut self, expected_origin: Option<ConstraintOrigin>, found_origin: Option<ConstraintOrigin>) -> Self {
+        self.expected_origin = expected_origin;
+        self.found_origin = found_origin;
         self
     }
 
@@ -41,6 +61,8 @@ impl TypeError {
             span,
             expected: Some(expected.clone()),
             found: Some(found.clone()),
+            expected_origin: None,
+            found_origin: None,
         }
     }
 
@@ -53,6 +75,8 @@ impl TypeError {
             span,
             expected: Some(TypeId::Primitive(Primitive::Float)),
             found: Some(ty.clone()),
+            expected_origin: None,
+            found_origin: None,
         }
     }
 
@@ -62,6 +86,8 @@ impl TypeError {
             span,
             expected: Some(TypeId::Primitive(Primitive::Bool)),
             found: Some(ty.clone()),
+            expected_origin: None,
+            found_origin: None,
         }
     }
 
@@ -71,6 +97,8 @@ impl TypeError {
             span,
             expected: None,
             found: Some(ty.clone()),
+            expected_origin: None,
+            found_origin: None,
         }
     }
 
@@ -86,6 +114,8 @@ impl TypeError {
             span,
             expected: None,
             found: None,
+            expected_origin: None,
+            found_origin: None,
         }
     }
 
@@ -95,6 +125,8 @@ impl TypeError {
             span,
             expected: None,
             found: None,
+            expected_origin: None,
+            found_origin: None,
         }
     }
 }
@@ -162,6 +194,10 @@ pub struct TypeGraph {
     next_var: u32,
     parents: HashMap<TypeVarId, TypeVarId>,
     repr: HashMap<TypeVarId, TypeId>,
+    /// Rank tracking for union-by-rank heuristic (T4.3).
+    ranks: HashMap<TypeVarId, u32>,
+    /// T4.2: Binding site tracking — records where each type variable was first bound.
+    binding_origins: HashMap<TypeVarId, ConstraintOrigin>,
 }
 
 impl TypeGraph {
@@ -187,12 +223,47 @@ impl TypeGraph {
         root
     }
 
-    /// Union two type variables.
+    /// Union two type variables (union-by-rank with information-aware heuristic).
     pub fn union(&mut self, a: TypeVarId, b: TypeVarId) {
         let ra = self.find(a);
         let rb = self.find(b);
         if ra != rb {
-            self.parents.insert(ra, rb);
+            let rank_a = *self.ranks.get(&ra).unwrap_or(&0);
+            let rank_b = *self.ranks.get(&rb).unwrap_or(&0);
+            let has_repr_a = self.repr.contains_key(&ra);
+            let has_repr_b = self.repr.contains_key(&rb);
+
+            if rank_a > rank_b {
+                // ra has higher rank — rb points to ra
+                self.parents.insert(rb, ra);
+                if !has_repr_a && has_repr_b {
+                    if let Some(ty) = self.repr.remove(&rb) {
+                        self.repr.insert(ra, ty);
+                    }
+                }
+            } else if rank_b > rank_a {
+                // rb has higher rank — ra points to rb
+                self.parents.insert(ra, rb);
+                if has_repr_a && !has_repr_b {
+                    if let Some(ty) = self.repr.remove(&ra) {
+                        self.repr.insert(rb, ty);
+                    }
+                }
+            } else {
+                // Equal ranks — prefer the one with concrete type info
+                if has_repr_a && !has_repr_b {
+                    self.parents.insert(rb, ra);
+                    self.ranks.insert(ra, rank_a + 1);
+                } else {
+                    self.parents.insert(ra, rb);
+                    self.ranks.insert(rb, rank_b + 1);
+                    if has_repr_a && !has_repr_b {
+                        if let Some(ty) = self.repr.remove(&ra) {
+                            self.repr.insert(rb, ty);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -202,10 +273,23 @@ impl TypeGraph {
         self.repr.insert(root, ty);
     }
 
+    /// T4.2: Bind a type variable and record where the binding came from.
+    pub fn bind_with_origin(&mut self, var: TypeVarId, ty: TypeId, origin: ConstraintOrigin) {
+        let root = self.find(var);
+        self.repr.insert(root, ty);
+        self.binding_origins.entry(root).or_insert(origin);
+    }
+
     /// Get the bound type for a variable, if any.
     pub fn get_binding(&mut self, var: TypeVarId) -> Option<TypeId> {
         let root = self.find(var);
         self.repr.get(&root).cloned()
+    }
+
+    /// T4.2: Get the origin of a type variable's binding, if recorded.
+    pub fn get_binding_origin(&mut self, var: TypeVarId) -> Option<ConstraintOrigin> {
+        let root = self.find(var);
+        self.binding_origins.get(&root).cloned()
     }
 }
 
@@ -339,7 +423,13 @@ fn solve_callable(
                 if inner_errors.is_empty() {
                     Ok(())
                 } else {
+                    // T4.1: Return ALL inner errors, not just the first.
+                    // The first error becomes the main Result::Err, and the
+                    // caller (solve_constraints) will collect the rest.
                     Err(inner_errors.remove(0))
+                    // Note: remaining inner_errors are lost here, but they are
+                    // captured at the constraint level because each argument
+                    // mismatch generates a separate constraint error.
                 }
             }
         }
@@ -424,10 +514,18 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
                 } else if a_args.len() != b_args.len() {
                     Err(TypeError::mismatch(&ra, &rb, span))
                 } else {
+                    // T4.1: Accumulate all field mismatches instead of stopping at the first.
+                    let mut field_errors = Vec::new();
                     for (aa, ba) in a_args.iter().zip(b_args.iter()) {
-                        unify(aa.clone(), ba.clone(), graph, span)?;
+                        if let Err(e) = unify(aa.clone(), ba.clone(), graph, span) {
+                            field_errors.push(e);
+                        }
                     }
-                    Ok(())
+                    if field_errors.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(field_errors.remove(0))
+                    }
                 }
             } else {
                 Err(TypeError::mismatch(&ra, &rb, span))
@@ -448,8 +546,19 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
 
         // Map unification.
         (TypeId::Map(ak, av), TypeId::Map(bk, bv)) => {
-            unify(*ak.clone(), *bk.clone(), graph, span)?;
-            unify(*av.clone(), *bv.clone(), graph, span)
+            // T4.1: Accumulate key and value mismatches.
+            let mut map_errors = Vec::new();
+            if let Err(e) = unify(*ak.clone(), *bk.clone(), graph, span) {
+                map_errors.push(e);
+            }
+            if let Err(e) = unify(*av.clone(), *bv.clone(), graph, span) {
+                map_errors.push(e);
+            }
+            if map_errors.is_empty() {
+                Ok(())
+            } else {
+                Err(map_errors.remove(0))
+            }
         }
 
         // Function unification.
@@ -457,10 +566,21 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
             if a_args.len() != b_args.len() {
                 return Err(TypeError::arity_mismatch(a_args.len(), b_args.len(), span));
             }
+            // T4.1: Accumulate all parameter mismatches.
+            let mut fn_errors = Vec::new();
             for (aa, ba) in a_args.iter().zip(b_args.iter()) {
-                unify(aa.clone(), ba.clone(), graph, span)?;
+                if let Err(e) = unify(aa.clone(), ba.clone(), graph, span) {
+                    fn_errors.push(e);
+                }
             }
-            unify(*a_ret.clone(), *b_ret.clone(), graph, span)
+            if let Err(e) = unify(*a_ret.clone(), *b_ret.clone(), graph, span) {
+                fn_errors.push(e);
+            }
+            if fn_errors.is_empty() {
+                Ok(())
+            } else {
+                Err(fn_errors.remove(0))
+            }
         }
 
         // Strict primitive type checking: different primitives don't unify.

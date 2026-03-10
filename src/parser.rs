@@ -107,6 +107,7 @@ impl Parser {
                 | TokenKind::KeywordActor
                 | TokenKind::KeywordErr
                 | TokenKind::KeywordTrait
+                | TokenKind::KeywordExtend
                 | TokenKind::KeywordExtern
                 | TokenKind::Eof => {
                     return;
@@ -125,6 +126,7 @@ impl Parser {
                         | TokenKind::KeywordActor
                         | TokenKind::KeywordErr
                         | TokenKind::KeywordTrait
+                        | TokenKind::KeywordExtend
                         | TokenKind::KeywordExtern
                         | TokenKind::Eof
                         | TokenKind::Identifier(_) => {
@@ -162,6 +164,7 @@ impl Parser {
             TokenKind::KeywordActor => self.parse_actor_def().map(Item::Store),
             TokenKind::KeywordErr => self.parse_error_definition().map(Item::ErrorDefinition),
             TokenKind::KeywordTrait => self.parse_trait_def().map(Item::TraitDefinition),
+            TokenKind::KeywordExtend => self.parse_extension_def().map(Item::Extension),
             TokenKind::Star => self.parse_function(FunctionKind::Free).map(Item::Function),
             TokenKind::BangBang => self.parse_taxonomy_node().map(Item::Taxonomy),
             TokenKind::KeywordMatch => self.parse_expression().map(Item::Expression),
@@ -627,6 +630,61 @@ impl Parser {
                 _ => return Err(self.error_here("unexpected token in type body")),
             }
         }
+    }
+
+    /// S4.5: Parse extension definition
+    /// ```coral
+    /// extend String
+    ///     *word_count()
+    ///         self.split(" ").length()
+    /// ```
+    fn parse_extension_def(&mut self) -> ParseResult<ExtensionDefinition> {
+        let start = self.advance().span; // consume `extend`
+        let (target_type, _) = self.consume_identifier()?;
+
+        self.expect(TokenKind::Newline, "expected newline before extension body")?;
+        let body_start = match self.consume_indent_with_recovery(
+            "expected indentation for extension body",
+            "Indent extension methods with spaces or a tab",
+        ) {
+            Some(span) => span,
+            None => {
+                return Ok(ExtensionDefinition {
+                    target_type,
+                    methods: Vec::new(),
+                    span: start,
+                });
+            }
+        };
+
+        let mut methods = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.check(TokenKind::Dedent) {
+                let span = self.current_span();
+                self.leave_layout_block(span);
+                self.advance();
+                break;
+            }
+            if self.check(TokenKind::Eof) {
+                self.report_missing_dedent(body_start, "missing dedent to close extension body");
+                break;
+            }
+            match self.peek_kind() {
+                TokenKind::Star => {
+                    let func = self.parse_function(FunctionKind::Method)?;
+                    methods.push(func);
+                }
+                _ => return Err(self.error_here("expected method definition (starting with *) in extension body")),
+            }
+        }
+
+        let end_span = self.previous_span();
+        Ok(ExtensionDefinition {
+            target_type,
+            methods,
+            span: start.join(end_span),
+        })
     }
 
     /// Parse trait definition

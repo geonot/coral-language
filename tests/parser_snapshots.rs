@@ -87,6 +87,12 @@ fn item_snapshot(item: &Item) -> Value {
         Item::TraitDefinition(trait_def) => json!({
             "trait_def": trait_def_snapshot(trait_def)
         }),
+        Item::Extension(ext) => json!({
+            "extension": {
+                "target_type": ext.target_type,
+                "methods": ext.methods.iter().map(function_snapshot).collect::<Vec<_>>()
+            }
+        }),
     }
 }
 

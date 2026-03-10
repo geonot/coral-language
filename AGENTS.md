@@ -11,7 +11,7 @@
 - Emit IR:           cargo run -- --emit-ir output.ll examples/hello.coral
 
 ## Test Baseline (update after each session)
-- Tests: 920 pass + 7 runtime-crate M2 tests, 0 failures
+- Tests: 1016 pass + 7 runtime-crate M2 tests, 0 failures
 - Runtime: cargo test -p runtime
 
 ## Key File Locations

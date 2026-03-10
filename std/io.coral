@@ -37,6 +37,26 @@
 *is_directory(path)
 	fs_is_dir(path)
 
+# Get file size in bytes
+*file_size(path)
+	fs_size(path)
+
+# Rename/move a file or directory
+*rename(old_path, new_path)
+	fs_rename(old_path, new_path)
+
+# Copy a file
+*copy(src, dst)
+	fs_copy(src, dst)
+
+# Create directory and all parents
+*make_dirs(path)
+	fs_mkdirs(path)
+
+# Get system temporary directory path
+*temp_dir()
+	fs_temp_dir()
+
 # Read file as list of lines
 *read_lines(path)
 	content is fs_read(path)
@@ -88,6 +108,14 @@
 	starts_with(path, prefix)
 
 # ===== Console I/O =====
+
+# Print to stderr (no newline)
+*eprint(msg)
+	stderr_write(msg)
+
+# Print to stderr with newline
+*eprintln(msg)
+	stderr_write(msg + "\n")
 
 # Print to stdout with newline
 *println(msg)

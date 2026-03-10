@@ -895,6 +895,108 @@ impl<'ctx> CodeGenerator<'ctx> {
             "stdin_read_line" | "read_line" => {
                 Ok(Some(self.call_bridged(self.runtime.stdin_read_line, &[], "stdin_read_line_call")))
             }
+            // L2.4: std.io enhancements
+            "stderr_write" | "eprint" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("stderr_write expects exactly one argument", span));
+                }
+                let msg = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.stderr_write, &[msg], "stderr_write_call")))
+            }
+            "fs_size" | "file_size" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_size expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.fs_size, &[path], "fs_size_call")))
+            }
+            "fs_rename" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("fs_rename expects two arguments (old, new)", span));
+                }
+                let old = self.emit_expression(ctx, &args[0])?;
+                let new = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.fs_rename, &[old, new], "fs_rename_call")))
+            }
+            "fs_copy" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("fs_copy expects two arguments (src, dst)", span));
+                }
+                let src = self.emit_expression(ctx, &args[0])?;
+                let dst = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.fs_copy, &[src, dst], "fs_copy_call")))
+            }
+            "fs_mkdirs" | "make_dirs" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("fs_mkdirs expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.fs_mkdirs, &[path], "fs_mkdirs_call")))
+            }
+            "fs_temp_dir" | "temp_dir" => {
+                Ok(Some(self.call_bridged(self.runtime.fs_temp_dir, &[], "fs_temp_dir_call")))
+            }
+            // L2.5: std.process enhancements
+            "process_exec" | "exec" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("process_exec expects two arguments (cmd, args_list)", span));
+                }
+                let cmd = self.emit_expression(ctx, &args[0])?;
+                let args_val = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.process_exec, &[cmd, args_val], "process_exec_call")))
+            }
+            "process_cwd" | "cwd" => {
+                Ok(Some(self.call_bridged(self.runtime.process_cwd, &[], "process_cwd_call")))
+            }
+            "process_chdir" | "chdir" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("process_chdir expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.process_chdir, &[path], "process_chdir_call")))
+            }
+            "process_pid" => {
+                Ok(Some(self.call_bridged(self.runtime.process_pid, &[], "process_pid_call")))
+            }
+            "process_hostname" | "hostname" => {
+                Ok(Some(self.call_bridged(self.runtime.process_hostname, &[], "process_hostname_call")))
+            }
+            // L4.2: std.path operations
+            "path_normalize" | "normalize" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("path_normalize expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.path_normalize, &[path], "path_normalize_call")))
+            }
+            "path_resolve" | "resolve" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("path_resolve expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.path_resolve, &[path], "path_resolve_call")))
+            }
+            "path_is_absolute" | "is_absolute" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("path_is_absolute expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.path_is_absolute, &[path], "path_is_absolute_call")))
+            }
+            "path_parent" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("path_parent expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.path_parent, &[path], "path_parent_call")))
+            }
+            "path_stem" | "stem" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("path_stem expects exactly one argument", span));
+                }
+                let path = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.path_stem, &[path], "path_stem_call")))
+            }
             // List extensions
             "list_contains" => {
                 if args.len() != 2 {

@@ -1,0 +1,56 @@
+# std/path.coral - Path manipulation utilities
+#
+# Path operations backed by Rust's std::path for correct handling
+# of edge cases (trailing slashes, .. components, etc.)
+
+# ===== Path Components =====
+
+# Get parent directory
+*parent(path)
+	path_parent(path)
+
+# Get filename component (from std/io, re-exported here)
+*filename(path)
+	i is path.length - 1
+	i >= 0 ? (path.get(i) != "/" ? filename_helper(path, i) ! "") ! ""
+
+*filename_helper(path, i)
+	i < 0 ? "" ! (path.get(i) == "/" ? path.slice(i + 1, path.length) ! filename_helper(path, i - 1))
+
+# Get filename without extension
+*stem(path)
+	path_stem(path)
+
+# Get file extension (from std/io, using runtime for correctness)
+*extension(path)
+	name is filename(path)
+	i is name.length - 1
+	find_ext(name, i)
+
+*find_ext(name, i)
+	i <= 0 ? "" ! (name.get(i) == "." ? name.slice(i + 1, name.length) ! find_ext(name, i - 1))
+
+# ===== Path Manipulation =====
+
+# Join two path components
+*join(a, b)
+	a_end is a.get(a.length - 1)
+	a_end == "/" ? a + b ! a + "/" + b
+
+# Normalize path (resolve . and .. lexically)
+*normalize(path)
+	path_normalize(path)
+
+# Resolve to absolute canonical path
+*resolve(path)
+	path_resolve(path)
+
+# ===== Path Queries =====
+
+# Check if path is absolute
+*is_absolute(path)
+	path_is_absolute(path)
+
+# Check if path is relative
+*is_relative(path)
+	path_is_absolute(path) == false

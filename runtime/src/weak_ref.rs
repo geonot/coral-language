@@ -313,4 +313,85 @@ mod tests {
         let weak = WeakRef::new(ptr::null_mut());
         assert!(weak.is_none());
     }
+
+    #[test]
+    fn test_weak_ref_clone_gets_unique_id() {
+        let value = coral_make_number(99.0);
+        let weak = WeakRef::new(value).unwrap();
+        let cloned = weak.clone();
+
+        // Each WeakRef should have a distinct ID
+        assert_ne!(weak.id(), cloned.id(), "clone must get a unique ID");
+        // Both should be alive
+        assert!(weak.is_alive());
+        assert!(cloned.is_alive());
+
+        drop(weak);
+        drop(cloned);
+        unsafe { coral_value_release(value); }
+    }
+
+    #[test]
+    fn test_weak_ref_clone_survives_original_drop() {
+        let value = coral_make_number(7.0);
+        let original = WeakRef::new(value).unwrap();
+        let cloned = original.clone();
+
+        // Drop the original — clone should still be alive
+        drop(original);
+        assert!(cloned.is_alive(), "clone must survive after original is dropped");
+
+        // Upgrade should still succeed since the target value is alive
+        let upgraded = cloned.upgrade();
+        assert!(upgraded.is_some(), "upgrade should succeed on live clone");
+
+        drop(cloned);
+        unsafe {
+            if let Some(up) = upgraded {
+                coral_value_release(up);
+            }
+            coral_value_release(value);
+        }
+    }
+
+    #[test]
+    fn test_weak_ref_registry_cleanup_after_all_clones_dropped() {
+        let value = coral_make_number(3.14);
+        let addr = value as usize;
+        let w1 = WeakRef::new(value).unwrap();
+        let w2 = w1.clone();
+        let w3 = w2.clone();
+
+        // All three point to the same target
+        assert!(w1.is_alive());
+        assert!(w2.is_alive());
+        assert!(w3.is_alive());
+
+        // Invalidate the target
+        super::notify_value_deallocated(value);
+
+        // All should report not alive
+        assert!(!w1.is_alive());
+        assert!(!w2.is_alive());
+        assert!(!w3.is_alive());
+
+        // Drop two — registry entry should NOT be removed yet (one remaining)
+        drop(w1);
+        drop(w2);
+        {
+            let reg = registry().lock().unwrap();
+            assert!(reg.targets.contains_key(&addr),
+                "entry should still exist with one weak ref remaining");
+        }
+
+        // Drop last — entry should be cleaned up
+        drop(w3);
+        {
+            let reg = registry().lock().unwrap();
+            assert!(!reg.targets.contains_key(&addr),
+                "entry should be removed after all weak refs dropped");
+        }
+
+        unsafe { coral_value_release(value); }
+    }
 }

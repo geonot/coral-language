@@ -297,22 +297,48 @@ impl ModuleLoader {
     ) -> anyhow::Result<()> {
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
-        // Circular import detection
+        // Circular import detection with line numbers (CC3.4)
         if stack.contains(&canonical) {
             let cycle_start = stack.iter().position(|p| p == &canonical).unwrap();
-            let cycle_modules: Vec<_> = stack[cycle_start..]
+            let cycle_paths: Vec<_> = stack[cycle_start..]
                 .iter()
                 .chain(std::iter::once(&canonical))
-                .map(|p| {
-                    p.file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| p.display().to_string())
-                })
                 .collect();
+
+            // Build enriched cycle description with line numbers
+            let mut cycle_desc = Vec::new();
+            for window in cycle_paths.windows(2) {
+                let from = &window[0];
+                let to = &window[1];
+                let from_name = from.file_stem().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| from.display().to_string());
+                let to_name = to.file_stem().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| to.display().to_string());
+                // Find the line number of the `use` directive
+                let line_info = Self::find_use_line_number(from, &to_name);
+                match line_info {
+                    Some(line) => cycle_desc.push(format!("{} (line {}) -> {}", from_name, line, to_name)),
+                    None => cycle_desc.push(format!("{} -> {}", from_name, to_name)),
+                }
+            }
+
+            let cycle_count = cycle_paths.len() - 1;
+            let suggestion = if cycle_count == 2 {
+                let a_name = cycle_paths[0].file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let b_name = cycle_paths[1].file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                format!(
+                    "Suggestion: Extract shared code from `{}` and `{}` into a common module that both can import.",
+                    a_name, b_name
+                )
+            } else {
+                "Suggestion: Break the cycle by extracting shared code into a common module, or restructure imports.".to_string()
+            };
+
             bail!(
-                "circular import detected: {}\n\
-                 Hint: Consider restructuring to break the cycle, or extract shared code to a common module.",
-                cycle_modules.join(" -> ")
+                "circular import detected:\n  {}\n\n{}\n\
+                 Hint: Consider restructuring to break the cycle.",
+                cycle_desc.join("\n  "),
+                suggestion
             );
         }
 
@@ -430,24 +456,46 @@ impl ModuleLoader {
     ) -> anyhow::Result<String> {
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         
-        // Circular import detection with detailed error - check stack first!
+        // Circular import detection with detailed error and line numbers (CC3.4)
         if stack.contains(&canonical) {
             let cycle_start = stack.iter().position(|p| p == &canonical).unwrap();
-            let cycle_modules: Vec<_> = stack[cycle_start..]
+            let cycle_paths: Vec<_> = stack[cycle_start..]
                 .iter()
                 .chain(std::iter::once(&canonical))
-                .map(|p| {
-                    // Show module name instead of full path for readability
-                    p.file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| p.display().to_string())
-                })
                 .collect();
+
+            let mut cycle_desc = Vec::new();
+            for window in cycle_paths.windows(2) {
+                let from = &window[0];
+                let to = &window[1];
+                let from_name = from.file_stem().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| from.display().to_string());
+                let to_name = to.file_stem().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| to.display().to_string());
+                let line_info = Self::find_use_line_number(from, &to_name);
+                match line_info {
+                    Some(line) => cycle_desc.push(format!("{} (line {}) -> {}", from_name, line, to_name)),
+                    None => cycle_desc.push(format!("{} -> {}", from_name, to_name)),
+                }
+            }
+
+            let cycle_count = cycle_paths.len() - 1;
+            let suggestion = if cycle_count == 2 {
+                let a_name = cycle_paths[0].file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let b_name = cycle_paths[1].file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                format!(
+                    "Suggestion: Extract shared code from `{}` and `{}` into a common module that both can import.",
+                    a_name, b_name
+                )
+            } else {
+                "Suggestion: Break the cycle by extracting shared code into a common module, or restructure imports.".to_string()
+            };
             
             bail!(
-                "circular import detected: {}\n\
-                 Hint: Consider restructuring to break the cycle, or extract shared code to a common module.",
-                cycle_modules.join(" -> ")
+                "circular import detected:\n  {}\n\n{}\n\
+                 Hint: Consider restructuring to break the cycle.",
+                cycle_desc.join("\n  "),
+                suggestion
             );
         }
         
@@ -521,6 +569,25 @@ impl ModuleLoader {
         self.update_module_info(&canonical, &expanded, &module_deps);
         
         Ok(expanded)
+    }
+
+    /// CC3.4: Find the line number of a `use` directive that imports a given module.
+    fn find_use_line_number(file_path: &Path, target_module: &str) -> Option<usize> {
+        let source = fs::read_to_string(file_path).ok()?;
+        for (i, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") {
+                let module_part = trimmed[4..].trim();
+                // Check if this use directive references the target module
+                // Handle both simple (`use b`) and qualified (`use std.math`) references
+                let module_name = module_part.split('.').last().unwrap_or(module_part);
+                let module_name = module_name.split('{').next().unwrap_or(module_name).trim();
+                if module_name.eq_ignore_ascii_case(target_module) || module_part == target_module {
+                    return Some(i + 1); // 1-based line number
+                }
+            }
+        }
+        None
     }
 
     fn parse_use_directive(line: &str) -> Option<ImportDirective> {

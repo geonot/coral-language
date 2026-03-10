@@ -48,3 +48,33 @@
 # Set environment variable
 *set_env(name, value)
 	env_set(name, value)
+
+# ===== Command Execution =====
+
+# Execute a command with args list, returns map {stdout, stderr, exit_code}
+*exec(cmd, args)
+	process_exec(cmd, args)
+
+# Run a simple command with no args
+*run(cmd)
+	process_exec(cmd, [])
+
+# ===== Working Directory =====
+
+# Get current working directory
+*cwd()
+	process_cwd()
+
+# Change working directory (returns true on success)
+*chdir(path)
+	process_chdir(path)
+
+# ===== Process Info =====
+
+# Get current process ID
+*pid()
+	process_pid()
+
+# Get system hostname
+*hostname()
+	process_hostname()

@@ -8,8 +8,71 @@
 
 use std::collections::{HashSet, HashMap, VecDeque};
 use std::sync::{Mutex, atomic::Ordering};
+use std::sync::atomic::AtomicBool;
+use std::cell::RefCell;
 
 use crate::{ValueHandle, ValueTag, Value};
+
+// ═══════════════════════════════════════════════════════════════════════
+// M3.1: Thread-Local Cycle Root Buffers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Threshold: when local buffer reaches this many entries, flush to global.
+const LOCAL_BUFFER_THRESHOLD: usize = 64;
+
+/// Flag: set to true when a collection is pending and threads should flush.
+static COLLECTION_PENDING: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// Thread-local buffer of possible cycle roots, avoiding global lock contention.
+    static LOCAL_ROOTS: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(LOCAL_BUFFER_THRESHOLD));
+}
+
+/// Flush the current thread's local root buffer into the global CycleDetector.
+/// Must be called with the global lock NOT held (acquires it internally).
+fn flush_local_roots() {
+    LOCAL_ROOTS.with(|cell| {
+        let mut local = cell.borrow_mut();
+        if local.is_empty() {
+            return;
+        }
+        if let Ok(mut det) = detector().lock() {
+            for addr in local.drain(..) {
+                let handle = addr as ValueHandle;
+                if handle.is_null() {
+                    continue;
+                }
+                // Check that the value is still a valid container
+                let value = unsafe { &*handle };
+                if !is_container(value) {
+                    continue;
+                }
+                // M3.2: Read epoch before mutably borrowing info
+                let epoch = det.current_epoch;
+                let info = det.info.entry(addr).or_default();
+                if info.color != Color::Purple {
+                    info.color = Color::Purple;
+                    info.birth_epoch = epoch;
+                    if !info.buffered {
+                        info.buffered = true;
+                    }
+                }
+                // M3.2: New roots go to young generation
+                det.young_roots.insert(addr);
+                det.roots.insert(addr);
+            }
+        }
+    });
+}
+
+/// Flush ALL thread-local buffers by signaling threads and flushing our own.
+/// Called before collection to ensure all roots are visible to the collector.
+fn flush_all_thread_local_roots() {
+    // Signal other threads to flush on their next possible_root call
+    COLLECTION_PENDING.store(true, Ordering::Release);
+    // Flush our own buffer immediately
+    flush_local_roots();
+}
 
 /// Color markers for cycle detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,8 +90,10 @@ enum Color {
 /// Metadata for cycle detection tracking.
 struct CycleInfo {
     color: Color,
-    /// Number of times this value has been decremented since last collection
+    /// Whether this root is buffered for collection
     buffered: bool,
+    /// M3.2: Epoch when this root was first inserted
+    birth_epoch: u64,
 }
 
 impl Default for CycleInfo {
@@ -36,31 +101,51 @@ impl Default for CycleInfo {
         Self {
             color: Color::Black,
             buffered: false,
+            birth_epoch: 0,
         }
     }
 }
+
+/// M3.2: How often to run a full (old + young) collection.
+/// Every FULL_COLLECTION_INTERVAL-th collection scans both generations.
+const FULL_COLLECTION_INTERVAL: u64 = 5;
 
 /// Global cycle detector state.
 struct CycleDetector {
     /// Metadata for tracked values
     info: HashMap<usize, CycleInfo>,
-    /// Possible cycle roots (values with decremented refcount)
+    /// M3.2: Young generation roots (added since last collection)
+    young_roots: HashSet<usize>,
+    /// M3.2: Old generation roots (survived at least one young-gen collection)
+    old_roots: HashSet<usize>,
+    /// Unified roots view (for backward-compat with mark/scan/collect phases)
     roots: HashSet<usize>,
     /// Whether cycle collection is currently in progress
     collecting: bool,
     /// Statistics
     cycles_detected: u64,
     values_collected: u64,
+    /// M3.2: Current epoch counter, incremented at each collection
+    current_epoch: u64,
+    /// M3.2: Number of young-generation collections performed
+    young_collections: u64,
+    /// M3.2: Number of full (both generations) collections performed
+    full_collections: u64,
 }
 
 impl Default for CycleDetector {
     fn default() -> Self {
         Self {
             info: HashMap::new(),
+            young_roots: HashSet::new(),
+            old_roots: HashSet::new(),
             roots: HashSet::new(),
             collecting: false,
             cycles_detected: 0,
             values_collected: 0,
+            current_epoch: 0,
+            young_collections: 0,
+            full_collections: 0,
         }
     }
 }
@@ -155,6 +240,7 @@ fn get_children(handle: ValueHandle) -> Vec<ValueHandle> {
 
 /// Called when a container value's refcount is decremented.
 /// This marks the value as a potential cycle root.
+/// M3.1: Uses thread-local buffer to avoid global lock contention on the hot path.
 pub fn possible_root(handle: ValueHandle) {
     if handle.is_null() {
         return;
@@ -166,18 +252,22 @@ pub fn possible_root(handle: ValueHandle) {
     }
     
     let addr = handle as usize;
-    
-    if let Ok(mut det) = detector().lock() {
-        let info = det.info.entry(addr).or_default();
-        
-        if info.color != Color::Purple {
-            info.color = Color::Purple;
-            if !info.buffered {
-                info.buffered = true;
-                det.roots.insert(addr);
-            }
-        }
+
+    // If a collection is pending, flush our local buffer first
+    if COLLECTION_PENDING.load(Ordering::Acquire) {
+        flush_local_roots();
+        COLLECTION_PENDING.store(false, Ordering::Release);
     }
+
+    LOCAL_ROOTS.with(|cell| {
+        let mut local = cell.borrow_mut();
+        local.push(addr);
+        if local.len() >= LOCAL_BUFFER_THRESHOLD {
+            // Buffer full — flush to global under lock
+            drop(local); // release borrow before flush_local_roots re-borrows
+            flush_local_roots();
+        }
+    });
 }
 
 /// Called when a value is about to be freed (refcount reached 0).
@@ -190,19 +280,41 @@ pub fn notify_value_freed(handle: ValueHandle) {
     let addr = handle as usize;
     let mut det = detector().lock().unwrap();
     det.roots.remove(&addr);
+    // M3.2: Remove from both generations
+    det.young_roots.remove(&addr);
+    det.old_roots.remove(&addr);
     det.info.remove(&addr);
 }
 
 /// Run a cycle collection phase.
-/// This should be called periodically or when memory pressure is high.
+/// M3.2: Uses generational collection — young roots are collected frequently,
+/// old roots only every FULL_COLLECTION_INTERVAL-th collection.
 pub fn collect_cycles() {
+    // M3.1: Flush all thread-local root buffers before collecting
+    flush_all_thread_local_roots();
+
     // Check if already collecting to prevent recursion
+    let is_full_collection;
     {
         let mut det = detector().lock().unwrap();
         if det.collecting {
             return;
         }
         det.collecting = true;
+        det.current_epoch += 1;
+
+        // M3.2: Decide if this is a full or young-only collection
+        is_full_collection = (det.current_epoch % FULL_COLLECTION_INTERVAL) == 0;
+
+        if is_full_collection {
+            // Full collection: scan both generations
+            det.roots = det.young_roots.union(&det.old_roots).copied().collect();
+            det.full_collections += 1;
+        } else {
+            // Young-only collection: scan only young roots
+            det.roots = det.young_roots.clone();
+            det.young_collections += 1;
+        }
     }
 
     // Mark candidates
@@ -214,9 +326,18 @@ pub fn collect_cycles() {
     // Collect garbage cycles
     collect_roots();
     
-    // Clear collecting flag
+    // M3.2: Promote surviving young roots to old generation
     {
         let mut det = detector().lock().unwrap();
+        // Roots that survived this collection get promoted to old
+        let surviving_young: Vec<usize> = det.young_roots.iter()
+            .filter(|addr| det.info.contains_key(addr))
+            .copied()
+            .collect();
+        for addr in surviving_young {
+            det.old_roots.insert(addr);
+        }
+        det.young_roots.clear();
         det.collecting = false;
     }
 }
@@ -467,10 +588,18 @@ pub fn cycle_stats() -> (u64, u64) {
 
 /// Clear cycle detection state (for testing).
 pub fn reset_cycle_detector() {
+    // M3.1: Clear thread-local buffer too
+    LOCAL_ROOTS.with(|cell| cell.borrow_mut().clear());
+    COLLECTION_PENDING.store(false, Ordering::Release);
     let mut det = detector().lock().unwrap();
     det.info.clear();
     det.roots.clear();
+    det.young_roots.clear();
+    det.old_roots.clear();
     det.collecting = false;
+    det.current_epoch = 0;
+    det.young_collections = 0;
+    det.full_collections = 0;
 }
 
 // FFI exports
@@ -526,6 +655,12 @@ pub fn auto_cycle_collection_enabled() -> bool {
     AUTO_CYCLE_COLLECTION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// M3.2: Get generational collection statistics.
+pub fn generational_stats() -> (u64, u64) {
+    let det = detector().lock().unwrap();
+    (det.young_collections, det.full_collections)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,9 +679,12 @@ mod tests {
         reset_cycle_detector();
         let num = coral_make_number(42.0);
         possible_root(num);
+        // M3.1: Flush local buffer, then check global
+        flush_local_roots();
         
         let det = detector().lock().unwrap();
         assert!(det.roots.is_empty());
+        drop(det);
         
         unsafe { crate::coral_value_release(num); }
     }
@@ -558,6 +696,8 @@ mod tests {
         let list = coral_make_list(&num as *const _, 1);
         
         possible_root(list);
+        // M3.1: Flush local buffer so roots appear in global set
+        flush_local_roots();
         
         {
             let det = detector().lock().unwrap();
@@ -589,6 +729,7 @@ mod tests {
         }
         
         // Mark as possible roots and collect
+        // M3.1: collect_cycles() flushes local buffers automatically
         possible_root(root);
         possible_root(child1);
         possible_root(child2);
@@ -606,5 +747,147 @@ mod tests {
             crate::coral_value_release(child1);
             crate::coral_value_release(child2);
         }
+    }
+
+    // M3.1: Test thread-local buffering
+    #[test]
+    fn test_thread_local_buffering() {
+        reset_cycle_detector();
+        
+        // Create several lists and add as possible roots
+        let lists: Vec<_> = (0..5).map(|_| coral_make_list(std::ptr::null(), 0)).collect();
+        for &list in &lists {
+            possible_root(list);
+        }
+        
+        // Before flushing, global roots should be empty (under threshold)
+        {
+            let det = detector().lock().unwrap();
+            assert!(det.roots.is_empty(), "Roots should be buffered locally, not in global set");
+        }
+        
+        // After flushing, all 5 should appear
+        flush_local_roots();
+        {
+            let det = detector().lock().unwrap();
+            assert_eq!(det.roots.len(), 5, "All 5 roots should be in global set after flush");
+        }
+        
+        // Clean up
+        for list in lists {
+            unsafe { crate::coral_value_release(list); }
+        }
+    }
+
+    #[test]
+    fn test_threshold_auto_flush() {
+        reset_cycle_detector();
+        
+        // Create LOCAL_BUFFER_THRESHOLD lists to trigger auto-flush
+        let lists: Vec<_> = (0..LOCAL_BUFFER_THRESHOLD)
+            .map(|_| coral_make_list(std::ptr::null(), 0))
+            .collect();
+        for &list in &lists {
+            possible_root(list);
+        }
+        
+        // Should have auto-flushed when threshold was reached
+        {
+            let det = detector().lock().unwrap();
+            assert_eq!(det.roots.len(), LOCAL_BUFFER_THRESHOLD,
+                "Roots should auto-flush at threshold");
+        }
+        
+        // Clean up
+        for list in lists {
+            unsafe { crate::coral_value_release(list); }
+        }
+    }
+
+    #[test]
+    fn test_collection_flushes_local_buffers() {
+        reset_cycle_detector();
+        
+        // Add a root but don't manually flush
+        let list = coral_make_list(std::ptr::null(), 0);
+        possible_root(list);
+        
+        // collect_cycles() should flush and process all roots
+        collect_cycles();
+        
+        // After collection, the root should have been processed
+        // The local buffer should be empty
+        LOCAL_ROOTS.with(|cell| {
+            assert!(cell.borrow().is_empty(), "Local buffer should be empty after collection");
+        });
+        
+        unsafe { crate::coral_value_release(list); }
+    }
+
+    // M3.2: Generational hypothesis / epoch tracking tests
+
+    #[test]
+    fn test_young_roots_tracked() {
+        reset_cycle_detector();
+        
+        let list = coral_make_list(std::ptr::null(), 0);
+        possible_root(list);
+        flush_local_roots();
+        
+        {
+            let det = detector().lock().unwrap();
+            assert!(det.young_roots.contains(&(list as usize)),
+                "New root should be in young generation");
+            assert!(!det.old_roots.contains(&(list as usize)),
+                "New root should NOT be in old generation");
+        }
+        
+        unsafe { crate::coral_value_release(list); }
+    }
+
+    #[test]
+    fn test_promotion_to_old() {
+        reset_cycle_detector();
+        
+        // Create a list that will survive collection (has refcount > 0)
+        let list = coral_make_list(std::ptr::null(), 0);
+        unsafe { coral_value_retain(list); } // extra retain so it survives
+        possible_root(list);
+        
+        // Run a young collection — root survives and gets promoted
+        collect_cycles();
+        
+        {
+            let det = detector().lock().unwrap();
+            assert!(det.old_roots.contains(&(list as usize)),
+                "Surviving root should be promoted to old generation");
+            assert!(det.young_roots.is_empty(),
+                "Young roots should be cleared after collection");
+        }
+        
+        unsafe {
+            crate::coral_value_release(list);
+            crate::coral_value_release(list);
+        }
+    }
+
+    #[test]
+    fn test_generational_stats() {
+        reset_cycle_detector();
+        
+        let (young, full) = generational_stats();
+        assert_eq!(young, 0);
+        assert_eq!(full, 0);
+        
+        // Run collections — first 4 are young, 5th is full
+        for _ in 0..FULL_COLLECTION_INTERVAL {
+            collect_cycles();
+        }
+        
+        let (young, full) = generational_stats();
+        assert_eq!(young, FULL_COLLECTION_INTERVAL - 1,
+            "Should have {} young collections", FULL_COLLECTION_INTERVAL - 1);
+        assert_eq!(full, 1,
+            "Should have 1 full collection");
     }
 }

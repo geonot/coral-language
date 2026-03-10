@@ -191,6 +191,25 @@ pub struct RuntimeBindings<'ctx> {
     pub fs_is_dir: FunctionValue<'ctx>,
     // stdin
     pub stdin_read_line: FunctionValue<'ctx>,
+    // L2.4: std.io enhancements
+    pub stderr_write: FunctionValue<'ctx>,
+    pub fs_size: FunctionValue<'ctx>,
+    pub fs_rename: FunctionValue<'ctx>,
+    pub fs_copy: FunctionValue<'ctx>,
+    pub fs_mkdirs: FunctionValue<'ctx>,
+    pub fs_temp_dir: FunctionValue<'ctx>,
+    // L4.2: std.path operations
+    pub path_normalize: FunctionValue<'ctx>,
+    pub path_resolve: FunctionValue<'ctx>,
+    pub path_is_absolute: FunctionValue<'ctx>,
+    pub path_parent: FunctionValue<'ctx>,
+    pub path_stem: FunctionValue<'ctx>,
+    // L2.5: Process extensions
+    pub process_exec: FunctionValue<'ctx>,
+    pub process_cwd: FunctionValue<'ctx>,
+    pub process_chdir: FunctionValue<'ctx>,
+    pub process_pid: FunctionValue<'ctx>,
+    pub process_hostname: FunctionValue<'ctx>,
     // List extensions
     pub list_contains: FunctionValue<'ctx>,
     pub list_index_of: FunctionValue<'ctx>,
@@ -1230,6 +1249,92 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // L2.4: std.io enhancements
+        let stderr_write = module.add_function(
+            "coral_stderr_write",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let fs_size = module.add_function(
+            "coral_fs_size",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let fs_rename = module.add_function(
+            "coral_fs_rename",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let fs_copy = module.add_function(
+            "coral_fs_copy",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let fs_mkdirs = module.add_function(
+            "coral_fs_mkdirs",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let fs_temp_dir = module.add_function(
+            "coral_fs_temp_dir",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+
+        // L2.5: Process extensions
+        let process_exec = module.add_function(
+            "coral_process_exec",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let process_cwd = module.add_function(
+            "coral_process_cwd",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let process_chdir = module.add_function(
+            "coral_process_chdir",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let process_pid = module.add_function(
+            "coral_process_pid",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let process_hostname = module.add_function(
+            "coral_process_hostname",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+
+        // L4.2: std.path operations
+        let path_normalize = module.add_function(
+            "coral_path_normalize",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let path_resolve = module.add_function(
+            "coral_path_resolve",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let path_is_absolute = module.add_function(
+            "coral_path_is_absolute",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let path_parent = module.add_function(
+            "coral_path_parent",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let path_stem = module.add_function(
+            "coral_path_stem",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         // List extensions
         let list_contains = module.add_function(
             "coral_list_contains",
@@ -1840,6 +1945,22 @@ impl<'ctx> RuntimeBindings<'ctx> {
             fs_delete,
             fs_is_dir,
             stdin_read_line,
+            stderr_write,
+            fs_size,
+            fs_rename,
+            fs_copy,
+            fs_mkdirs,
+            fs_temp_dir,
+            process_exec,
+            process_cwd,
+            process_chdir,
+            process_pid,
+            process_hostname,
+            path_normalize,
+            path_resolve,
+            path_is_absolute,
+            path_parent,
+            path_stem,
             list_contains,
             list_index_of,
             list_reverse,

@@ -36,6 +36,14 @@ impl PlaceholderLowerer {
             Item::ExternFunction(_) => Ok(item),
             Item::ErrorDefinition(_) => Ok(item),  // Error definitions are already in final form
             Item::TraitDefinition(_) => Ok(item),  // Trait definitions are already in final form
+            Item::Extension(mut ext) => {
+                let mut lowered_methods = Vec::new();
+                for method in ext.methods {
+                    lowered_methods.push(self.lower_function(method)?);
+                }
+                ext.methods = lowered_methods;
+                Ok(Item::Extension(ext))
+            }
             Item::Expression(expr) => {
                 let expr = self
                     .lower_expression(expr)?

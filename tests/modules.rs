@@ -338,7 +338,68 @@ fn load_modules_detects_circular_imports() {
     let mut loader = ModuleLoader::new(vec![]);
     let result = loader.load_modules(&a);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("circular import"));
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("circular import"), "should contain 'circular import': {}", err);
+    // CC3.4: enhanced error messages include line numbers
+    assert!(err.contains("line 1"), "should include line number for 'use' directive: {}", err);
+}
+
+#[test]
+fn load_modules_circular_triangle_shows_line_numbers() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let a = temp_dir.path().join("alpha.coral");
+    let b = temp_dir.path().join("beta.coral");
+    let c = temp_dir.path().join("gamma.coral");
+    std::fs::write(&a, "use beta\n*from_alpha()\n    1\n").unwrap();
+    std::fs::write(&b, "use gamma\n*from_beta()\n    2\n").unwrap();
+    std::fs::write(&c, "use alpha\n*from_gamma()\n    3\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let result = loader.load_modules(&a);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("circular import"), "msg: {}", err);
+    assert!(err.contains("alpha"), "should mention alpha: {}", err);
+    assert!(err.contains("beta"), "should mention beta: {}", err);
+    assert!(err.contains("gamma"), "should mention gamma: {}", err);
+    assert!(err.contains("restructur"), "should suggest restructuring: {}", err);
+}
+
+#[test]
+fn load_modules_circular_import_suggestion_for_pair() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let a = temp_dir.path().join("foo.coral");
+    let b = temp_dir.path().join("bar.coral");
+    std::fs::write(&a, "use bar\n*foo_fn()\n    1\n").unwrap();
+    std::fs::write(&b, "use foo\n*bar_fn()\n    2\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let result = loader.load_modules(&a);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    // For a 2-module cycle, should suggest extracting shared code with module names
+    assert!(err.contains("Suggestion:"), "should include suggestion: {}", err);
+    assert!(err.contains("foo") && err.contains("bar"),
+        "suggestion should name both modules: {}", err);
+}
+
+#[test]
+fn load_modules_circular_line_number_not_first_line() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let a = temp_dir.path().join("x.coral");
+    let b = temp_dir.path().join("y.coral");
+    // use directive on line 3 (not line 1)
+    std::fs::write(&a, "*helper()\n    42\nuse y\n*x_fn()\n    helper()\n").unwrap();
+    std::fs::write(&b, "use x\n*y_fn()\n    1\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let result = loader.load_modules(&a);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("circular import"), "msg: {}", err);
+    // The use directive in x.coral is on line 3
+    assert!(err.contains("line 3") || err.contains("line 1"),
+        "should include a line number: {}", err);
 }
 
 #[test]

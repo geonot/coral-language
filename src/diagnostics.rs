@@ -60,6 +60,8 @@ pub struct Diagnostic {
     pub severity: Severity,
     /// CC2.4: Optional warning category for filtering.
     pub category: Option<WarningCategory>,
+    /// T4.1: Related diagnostics (additional type errors from the same compilation).
+    pub related: Vec<Diagnostic>,
 }
 
 impl Diagnostic {
@@ -70,6 +72,7 @@ impl Diagnostic {
             help: None,
             severity: Severity::Error,
             category: None,
+            related: Vec::new(),
         }
     }
 
@@ -78,6 +81,7 @@ impl Diagnostic {
             message: message.into(),
             span,
             help: None,
+            related: Vec::new(),
             severity: Severity::Warning,
             category: None,
         }
@@ -91,6 +95,7 @@ impl Diagnostic {
             help: None,
             severity: Severity::Warning,
             category: Some(category),
+            related: Vec::new(),
         }
     }
 
@@ -232,6 +237,30 @@ impl fmt::Display for CompileError {
         }
         if let Some(help) = &self.diagnostic.help {
             write!(f, "\nhelp: {}", help)?;
+        }
+        // T4.1: Display related diagnostics (additional type errors).
+        for related in &self.diagnostic.related {
+            if let Some(src) = &self.source {
+                let idx = LineIndex::new(src);
+                write!(
+                    f,
+                    "\n{} error at {}: {}",
+                    stage_name,
+                    idx.fmt_span(related.span),
+                    related.message
+                )?;
+            } else {
+                write!(
+                    f,
+                    "\n{} error at {}: {}",
+                    stage_name,
+                    related.span,
+                    related.message
+                )?;
+            }
+            if let Some(help) = &related.help {
+                write!(f, "\nhelp: {}", help)?;
+            }
         }
         Ok(())
     }

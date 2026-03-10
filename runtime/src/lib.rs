@@ -2105,7 +2105,7 @@ mod tests {
 
         let counter = Arc::new(AtomicUsize::new(0));
         let env_box = Box::new(counter.clone());
-        let closure = coral_make_closure(Some(invoke), Some(release), Box::into_raw(env_box) as *mut c_void);
+        let closure = coral_make_closure(Some(invoke), Some(release), Box::into_raw(env_box) as *mut c_void, 0);
         let actor = coral_actor_spawn(closure);
         assert_ne!(actor, ptr::null_mut());
 
@@ -2166,6 +2166,7 @@ mod tests {
                 Some(test_invoke),
                 Some(test_release),
                 env as *mut c_void,
+                0,
             );
             let result = coral_closure_invoke(closure, ptr::null(), 0);
             assert_eq!(coral_value_as_number(result), 7.0);
@@ -2789,9 +2790,9 @@ mod tests {
             }
         }
 
-        let double = coral_make_closure(Some(double_invoke), None, ptr::null_mut());
-        let even = coral_make_closure(Some(even_predicate), None, ptr::null_mut());
-        let sum = coral_make_closure(Some(sum_invoke), None, ptr::null_mut());
+        let double = coral_make_closure(Some(double_invoke), None, ptr::null_mut(), 0);
+        let even = coral_make_closure(Some(even_predicate), None, ptr::null_mut(), 0);
+        let sum = coral_make_closure(Some(sum_invoke), None, ptr::null_mut(), 0);
 
         let mapped = coral_list_map(list, double);
         let filtered = coral_list_filter(mapped, even);

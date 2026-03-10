@@ -356,6 +356,203 @@ fn e2e_fs_mkdir_is_dir() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 5b. L2.4: ENHANCED FILE SYSTEM + STDERR OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e2e_fs_size() {
+    assert_output(r#"
+*main()
+    fs_write("/tmp/coral_test_e2e_size.txt", "hello")
+    sz is fs_size("/tmp/coral_test_e2e_size.txt")
+    log(sz)
+    fs_delete("/tmp/coral_test_e2e_size.txt")
+"#, &["5"]);
+}
+
+#[test]
+fn e2e_fs_rename() {
+    assert_output(r#"
+*main()
+    fs_write("/tmp/coral_test_e2e_rename_src.txt", "rename me")
+    fs_rename("/tmp/coral_test_e2e_rename_src.txt", "/tmp/coral_test_e2e_rename_dst.txt")
+    content is fs_read("/tmp/coral_test_e2e_rename_dst.txt")
+    log(bytes_to_string(content))
+    log(fs_exists("/tmp/coral_test_e2e_rename_src.txt"))
+    fs_delete("/tmp/coral_test_e2e_rename_dst.txt")
+"#, &["rename me", "false"]);
+}
+
+#[test]
+fn e2e_fs_copy() {
+    assert_output(r#"
+*main()
+    fs_write("/tmp/coral_test_e2e_copy_src.txt", "copy me")
+    fs_copy("/tmp/coral_test_e2e_copy_src.txt", "/tmp/coral_test_e2e_copy_dst.txt")
+    content is fs_read("/tmp/coral_test_e2e_copy_dst.txt")
+    log(bytes_to_string(content))
+    log(fs_exists("/tmp/coral_test_e2e_copy_src.txt"))
+    fs_delete("/tmp/coral_test_e2e_copy_src.txt")
+    fs_delete("/tmp/coral_test_e2e_copy_dst.txt")
+"#, &["copy me", "true"]);
+}
+
+#[test]
+fn e2e_fs_mkdirs() {
+    assert_output(r#"
+*main()
+    fs_mkdirs("/tmp/coral_test_e2e_mkdirs/a/b/c")
+    log(fs_is_dir("/tmp/coral_test_e2e_mkdirs/a/b/c"))
+    fs_delete("/tmp/coral_test_e2e_mkdirs/a/b/c")
+    fs_delete("/tmp/coral_test_e2e_mkdirs/a/b")
+    fs_delete("/tmp/coral_test_e2e_mkdirs/a")
+    fs_delete("/tmp/coral_test_e2e_mkdirs")
+"#, &["true"]);
+}
+
+#[test]
+fn e2e_fs_temp_dir() {
+    assert_output_contains(r#"
+*main()
+    td is fs_temp_dir()
+    log(td)
+"#, "/tmp");
+}
+
+#[test]
+fn e2e_stderr_write() {
+    // stderr_write writes to stderr and returns unit
+    let (stdout, stderr, code) = run_coral(r#"
+*main()
+    stderr_write("hello stderr")
+    log("done")
+"#);
+    assert_eq!(code, 0, "Expected exit code 0, got {}", code);
+    assert!(stderr.contains("hello stderr"),
+        "Expected stderr to contain 'hello stderr' but got: {}", stderr);
+    assert!(stdout.contains("done"), "Expected stdout to contain 'done' but got: {}", stdout);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// L4.2: std.path OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e2e_path_normalize() {
+    assert_output(r#"
+*main()
+    log(path_normalize("/usr/local/../bin"))
+    log(path_normalize("/a/b/./c/../d"))
+"#, &["/usr/bin", "/a/b/d"]);
+}
+
+#[test]
+fn e2e_path_resolve() {
+    // /tmp always exists on Linux
+    assert_output_contains(r#"
+*main()
+    p is path_resolve("/tmp")
+    log(p)
+"#, "/tmp");
+}
+
+#[test]
+fn e2e_path_is_absolute() {
+    assert_output(r#"
+*main()
+    log(path_is_absolute("/usr/bin"))
+    log(path_is_absolute("relative/path"))
+"#, &["true", "false"]);
+}
+
+#[test]
+fn e2e_path_parent() {
+    assert_output(r#"
+*main()
+    log(path_parent("/usr/local/bin"))
+    log(path_parent("/usr"))
+"#, &["/usr/local", "/"]);
+}
+
+#[test]
+fn e2e_path_stem() {
+    assert_output(r#"
+*main()
+    log(path_stem("/home/user/document.txt"))
+    log(path_stem("/etc/config.tar.gz"))
+"#, &["document", "config.tar"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// L2.5: std.process ENHANCEMENTS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e2e_process_cwd() {
+    assert_output_contains(r#"
+*main()
+    d is process_cwd()
+    log(d)
+"#, "/");
+}
+
+#[test]
+fn e2e_process_pid() {
+    // PID should be a positive number
+    let (stdout, _stderr, code) = run_coral(r#"
+*main()
+    p is process_pid()
+    log(p)
+"#);
+    assert_eq!(code, 0);
+    let pid_str = stdout.trim();
+    let pid: f64 = pid_str.parse().expect("PID should be a number");
+    assert!(pid > 0.0, "PID should be positive, got {}", pid);
+}
+
+#[test]
+fn e2e_process_hostname() {
+    // Hostname should be a non-empty string
+    let (stdout, _stderr, code) = run_coral(r#"
+*main()
+    h is process_hostname()
+    log(h)
+"#);
+    assert_eq!(code, 0);
+    let host = stdout.trim();
+    assert!(!host.is_empty(), "Hostname should not be empty");
+}
+
+#[test]
+fn e2e_process_chdir() {
+    assert_output(r#"
+*main()
+    process_chdir("/tmp")
+    d is process_cwd()
+    log(d)
+"#, &["/tmp"]);
+}
+
+#[test]
+fn e2e_process_exec_echo() {
+    assert_output(r#"
+*main()
+    result is process_exec("echo", ["hello from coral"])
+    log(result.get("exit_code"))
+    log(result.get("stdout"))
+"#, &["0", "hello from coral\n"]);
+}
+
+#[test]
+fn e2e_process_exec_exit_code() {
+    assert_output(r#"
+*main()
+    result is process_exec("false", [])
+    log(result.get("exit_code"))
+"#, &["1"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 6. STRING EDGE CASES
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1370,4 +1567,140 @@ fn compile_string_template_complex() {
     count is 42
     log("hello {name}, count is {count}")
 "#).expect("complex template strings should compile");
+}
+
+// ─── S4.5: Extension methods ───
+
+#[test]
+fn e2e_extend_store_with_new_method() {
+    assert_output(r#"
+store Counter
+    count ? 0
+    *increment()
+        self.count is self.count + 1
+
+extend Counter
+    *double()
+        self.count is self.count * 2
+    *value()
+        return self.count
+
+*main()
+    c is make_Counter()
+    c.increment()
+    c.increment()
+    c.double()
+    log(c.value())
+"#, &["4"]);
+}
+
+#[test]
+fn e2e_extend_store_self_field_access() {
+    assert_output(r#"
+store Point
+    x ? 0
+    y ? 0
+    *move(dx, dy)
+        self.x is self.x + dx
+        self.y is self.y + dy
+
+extend Point
+    *sum()
+        return self.x + self.y
+    *describe()
+        log("sum=" + number_to_string(self.sum()))
+
+*main()
+    p is make_Point()
+    p.move(3, 7)
+    log(p.sum())
+    p.describe()
+"#, &["10", "sum=10"]);
+}
+
+#[test]
+fn e2e_extend_no_override_existing() {
+    assert_output(r#"
+store Greeter
+    name ? "world"
+    *greet()
+        log("hello " + self.name)
+
+extend Greeter
+    *greet()
+        log("overridden")
+    *farewell()
+        log("goodbye " + self.name)
+
+*main()
+    g is make_Greeter()
+    g.greet()
+    g.farewell()
+"#, &["hello world", "goodbye world"]);
+}
+
+#[test]
+fn e2e_extend_multiple_blocks() {
+    assert_output(r#"
+store Num
+    v ? 0
+    *bump(n)
+        self.v is self.v + n
+
+extend Num
+    *doubled()
+        return self.v * 2
+
+extend Num
+    *tripled()
+        return self.v * 3
+
+*main()
+    n is make_Num()
+    n.bump(5)
+    log(n.doubled())
+    log(n.tripled())
+"#, &["10", "15"]);
+}
+
+#[test]
+fn e2e_extend_method_with_params() {
+    assert_output(r#"
+store Adder
+    total ? 0
+
+extend Adder
+    *add(n)
+        self.total is self.total + n
+    *get_total()
+        return self.total
+
+*main()
+    a is make_Adder()
+    a.add(10)
+    a.add(20)
+    a.add(5)
+    log(a.get_total())
+"#, &["35"]);
+}
+
+#[test]
+fn e2e_extend_chained_method_calls() {
+    assert_output(r#"
+store Builder
+    parts ? ""
+
+extend Builder
+    *append(s)
+        self.parts is self.parts + s
+    *result()
+        return self.parts
+
+*main()
+    b is make_Builder()
+    b.append("hello")
+    b.append(" ")
+    b.append("world")
+    log(b.result())
+"#, &["hello world"]);
 }

@@ -85,3 +85,72 @@ fn c42_runtime_declarations_have_nounwind() {
         "Runtime declarations should have nounwind:\n{ir}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// C4.3: LLVM Alias Analysis Hints
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn c43_noalias_on_user_function_params() {
+    let ir = compile_to_ir(
+        r#"
+*add(a, b)
+    a + b
+*main()
+    log(add(1, 2))
+"#,
+    );
+    // User function parameters should have noalias attribute
+    assert!(
+        ir.contains("noalias"),
+        "User function IR should contain noalias on params:\n{ir}"
+    );
+}
+
+#[test]
+fn c43_noalias_on_runtime_allocator_returns() {
+    let ir = compile_to_ir(
+        r#"
+*main()
+    x is "hello"
+    log(x)
+"#,
+    );
+    // Runtime allocator functions (coral_make_string etc.) should have
+    // noalias on their return value, indicating fresh allocations
+    assert!(
+        ir.contains("noalias"),
+        "Runtime allocator returns should have noalias:\n{ir}"
+    );
+}
+
+#[test]
+fn c43_multi_param_function_noalias() {
+    let ir = compile_to_ir(
+        r#"
+*combine(a, b, c)
+    a + b + c
+*main()
+    log(combine(1, 2, 3))
+"#,
+    );
+    // All three parameters should get noalias
+    assert!(
+        ir.contains("noalias"),
+        "Multi-param function should have noalias:\n{ir}"
+    );
+}
+
+#[test]
+fn c43_allocator_noalias_distinct_from_nounwind() {
+    let ir = compile_to_ir(
+        r#"
+*main()
+    xs is [1, 2, 3]
+    log(xs.length)
+"#,
+    );
+    // Both noalias and nounwind should appear in the IR
+    assert!(ir.contains("noalias"), "IR should contain noalias:\n{ir}");
+    assert!(ir.contains("nounwind"), "IR should contain nounwind:\n{ir}");
+}

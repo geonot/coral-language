@@ -52,7 +52,21 @@ pub enum Item {
     Taxonomy(TaxonomyNode),
     ErrorDefinition(ErrorDefinition),
     TraitDefinition(TraitDefinition),
+    Extension(ExtensionDefinition),
     Expression(Expression),
+}
+
+/// S4.5: Extension methods — add methods to existing types
+/// ```coral
+/// extend String
+///     *word_count()
+///         self.split(" ").length()
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionDefinition {
+    pub target_type: String,
+    pub methods: Vec<Function>,
+    pub span: Span,
 }
 
 /// Hierarchical error definition
