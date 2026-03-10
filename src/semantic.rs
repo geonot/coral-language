@@ -49,6 +49,8 @@ pub struct SemanticModel {
     pub field_types: HashMap<(String, String), usize>,
     /// Maps store/type names to list of field names for member access validation
     pub store_field_names: HashMap<String, Vec<String>>,
+    /// CC3.2: Maps short module name (e.g., "math") to list of exported function names
+    pub module_exports: HashMap<String, Vec<String>>,
 }
 
 /// Register error definitions recursively, building paths like "Database:Connection:Timeout"
@@ -69,6 +71,18 @@ fn register_error_definitions(def: &ErrorDefinition, prefix: &str, known_names: 
 }
 
 pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
+    // CC3.2: Build module_exports map from parsed modules
+    let mut module_exports: HashMap<String, Vec<String>> = HashMap::new();
+    for module in &program.modules {
+        // Use the short name (last segment) as the lookup key
+        let short_name = module.name.rsplit('.').next().unwrap_or(&module.name).to_string();
+        module_exports.insert(short_name, module.exports.clone());
+        // Also register the full name for qualified access like `std.math.sin()`
+        if module.name.contains('.') {
+            module_exports.insert(module.name.clone(), module.exports.clone());
+        }
+    }
+
     let mut globals = Vec::new();
     let mut functions = Vec::new();
     let mut extern_functions = Vec::new();
@@ -399,6 +413,7 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         warnings,
         field_types,
         store_field_names,
+        module_exports,
     })
 }
 

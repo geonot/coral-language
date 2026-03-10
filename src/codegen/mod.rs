@@ -91,6 +91,8 @@ pub struct CodeGenerator<'ctx> {
     resolved_types: HashMap<String, TypeId>,
     /// S4.2: Parameter metadata for default argument filling at call sites.
     fn_param_defaults: HashMap<String, Vec<Parameter>>,
+    /// CC3.2: Maps short module name to list of exported function names
+    module_exports: HashMap<String, Vec<String>>,
 }
 
 /// CC2.3: Holds state for DWARF debug-info emission.
@@ -155,6 +157,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             debug_ctx: None,
             resolved_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            module_exports: HashMap::new(),
         }
     }
 
@@ -224,6 +227,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub fn compile(mut self, model: &SemanticModel) -> Result<Module<'ctx>, Diagnostic> {
         self.allocation_hints = model.allocation.symbols.clone();
+        // CC3.2: Populate module namespace map for qualified function access
+        self.module_exports = model.module_exports.clone();
         // C2.1: Populate resolved types from semantic analysis for type specialization.
         for (name, ty) in model.types.iter_all() {
             self.resolved_types.insert(name, ty);

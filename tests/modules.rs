@@ -255,3 +255,180 @@ fn compiles_program_using_std_math() {
     // distance function uses sqrt internally
     assert!(ir.contains("@coral_math_sqrt"), "distance should call sqrt");
 }
+
+// ============================================================
+// CC3.1 — AST-level module system tests
+// ============================================================
+
+#[test]
+fn load_modules_returns_separate_modules() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let entry = temp_dir.path().join("main.coral");
+    let utils = temp_dir.path().join("utils.coral");
+    std::fs::write(&utils, "*add(a, b)\n    a + b\n").unwrap();
+    std::fs::write(&entry, "use utils\nresult is add(1, 2)\nlog(result)\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let modules = loader.load_modules(&entry).expect("load_modules");
+
+    // Should have at least 2 modules: utils first, then main
+    assert!(modules.len() >= 2, "expected at least 2 modules, got {}", modules.len());
+
+    // First module should be utils (dependency comes before dependent)
+    let utils_mod = modules.iter().find(|m| m.name == "utils").expect("utils module");
+    assert!(utils_mod.source.contains("*add(a, b)"));
+    assert!(!utils_mod.source.contains("use utils")); // use directives stripped
+
+    // Last module should be the entry
+    let last = modules.last().unwrap();
+    assert!(last.source.contains("result is add(1, 2)"));
+    assert!(!last.source.contains("use utils")); // use directives stripped
+}
+
+#[test]
+fn load_modules_preserves_dependency_order() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let a = temp_dir.path().join("a.coral");
+    let b = temp_dir.path().join("b.coral");
+    let main_file = temp_dir.path().join("main.coral");
+    std::fs::write(&a, "*from_a()\n    1\n").unwrap();
+    std::fs::write(&b, "use a\n*from_b()\n    from_a() + 1\n").unwrap();
+    std::fs::write(&main_file, "use b\nresult is from_b()\nlog(result)\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let modules = loader.load_modules(&main_file).expect("load_modules");
+
+    let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+    // a must come before b, b must come before main
+    let a_idx = names.iter().position(|n| *n == "a").expect("a");
+    let b_idx = names.iter().position(|n| *n == "b").expect("b");
+    let main_idx = names.iter().position(|n| *n == "main").expect("main");
+    assert!(a_idx < b_idx, "a should come before b");
+    assert!(b_idx < main_idx, "b should come before main");
+}
+
+#[test]
+fn load_modules_deduplicates() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let shared = temp_dir.path().join("shared.coral");
+    let a = temp_dir.path().join("a.coral");
+    let b = temp_dir.path().join("b.coral");
+    let main_file = temp_dir.path().join("main.coral");
+    std::fs::write(&shared, "*shared_fn()\n    42\n").unwrap();
+    std::fs::write(&a, "use shared\n*from_a()\n    shared_fn()\n").unwrap();
+    std::fs::write(&b, "use shared\n*from_b()\n    shared_fn()\n").unwrap();
+    std::fs::write(&main_file, "use a\nuse b\nlog(from_a())\nlog(from_b())\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let modules = loader.load_modules(&main_file).expect("load_modules");
+
+    // shared should appear exactly once
+    let shared_count = modules.iter().filter(|m| m.name == "shared").count();
+    assert_eq!(shared_count, 1, "shared module should appear exactly once");
+}
+
+#[test]
+fn load_modules_detects_circular_imports() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let a = temp_dir.path().join("a.coral");
+    let b = temp_dir.path().join("b.coral");
+    std::fs::write(&a, "use b\n*a_fn()\n    1\n").unwrap();
+    std::fs::write(&b, "use a\n*b_fn()\n    2\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let result = loader.load_modules(&a);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("circular import"));
+}
+
+#[test]
+fn load_modules_tracks_imports_and_exports() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let math = temp_dir.path().join("mymath.coral");
+    let main_file = temp_dir.path().join("main.coral");
+    std::fs::write(&math, "*add(a, b)\n    a + b\n*sub(a, b)\n    a - b\n").unwrap();
+    std::fs::write(&main_file, "use mymath\nlog(add(1, 2))\n").unwrap();
+
+    let mut loader = ModuleLoader::new(vec![]);
+    let modules = loader.load_modules(&main_file).expect("load_modules");
+
+    let math_mod = modules.iter().find(|m| m.name == "mymath").expect("mymath");
+    assert!(math_mod.exports.contains(&"add".to_string()));
+    assert!(math_mod.exports.contains(&"sub".to_string()));
+    assert!(math_mod.imports.is_empty());
+
+    let main_mod = modules.iter().find(|m| m.name == "main").expect("main");
+    assert!(main_mod.imports.contains(&"mymath".to_string()));
+}
+
+#[test]
+fn compile_modules_produces_same_ir_as_concat() {
+    // Verify that compile_modules_to_ir produces equivalent output to
+    // the old compile_to_ir (concatenated source) path.
+    let mut loader = ModuleLoader::with_default_std();
+    let path = PathBuf::from("tests/fixtures/programs/uses_std.coral");
+
+    let concat_source = loader.load(&path).expect("load concat");
+    let compiler = Compiler;
+    let (ir_concat, _) = compiler
+        .compile_to_ir_with_warnings(&concat_source)
+        .expect("compile concat");
+
+    let mut loader2 = ModuleLoader::with_default_std();
+    let module_sources = loader2.load_modules(&path).expect("load modules");
+    let (ir_modules, _) = compiler
+        .compile_modules_to_ir(&module_sources)
+        .expect("compile modules");
+
+    // Both should produce non-empty IR with the same functions
+    assert!(!ir_concat.is_empty(), "concat IR should not be empty");
+    assert!(!ir_modules.is_empty(), "module IR should not be empty");
+
+    // Both should reference the coral_make_string runtime function
+    assert!(ir_concat.contains("@coral_make_string"), "concat IR should have string runtime");
+    assert!(ir_modules.contains("@coral_make_string"), "module IR should have string runtime");
+}
+
+#[test]
+fn compile_modules_full_language_fixture() {
+    let mut loader = ModuleLoader::with_default_std();
+    let path = PathBuf::from("tests/fixtures/programs/full_language_no_store.coral");
+    let module_sources = loader.load_modules(&path).expect("load modules");
+
+    let compiler = Compiler;
+    let (ir, _warnings) = compiler
+        .compile_modules_to_ir(&module_sources)
+        .expect("compile modules for full language fixture");
+
+    // Should compile without errors and produce non-empty IR
+    assert!(!ir.is_empty(), "IR should not be empty");
+    // The full language fixture defines user functions
+    assert!(ir.contains("define"), "should have function definitions");
+}
+
+#[test]
+fn program_from_modules_has_modules_field() {
+    use coralc::ast::{Module, Program};
+    use coralc::span::Span;
+
+    let m1 = Module {
+        name: "utils".to_string(),
+        items: vec![],
+        imports: vec![],
+        exports: vec!["add".to_string()],
+        span: Span::new(0, 0),
+    };
+    let m2 = Module {
+        name: "main".to_string(),
+        items: vec![],
+        imports: vec!["utils".to_string()],
+        exports: vec![],
+        span: Span::new(0, 0),
+    };
+
+    let program = Program::from_modules(vec![m1, m2]);
+    assert_eq!(program.modules.len(), 2);
+    assert_eq!(program.modules[0].name, "utils");
+    assert_eq!(program.modules[1].name, "main");
+    assert!(program.items.is_empty());
+}

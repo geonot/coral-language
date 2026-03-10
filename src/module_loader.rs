@@ -43,6 +43,33 @@ pub struct ModuleInfo {
     pub imports: Vec<String>,
 }
 
+/// A single module's source and metadata, returned by `load_modules()`.
+#[derive(Debug, Clone)]
+pub struct ModuleSource {
+    /// Module namespace (e.g., "std.math", "std.prelude", "main")
+    pub name: String,
+    /// Canonical path to the source file
+    pub path: PathBuf,
+    /// Raw source text for this module (without use directives, after recursive expansion)
+    pub source: String,
+    /// Full import directives (includes selective import info)
+    pub import_directives: Vec<ImportDirective>,
+    /// Names of modules this module directly imports (backward compat)
+    pub imports: Vec<String>,
+    /// Exported symbols extracted from the source
+    pub exports: Vec<String>,
+}
+
+/// Parsed `use` directive with optional selective imports.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDirective {
+    /// The module path (e.g., "std.math" from `use std.math.{sin, cos}`)
+    pub module_path: String,
+    /// If Some, only these symbols are imported (e.g., `{sin, cos}`).
+    /// If None, all symbols are imported.
+    pub selections: Option<Vec<String>>,
+}
+
 /// Loads Coral source files while expanding `use module_name` directives.
 /// A directive simply splices the referenced module's contents into the caller,
 /// similar to a lightweight include, and prevents duplicate inclusions.
@@ -231,6 +258,117 @@ impl ModuleLoader {
         
         Ok(result)
     }
+
+    /// Load the entry file and all its dependencies, returning each module as a separate
+    /// `ModuleSource` in topological (dependency) order. The entry file is always last.
+    ///
+    /// Unlike `load()`, this does NOT concatenate module sources. Each module retains
+    /// only its own code (with `use` directives stripped).
+    pub fn load_modules(&mut self, entry: &Path) -> anyhow::Result<Vec<ModuleSource>> {
+        let mut stack = Vec::new();
+        let mut visited = HashSet::new();
+        let mut modules = Vec::new();
+
+        let entry_canonical = fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
+        let is_std_file = self.std_paths.iter().any(|std_path| {
+            let std_canonical = fs::canonicalize(std_path).unwrap_or_else(|_| std_path.clone());
+            entry_canonical.starts_with(&std_canonical)
+        });
+
+        // Auto-include prelude for non-std files
+        if !is_std_file {
+            if let Some(prelude_path) = self.resolve_module_in_std("prelude") {
+                self.collect_modules(&prelude_path, &mut stack, &mut visited, &mut modules)?;
+            }
+        }
+
+        self.collect_modules(entry, &mut stack, &mut visited, &mut modules)?;
+        Ok(modules)
+    }
+
+    /// Recursively collect modules in dependency-first (topological) order.
+    /// Each module's source has `use` directives stripped but is NOT inlined with deps.
+    fn collect_modules(
+        &mut self,
+        path: &Path,
+        stack: &mut Vec<PathBuf>,
+        visited: &mut HashSet<PathBuf>,
+        modules: &mut Vec<ModuleSource>,
+    ) -> anyhow::Result<()> {
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+        // Circular import detection
+        if stack.contains(&canonical) {
+            let cycle_start = stack.iter().position(|p| p == &canonical).unwrap();
+            let cycle_modules: Vec<_> = stack[cycle_start..]
+                .iter()
+                .chain(std::iter::once(&canonical))
+                .map(|p| {
+                    p.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.display().to_string())
+                })
+                .collect();
+            bail!(
+                "circular import detected: {}\n\
+                 Hint: Consider restructuring to break the cycle, or extract shared code to a common module.",
+                cycle_modules.join(" -> ")
+            );
+        }
+
+        if visited.contains(&canonical) {
+            return Ok(());
+        }
+
+        stack.push(canonical.clone());
+        let source = fs::read_to_string(path).with_context(|| {
+            format!("failed to read module {}", path.display())
+        })?;
+
+        let mut own_source = String::new();
+        let mut import_names = Vec::new();
+        let mut import_directives = Vec::new();
+
+        for (index, line) in source.lines().enumerate() {
+            if let Some(directive) = Self::parse_use_directive(line) {
+                let module_path = self
+                    .resolve_module(path, &directive.module_path)
+                    .with_context(|| {
+                        format!(
+                            "failed to resolve module `{}` referenced at {}:{}",
+                            directive.module_path,
+                            path.display(),
+                            index + 1
+                        )
+                    })?;
+
+                import_names.push(directive.module_path.clone());
+                import_directives.push(directive);
+                // Recursively collect the dependency first
+                self.collect_modules(&module_path, stack, visited, modules)?;
+                continue;
+            }
+            own_source.push_str(line);
+            own_source.push('\n');
+        }
+
+        stack.pop();
+        visited.insert(canonical.clone());
+
+        let namespace = self.path_to_namespace(&canonical);
+        let exports = self.extract_exports(&own_source);
+
+        modules.push(ModuleSource {
+            name: namespace,
+            path: canonical,
+            source: own_source,
+            import_directives,
+            imports: import_names,
+            exports,
+        });
+
+        Ok(())
+    }
     
     /// Update module info after loading.
     fn update_module_info(&mut self, path: &Path, source: &str, dependencies: &[PathBuf]) {
@@ -344,13 +482,13 @@ impl ModuleLoader {
         // Don't add to included until AFTER we're done processing
         
         for (index, line) in source.lines().enumerate() {
-            if let Some(module_name) = Self::parse_use_directive(line) {
+            if let Some(directive) = Self::parse_use_directive(line) {
                 let module_path = self
-                    .resolve_module(path, &module_name)
+                    .resolve_module(path, &directive.module_path)
                     .with_context(|| {
                         format!(
                             "failed to resolve module `{}` referenced at {}:{}",
-                            module_name,
+                            directive.module_path,
                             path.display(),
                             index + 1
                         )
@@ -385,7 +523,7 @@ impl ModuleLoader {
         Ok(expanded)
     }
 
-    fn parse_use_directive(line: &str) -> Option<String> {
+    fn parse_use_directive(line: &str) -> Option<ImportDirective> {
         let trimmed = line.trim();
         if !trimmed.starts_with("use ") {
             return None;
@@ -394,7 +532,50 @@ impl ModuleLoader {
         if module.is_empty() {
             return None;
         }
-        Some(module.to_string())
+
+        // Check for selective imports: `use std.math.{sin, cos}`
+        if let Some(brace_start) = module.find('.') {
+            let rest = &module[brace_start + 1..];
+            if rest.starts_with('{') && rest.ends_with('}') {
+                let module_path = module[..brace_start].to_string();
+                let symbols_str = &rest[1..rest.len() - 1];
+                let selections: Vec<String> = symbols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                return Some(ImportDirective {
+                    module_path,
+                    selections: if selections.is_empty() { None } else { Some(selections) },
+                });
+            }
+        }
+
+        // Also check for brace at any depth: `use std.math.{sin, cos}`
+        // The module could be "std.math.{sin, cos}" where the brace part comes after the last dot
+        if module.contains('{') {
+            if let Some(brace_pos) = module.rfind('.') {
+                let rest = module[brace_pos + 1..].trim();
+                if rest.starts_with('{') && rest.ends_with('}') {
+                    let module_path = module[..brace_pos].to_string();
+                    let symbols_str = &rest[1..rest.len() - 1];
+                    let selections: Vec<String> = symbols_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    return Some(ImportDirective {
+                        module_path,
+                        selections: if selections.is_empty() { None } else { Some(selections) },
+                    });
+                }
+            }
+        }
+
+        Some(ImportDirective {
+            module_path: module.to_string(),
+            selections: None,
+        })
     }
 
     fn resolve_module(&self, current_file: &Path, module: &str) -> anyhow::Result<PathBuf> {

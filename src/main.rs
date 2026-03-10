@@ -61,12 +61,12 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let mut loader = ModuleLoader::with_default_std();
-    let source = loader
-        .load(&args.input)
+    let module_sources = loader
+        .load_modules(&args.input)
         .with_context(|| format!("failed to load {}", args.input.display()))?;
 
     let compiler = Compiler;
-    match compiler.compile_to_ir_with_warnings(&source) {
+    match compiler.compile_modules_to_ir(&module_sources) {
         Ok((ir, warnings)) => {
             // CC2.2: Print any warnings collected during compilation.
             for w in &warnings {

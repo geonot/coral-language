@@ -21,6 +21,7 @@ impl PlaceholderLowerer {
         }
         Ok(Program {
             items,
+            modules: program.modules,
             span: program.span,
         })
     }

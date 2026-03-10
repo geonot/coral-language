@@ -132,6 +132,33 @@ impl<'ctx> CodeGenerator<'ctx> {
             if namespace == "io" {
                 return self.emit_io_call(ctx, property, args, span);
             }
+            // CC3.2: Resolve module-qualified function calls (e.g., math.sin())
+            if let Some(exports) = self.module_exports.get(namespace.as_str()).cloned() {
+                if exports.contains(&property.to_string()) {
+                    // The function is exported by this module — call it by its unqualified name
+                    if let Some(&function) = self.functions.get(property) {
+                        let mut arg_values = Vec::new();
+                        for arg in args {
+                            let saved_tail = ctx.in_tail_position;
+                            ctx.in_tail_position = false;
+                            let value = self.emit_expression(ctx, arg)?;
+                            ctx.in_tail_position = saved_tail;
+                            arg_values.push(value);
+                        }
+                        let call_args: Vec<_> = arg_values.iter().map(|v| (*v).into()).collect();
+                        let result = self.builder.build_call(function, &call_args, "modcall").unwrap();
+                        return Ok(result.try_as_basic_value().left().unwrap().into_int_value());
+                    }
+                    // Might be a builtin function — emit as a regular call
+                    let call_expr = Expression::Call {
+                        callee: Box::new(Expression::Identifier(property.to_string(), span)),
+                        args: args.to_vec(),
+                        arg_names: vec![],
+                        span,
+                    };
+                    return self.emit_expression(ctx, &call_expr);
+                }
+            }
         }
         match property {
             // x.equals(y) - value equality comparison

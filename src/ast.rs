@@ -1,14 +1,44 @@
 use crate::span::Span;
 
+/// A single module's AST, produced by parsing one source file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Module {
+    /// Module namespace (e.g., "std.math", "std.prelude", "main")
+    pub name: String,
+    /// Parsed items belonging to this module
+    pub items: Vec<Item>,
+    /// Names of modules this module directly imports
+    pub imports: Vec<String>,
+    /// Exported symbols (function names, type names, etc.)
+    pub exports: Vec<String>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub items: Vec<Item>,
+    /// Per-module ASTs, in dependency order (last is the entry module).
+    /// Empty when compiled from a single flat source string.
+    pub modules: Vec<Module>,
     pub span: Span,
 }
 
 impl Program {
     pub fn new(items: Vec<Item>, span: Span) -> Self {
-        Self { items, span }
+        Self { items, modules: Vec::new(), span }
+    }
+
+    /// Create a Program from parsed modules. Items are flattened in module order.
+    pub fn from_modules(modules: Vec<Module>) -> Self {
+        let items: Vec<Item> = modules.iter()
+            .flat_map(|m| m.items.iter().cloned())
+            .collect();
+        let span = if let Some(last) = modules.last() {
+            last.span
+        } else {
+            Span::new(0, 0)
+        };
+        Self { items, modules, span }
     }
 }
 

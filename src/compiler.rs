@@ -1,8 +1,9 @@
-use crate::ast::{BinaryOp, Expression, UnaryOp};
+use crate::ast::{BinaryOp, Expression, Module, Program, UnaryOp};
 use crate::codegen::{CodeGenerator, InlineAsmMode};
 use crate::diagnostics::{CompileError, Stage};
 use crate::lexer;
 use crate::lower;
+use crate::module_loader::ModuleSource;
 use crate::parser::Parser;
 use crate::semantic;
 use inkwell::context::Context;
@@ -113,6 +114,63 @@ impl Compiler {
         let module = generator
             .compile(&model)
             .map_err(|diag| CompileError::with_source(Stage::Codegen, diag, source))?;
+        Ok((module.print_to_string().to_string(), warnings))
+    }
+
+    /// Compile a list of modules (from `ModuleLoader::load_modules()`) to LLVM IR.
+    /// Each module is parsed independently, then all ASTs are merged into a single
+    /// Program for semantic analysis and codegen. Returns (IR, warnings).
+    pub fn compile_modules_to_ir(&self, module_sources: &[ModuleSource]) -> Result<(String, Vec<String>), CompileError> {
+        // Parse each module independently and build Module ASTs
+        let mut modules = Vec::new();
+        // We also need the concatenated source for error reporting
+        let mut all_source = String::new();
+
+        for ms in module_sources {
+            let tokens = lexer::lex(&ms.source).map_err(|diag| {
+                CompileError::with_source(Stage::Lex, diag, &ms.source)
+            })?;
+            let parser = Parser::new(tokens, ms.source.len());
+            let parsed = parser.parse().map_err(|diag| {
+                CompileError::with_source(Stage::Parse, diag, &ms.source)
+            })?;
+
+            modules.push(Module {
+                name: ms.name.clone(),
+                items: parsed.items,
+                imports: ms.imports.clone(),
+                exports: ms.exports.clone(),
+                span: parsed.span,
+            });
+            all_source.push_str(&ms.source);
+            all_source.push('\n');
+        }
+
+        // Merge into a single flat Program (backward compatible with semantic/codegen)
+        let program = Program::from_modules(modules);
+        let program = lower::lower(program)
+            .map_err(|diag| CompileError::with_source(Stage::Parse, diag, &all_source))?;
+        let mut model = semantic::analyze(program)
+            .map_err(|diag| CompileError::with_source(Stage::Semantic, diag, &all_source))?;
+        self.maybe_emit_alloc_report(&model);
+
+        let warnings: Vec<String> = model.warnings.iter().map(|w| w.message.clone()).collect();
+        Self::fold_expressions(&mut model);
+
+        let context = Context::create();
+        let inline_mode = match std::env::var("CORAL_INLINE_ASM") {
+            Ok(val) if val.eq_ignore_ascii_case("allow-noop") => InlineAsmMode::Noop,
+            Ok(val) if val.eq_ignore_ascii_case("emit") => InlineAsmMode::Emit,
+            _ => InlineAsmMode::Deny,
+        };
+        let mut generator = CodeGenerator::new(&context, "coral_module")
+            .with_inline_asm_mode(inline_mode);
+        if std::env::var("CORAL_DEBUG_INFO").map_or(false, |v| !v.is_empty()) {
+            generator = generator.with_debug_info("coral_module.coral", &all_source);
+        }
+        let module = generator
+            .compile(&model)
+            .map_err(|diag| CompileError::with_source(Stage::Codegen, diag, &all_source))?;
         Ok((module.print_to_string().to_string(), warnings))
     }
 
