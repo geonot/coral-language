@@ -226,7 +226,10 @@ module.exports = grammar({
         $.typed_binding,
         $.return_statement,
         $.if_statement,
+        $.unless_statement,
         $.while_statement,
+        $.until_statement,
+        $.loop_statement,
         $.for_statement,
         $.break_statement,
         $.continue_statement,
@@ -260,6 +263,15 @@ module.exports = grammar({
 
     while_statement: ($) =>
       seq("while", field("condition", $._expression), $._newline, field("body", $.block)),
+
+    unless_statement: ($) =>
+      seq("unless", field("condition", $._expression), $._newline, field("body", $.block)),
+
+    until_statement: ($) =>
+      seq("until", field("condition", $._expression), $._newline, field("body", $.block)),
+
+    loop_statement: ($) =>
+      seq("loop", $._newline, field("body", $.block)),
 
     for_statement: ($) =>
       seq("for", field("variable", $.identifier), "in", field("iterable", $._expression), $._newline,
@@ -314,6 +326,7 @@ module.exports = grammar({
         $.index_expression,
         $.lambda_expression,
         $.match_expression,
+        $.when_expression,
         $.inline_asm,
         $.ptr_load,
         $._primary_expression,
@@ -410,6 +423,18 @@ module.exports = grammar({
 
     match_expression: ($) =>
       seq("match", field("value", $._expression), $._newline, field("arms", $.match_block)),
+
+    when_expression: ($) =>
+      seq("when", $._newline, field("arms", $.when_block)),
+
+    when_block: ($) =>
+      seq($._indent, repeat1(choice($.when_arm, $._newline)), $._dedent),
+
+    when_arm: ($) =>
+      choice(
+        seq(field("condition", $._expression), "?", field("body", $._expression), $._newline),
+        seq("_", "?", field("body", $._expression), $._newline),
+      ),
 
     inline_asm: ($) =>
       seq("asm", "(", field("template", $.string),

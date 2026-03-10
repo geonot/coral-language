@@ -21,7 +21,7 @@
     ["{", "}"]
   ],
   "indentationRules": {
-    "increaseIndentPattern": "^\\s*(\\*\\w|if\\b|elif\\b|else\\b|while\\b|for\\b|match\\b|type\\b|enum\\b|store\\b|actor\\b|trait\\b|err\\b|!!\\w|unsafe\\b|persist\\b).*$",
+    "increaseIndentPattern": "^\\s*(\\*\\w|if\\b|elif\\b|else\\b|while\\b|for\\b|match\\b|type\\b|enum\\b|store\\b|actor\\b|trait\\b|err\\b|!!\\w|unsafe\\b|persist\\b|unless\\b|until\\b|loop\\b).*$",
     "decreaseIndentPattern": "^\\s*(else|elif)\\b"
   },
   "folding": {
@@ -34,7 +34,7 @@
   "wordPattern": "[a-zA-Z_][a-zA-Z0-9_]*",
   "onEnterRules": [
     {
-      "beforeText": "^\\s*(\\*\\w+\\(.*\\)|if\\b.*|elif\\b.*|else|while\\b.*|for\\b.*|match\\b.*|type\\b.*|enum\\b.*|store\\b.*|actor\\b.*|trait\\b.*|err\\b.*|!!.*|unsafe)\\s*$",
+      "beforeText": "^\\s*(\\*\\w+\\(.*\\)|if\\b.*|elif\\b.*|else|while\\b.*|for\\b.*|match\\b.*|type\\b.*|enum\\b.*|store\\b.*|actor\\b.*|trait\\b.*|err\\b.*|!!.*|unsafe|unless\\b.*|until\\b.*|loop)\\s*$",
       "action": { "indent": "indent" }
     }
   ]

@@ -323,7 +323,7 @@ impl Compiler {
                 
                 Expression::Ternary { condition: cond, then_branch: then_b, else_branch: else_b, span }
             }
-            Expression::Call { callee, args, span } => {
+            Expression::Call { callee, args, arg_names, span, .. } => {
                 let callee = Box::new(Self::fold_expr(*callee));
                 let args: Vec<_> = args.into_iter().map(Self::fold_expr).collect();
                 
@@ -379,7 +379,7 @@ impl Compiler {
                     }
                 }
                 
-                Expression::Call { callee, args, span }
+                Expression::Call { callee, args, arg_names, span }
             }
             Expression::List(items, span) => {
                 let items: Vec<_> = items.into_iter().map(Self::fold_expr).collect();

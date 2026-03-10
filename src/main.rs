@@ -52,6 +52,10 @@ struct Args {
     /// Write runtime metrics JSON to the given path after --jit execution
     #[arg(long = "collect-metrics", value_name = "FILE")]
     collect_metrics: Option<PathBuf>,
+
+    /// Optimization level (0-3). Default: 0 for --jit, 2 for --emit-binary.
+    #[arg(short = 'O', value_name = "LEVEL")]
+    opt_level: Option<u8>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -126,23 +130,27 @@ fn main() -> anyhow::Result<()> {
                     let ir_path = ir_path_for_tools
                         .as_ref()
                         .context("jit requested but no IR file available")?;
+                    let jit_opt = args.opt_level.unwrap_or(0);
                     run_lli(
                         &args.lli,
                         &runtime_lib,
                         ir_path,
                         args.collect_metrics.as_deref(),
+                        jit_opt,
                     )?;
                 }
                 if let Some(binary_path) = &args.emit_binary {
                     let ir_path = ir_path_for_tools
                         .as_ref()
                         .context("binary emission requested but no IR file available")?;
+                    let bin_opt = args.opt_level.unwrap_or(2);
                     link_native_binary(
                         &args.llc,
                         &args.clang,
                         &runtime_lib,
                         ir_path,
                         binary_path,
+                        bin_opt,
                     )?;
                 }
             }
@@ -252,9 +260,14 @@ fn run_lli(
     runtime: &Path,
     ir_path: &Path,
     metrics_path: Option<&Path>,
+    opt_level: u8,
 ) -> anyhow::Result<()> {
     let mut cmd = Command::new(lli);
-    cmd.arg("-load").arg(runtime).arg(ir_path);
+    cmd.arg("-load").arg(runtime);
+    if opt_level > 0 {
+        cmd.arg(format!("-O{}", opt_level.min(3)));
+    }
+    cmd.arg(ir_path);
     if let Some(metrics) = metrics_path {
         cmd.env("CORAL_RUNTIME_METRICS", metrics);
     }
@@ -271,15 +284,18 @@ fn link_native_binary(
     runtime_lib: &Path,
     ir_path: &Path,
     output: &Path,
+    opt_level: u8,
 ) -> anyhow::Result<()> {
     let mut obj = NamedTempFile::new().context("failed to create temporary object file")?;
     let obj_path = obj
         .path()
         .to_path_buf();
 
+    let opt_flag = format!("-O{}", opt_level.min(3));
     let llc_status = Command::new(llc)
         .arg(ir_path)
         .arg("-filetype=obj")
+        .arg(&opt_flag)
         .arg("-o")
         .arg(&obj_path)
         .status()
@@ -293,6 +309,7 @@ fn link_native_binary(
     let mut clang_cmd = Command::new(clang);
     clang_cmd
         .arg(&obj_path)
+        .arg(&opt_flag)
         .arg("-L")
         .arg(runtime_dir)
         .arg("-l")

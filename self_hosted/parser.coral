@@ -547,6 +547,18 @@ use lexer
 	if kind is "keyword_while"
 		return parse_while_statement(p)
 
+	# Unless — desugars to negated if
+	if kind is "keyword_unless"
+		return parse_unless_statement(p)
+
+	# Until — desugars to negated while
+	if kind is "keyword_until"
+		return parse_until_statement(p)
+
+	# Loop — desugars to while true
+	if kind is "keyword_loop"
+		return parse_loop_statement(p)
+
 	# For loop
 	if kind is "keyword_for"
 		return parse_for_statement(p)
@@ -643,6 +655,38 @@ use lexer
 	advance_parser(p)
 
 	condition is parse_expression(p)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_while_stmt(condition, body, make_span(start, current_token(p).get("start")))
+
+*parse_unless_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	raw_condition is parse_expression(p)
+	condition is map("kind" is "unary", "op" is "not", "expr" is raw_condition)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_if_stmt(condition, body, [], none, make_span(start, current_token(p).get("start")))
+
+*parse_until_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	raw_condition is parse_expression(p)
+	condition is map("kind" is "unary", "op" is "not", "expr" is raw_condition)
+	skip_newlines(p)
+	body is parse_block(p)
+
+	return make_while_stmt(condition, body, make_span(start, current_token(p).get("start")))
+
+*parse_loop_statement(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	condition is map("kind" is "bool", "value" is true)
 	skip_newlines(p)
 	body is parse_block(p)
 
@@ -1022,6 +1066,10 @@ use lexer
 	if kind is "keyword_match"
 		return parse_match_expression(p)
 
+	# When expression
+	if kind is "keyword_when"
+		return parse_when_expression(p)
+
 	# Lambda: *fn(params) body
 	if kind is "star"
 		next is peek_token(p, 1)
@@ -1233,6 +1281,52 @@ use lexer
 		consume_dedent(p)
 
 	return make_match_expr(value, arms, default, make_span(start, current_token(p).get("start")))
+
+# ─── When Expression ───────────────────────────────────────────────
+
+*parse_when_expression(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	skip_newlines(p)
+
+	arms is []
+	default_expr is none
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+
+			# Default arm: _ ? value
+			if current_kind(p) is "identifier" and current_token(p).get("value") is "_"
+				advance_parser(p)
+				expect(p, "question")
+				default_expr is parse_expression(p)
+				skip_newlines(p)
+				continue
+
+			# Normal arm: condition ? value
+			condition is parse_expression(p)
+			expect(p, "question")
+			value is parse_expression(p)
+			arms.push(map("condition" is condition, "value" is value))
+			skip_newlines(p)
+
+		consume_dedent(p)
+
+	# Build nested ternary from the bottom up
+	result is default_expr
+	if result is none
+		result is map("kind" is "none")
+
+	i is arms.length() - 1
+	while i >= 0
+		arm is arms[i]
+		result is map("kind" is "ternary", "condition" is arm.get("condition"), "then" is arm.get("value"), "else" is result)
+		i is i - 1
+
+	return result
 
 # ─── Match Arm Body Helper ──────────────────────────────────────────
 

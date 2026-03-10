@@ -16,6 +16,10 @@
   "break"
   "continue"
   "unsafe"
+  "unless"
+  "until"
+  "loop"
+  "when"
 ] @keyword
 
 [

@@ -327,6 +327,9 @@ pub enum Expression {
     Call {
         callee: Box<Expression>,
         args: Vec<Expression>,
+        /// S4.1: Optional names for named arguments.
+        /// Empty means all positional. When non-empty, same length as `args`.
+        arg_names: Vec<Option<String>>,
         span: Span,
     },
     Member {

@@ -283,7 +283,7 @@ impl PlaceholderLowerer {
                     lowered.placeholder,
                 ))
             }
-            Expression::Call { callee, args, span } => self.lower_call(*callee, args, span),
+            Expression::Call { callee, args, arg_names, span, .. } => self.lower_call(*callee, args, arg_names, span),
             Expression::Member { target, property, span } => {
                 let lowered = self.lower_expression(*target)?;
                 Ok(ExprLowering::with_child(
@@ -393,6 +393,7 @@ impl PlaceholderLowerer {
         &mut self,
         callee: Expression,
         args: Vec<Expression>,
+        arg_names: Vec<Option<String>>,
         span: Span,
     ) -> Result<ExprLowering, Diagnostic> {
         let callee_lowered = self.lower_expression(callee)?;
@@ -411,6 +412,7 @@ impl PlaceholderLowerer {
         Ok(ExprLowering::new(Expression::Call {
             callee: Box::new(callee_lowered.expr),
             args: lowered_args,
+            arg_names,
             span,
         }))
     }
@@ -455,7 +457,7 @@ impl PlaceholderLowerer {
             .expect_no_placeholders("placeholder ($) cannot appear on the left side of a pipeline")?;
 
         let desugared = match right {
-            Expression::Call { callee, args, span: call_span } => {
+            Expression::Call { callee, args, span: call_span, .. } => {
                 let has_placeholder = args.iter().any(|a| expr_contains_placeholder(a));
                 let new_args = if has_placeholder {
                     args.into_iter()
@@ -469,12 +471,14 @@ impl PlaceholderLowerer {
                 Expression::Call {
                     callee,
                     args: new_args,
+                    arg_names: vec![],
                     span: call_span,
                 }
             }
             Expression::Identifier(name, id_span) => Expression::Call {
                 callee: Box::new(Expression::Identifier(name, id_span)),
                 args: vec![left_expr],
+                arg_names: vec![],
                 span,
             },
             _ => {
@@ -670,12 +674,13 @@ impl PlaceholderInfo {
                     .collect(),
                 span,
             ),
-            Expression::Call { callee, args, span } => Expression::Call {
+            Expression::Call { callee, args, span, .. } => Expression::Call {
                 callee: Box::new(self.replace_placeholders(*callee, names)),
                 args: args
                     .into_iter()
                     .map(|arg| self.replace_placeholders(arg, names))
                     .collect(),
+                arg_names: vec![],
                 span,
             },
             Expression::Member { target, property, span } => Expression::Member {
@@ -837,12 +842,13 @@ fn replace_placeholder_in_expr(expr: Expression, replacement: &Expression) -> Ex
             expr: Box::new(replace_placeholder_in_expr(*inner, replacement)),
             span,
         },
-        Expression::Call { callee, args, span } => Expression::Call {
+        Expression::Call { callee, args, span, .. } => Expression::Call {
             callee: Box::new(replace_placeholder_in_expr(*callee, replacement)),
             args: args
                 .into_iter()
                 .map(|a| replace_placeholder_in_expr(a, replacement))
                 .collect(),
+            arg_names: vec![],
             span,
         },
         Expression::Member { target, property, span } => Expression::Member {

@@ -383,6 +383,7 @@ fn accepts_defined_function_call() {
             value: Some(Box::new(Expression::Call {
                 callee: Box::new(ident("helper")),
                 args: vec![],
+                arg_names: vec![],
                 span: span(),
             })),
             span: span(),
@@ -448,6 +449,7 @@ fn accepts_builtin_function_call() {
             value: Some(Box::new(Expression::Call {
                 callee: Box::new(ident("log")),
                 args: vec![int_literal(42)],
+                arg_names: vec![],
                 span: span(),
             })),
             span: span(),
@@ -496,6 +498,7 @@ fn accepts_enum_constructor_call() {
             value: Some(Box::new(Expression::Call {
                 callee: Box::new(ident("Some")),
                 args: vec![int_literal(42)],
+                arg_names: vec![],
                 span: span(),
             })),
             span: span(),
@@ -603,6 +606,7 @@ fn call(name: &str, args: Vec<Expression>) -> Expression {
     Expression::Call {
         callee: Box::new(ident(name)),
         args,
+        arg_names: vec![],
         span: span(),
     }
 }
@@ -774,6 +778,7 @@ fn rejects_calling_non_callable() {
     let program = single_fn_program(Expression::Call {
         callee: Box::new(int_literal(42)),
         args: vec![],
+        arg_names: vec![],
         span: span(),
     });
     let error = semantic::analyze(program).expect_err("expected error for calling non-callable");
@@ -856,6 +861,7 @@ fn generic_enum_constructor_infers_fresh_types() {
                     value: Expression::Call {
                         callee: Box::new(ident("Some")),
                         args: vec![int_literal(42)],
+                        arg_names: vec![],
                         span: span(),
                     },
                     span: span(),
@@ -866,6 +872,7 @@ fn generic_enum_constructor_infers_fresh_types() {
                     value: Expression::Call {
                         callee: Box::new(ident("Some")),
                         args: vec![Expression::String("hello".into(), span())],
+                        arg_names: vec![],
                         span: span(),
                     },
                     span: span(),

@@ -89,6 +89,8 @@ pub struct CodeGenerator<'ctx> {
     debug_ctx: Option<DebugContext<'ctx>>,
     /// C2.1/C2.2: Resolved variable types from semantic analysis for type specialization.
     resolved_types: HashMap<String, TypeId>,
+    /// S4.2: Parameter metadata for default argument filling at call sites.
+    fn_param_defaults: HashMap<String, Vec<Parameter>>,
 }
 
 /// CC2.3: Holds state for DWARF debug-info emission.
@@ -152,6 +154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             has_persistent_stores: false,
             debug_ctx: None,
             resolved_types: HashMap::new(),
+            fn_param_defaults: HashMap::new(),
         }
     }
 
@@ -279,6 +282,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             );
             let llvm_fn = self.module.add_function(llvm_name, fn_type, None);
             self.functions.insert(function.name.clone(), llvm_fn);
+            // S4.1/S4.2: Store parameter metadata for named args and default argument filling
+            self.fn_param_defaults.insert(function.name.clone(), function.params.clone());
         }
         // Handle stores and actors
         for store in &model.stores {
@@ -1653,6 +1658,92 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// S4.1: Resolve named arguments to positional order.
+    /// Matches named args to parameter positions from `fn_param_defaults`.
+    fn resolve_named_args(
+        &self,
+        fn_name: &str,
+        args: &[Expression],
+        arg_names: &[Option<String>],
+        span: Span,
+    ) -> Result<Vec<Expression>, Diagnostic> {
+        let param_defs = self.fn_param_defaults.get(fn_name).ok_or_else(|| {
+            Diagnostic::new(
+                format!("cannot use named arguments for unknown function `{}`", fn_name),
+                span,
+            )
+        })?;
+
+        // Count positional args (those without names at the beginning)
+        let positional_count = arg_names.iter().take_while(|n| n.is_none()).count();
+        let named_start = positional_count;
+
+        // Build the result by starting with positional args
+        let mut result: Vec<Option<Expression>> = vec![None; param_defs.len()];
+
+        // Place positional args first
+        for i in 0..positional_count {
+            if i >= param_defs.len() {
+                return Err(Diagnostic::new(
+                    format!(
+                        "too many arguments for `{}`: expected {}, got at least {}",
+                        fn_name, param_defs.len(), positional_count
+                    ),
+                    span,
+                ));
+            }
+            result[i] = Some(args[i].clone());
+        }
+
+        // Place named args by matching parameter names
+        for i in named_start..args.len() {
+            let name = arg_names[i].as_ref().unwrap();
+            let param_idx = param_defs.iter().position(|p| &p.name == name).ok_or_else(|| {
+                Diagnostic::new(
+                    format!(
+                        "unknown parameter `{}` in call to `{}`",
+                        name, fn_name
+                    ),
+                    span,
+                )
+            })?;
+            if result[param_idx].is_some() {
+                return Err(Diagnostic::new(
+                    format!(
+                        "duplicate argument for parameter `{}` in call to `{}`",
+                        name, fn_name
+                    ),
+                    span,
+                ));
+            }
+            result[param_idx] = Some(args[i].clone());
+        }
+
+        // Collect resolved args, filling gaps with default expressions
+        let mut resolved = Vec::new();
+        for (idx, slot) in result.iter().enumerate() {
+            match slot {
+                Some(expr) => resolved.push(expr.clone()),
+                None => {
+                    // Fill with default expression if available, otherwise error
+                    if let Some(ref default_expr) = param_defs[idx].default {
+                        resolved.push(default_expr.clone());
+                    } else {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "missing argument `{}` with no default in call to `{}`",
+                                param_defs[idx].name, fn_name
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
     fn emit_expression(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -1755,7 +1846,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            Expression::Call { callee, args, .. } => {
+            Expression::Call { callee, args, arg_names, .. } => {
+                // S4.1: Resolve named arguments to positional order
+                let args = if !arg_names.is_empty() {
+                    if let Expression::Identifier(name, _) = callee.as_ref() {
+                        self.resolve_named_args(name, args, arg_names, expr.span())?
+                    } else {
+                        return Err(Diagnostic::new(
+                            "named arguments are only supported for named function calls",
+                            expr.span(),
+                        ));
+                    }
+                } else {
+                    args.clone()
+                };
+                let args = &args;
+
                 if let Expression::Member { target, property, span } = callee.as_ref() {
                     return self.emit_member_call(ctx, target, property, args, *span);
                 }
@@ -1806,6 +1912,52 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let value = self.emit_expression(ctx, arg)?;
                             ctx.in_tail_position = saved_tail;
                             arg_values.push(value);
+                        }
+                        // S4.2: Fill in default values for omitted arguments
+                        if let Some(param_defs) = self.fn_param_defaults.get(name).cloned() {
+                            let provided = arg_values.len();
+                            let expected = param_defs.len();
+                            if provided < expected {
+                                // Temporarily bind already-provided args to param names
+                                // so defaults can reference earlier params (e.g. `*f(a, b ? a)`)
+                                let mut temp_bindings: Vec<String> = Vec::new();
+                                for (idx, pdef) in param_defs.iter().enumerate().take(provided) {
+                                    if !ctx.variables.contains_key(&pdef.name) {
+                                        ctx.variables.insert(pdef.name.clone(), arg_values[idx]);
+                                        temp_bindings.push(pdef.name.clone());
+                                    }
+                                }
+                                for i in provided..expected {
+                                    if let Some(default_expr) = &param_defs[i].default {
+                                        let saved_tail = ctx.in_tail_position;
+                                        ctx.in_tail_position = false;
+                                        let value = self.emit_expression(ctx, default_expr)?;
+                                        ctx.in_tail_position = saved_tail;
+                                        // Also bind this default so later defaults can reference it
+                                        if !ctx.variables.contains_key(&param_defs[i].name) {
+                                            ctx.variables.insert(param_defs[i].name.clone(), value);
+                                            temp_bindings.push(param_defs[i].name.clone());
+                                        }
+                                        arg_values.push(value);
+                                    } else {
+                                        // Clean up temp bindings before returning error
+                                        for tb in &temp_bindings {
+                                            ctx.variables.remove(tb);
+                                        }
+                                        return Err(Diagnostic::new(
+                                            format!(
+                                                "missing argument `{}` with no default",
+                                                param_defs[i].name
+                                            ),
+                                            expr.span(),
+                                        ));
+                                    }
+                                }
+                                // Clean up temporary bindings
+                                for tb in &temp_bindings {
+                                    ctx.variables.remove(tb);
+                                }
+                            }
                         }
                         let metadata_args: Vec<BasicMetadataValueEnum> =
                             arg_values.iter().map(|v| (*v).into()).collect();
@@ -1937,7 +2089,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Desugar pipeline: `a ~ f(args)` becomes `f(a, args)`
                 // With explicit $ placeholder: `a ~ f($, extra)` becomes `f(a, extra)`
                 match right.as_ref() {
-                    Expression::Call { callee, args, span: call_span } => {
+                    Expression::Call { callee, args, span: call_span, .. } => {
                         // Check if any argument is a placeholder (or contains one)
                         let has_placeholder = args.iter().any(|arg| self.contains_placeholder(arg));
                         
@@ -1956,6 +2108,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let desugared = Expression::Call {
                             callee: callee.clone(),
                             args: new_args,
+                            arg_names: vec![],
                             span: *call_span,
                         };
                         self.emit_expression(ctx, &desugared)
@@ -1965,6 +2118,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let desugared = Expression::Call {
                             callee: Box::new(Expression::Identifier(name.clone(), *id_span)),
                             args: vec![left.as_ref().clone()],
+                            arg_names: vec![],
                             span: *span,
                         };
                         self.emit_expression(ctx, &desugared)
@@ -3208,9 +3362,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 expr: Box::new(self.replace_placeholder_with(inner, replacement)),
                 span: *span,
             },
-            Expression::Call { callee, args, span } => Expression::Call {
+            Expression::Call { callee, args, span, .. } => Expression::Call {
                 callee: Box::new(self.replace_placeholder_with(callee, replacement)),
                 args: args.iter().map(|a| self.replace_placeholder_with(a, replacement)).collect(),
+                arg_names: vec![],
                 span: *span,
             },
             Expression::List(items, span) => Expression::List(

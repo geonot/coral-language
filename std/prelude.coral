@@ -21,7 +21,7 @@
 	value
 
 # Conditional value
-*when(condition, value)
+*if_value(condition, value)
 	condition ? value ! none
 
 true_value is true

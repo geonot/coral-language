@@ -374,6 +374,8 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // Check match exhaustiveness after type definitions are collected (TS-9: warnings, not errors)
     check_all_match_exhaustiveness(&globals, &functions, &type_defs, &mut warnings);
     check_unhandled_errors(&globals, &functions, &mut warnings);
+    // T3.5: Dead code detection — warn on statements after return/break/continue
+    check_dead_code(&functions, &mut warnings);
 
     // Inject default trait method bodies into types/stores that don't override them
     inject_trait_default_methods(&mut type_defs, &mut stores, &trait_defs);
@@ -963,7 +965,7 @@ fn collect_constraints_expr(
                 }
             }
         }
-        Expression::Call { callee, args, span } => {
+        Expression::Call { callee, args, span, .. } => {
             // Special-case: if callee is a Member expression with a known method name,
             // bypass the CallableAt constraint (which would fail because e.g. "length" 
             // returns Int, not a callable type). Instead, directly return the method's
@@ -1261,7 +1263,7 @@ fn collect_constraints_expr(
             let _left_ty = collect_constraints_expr(left, constraints, types, graph);
             // Handle the right side based on its form:
             match right.as_ref() {
-                Expression::Call { callee, args, span: call_span } => {
+                Expression::Call { callee, args, span: call_span, .. } => {
                     // a ~ f(args) desugars to f(a, args)
                     // Build a desugared call with left prepended to args
                     let mut full_args = vec![*left.clone()];
@@ -1269,6 +1271,7 @@ fn collect_constraints_expr(
                     let desugared = Expression::Call {
                         callee: callee.clone(),
                         args: full_args,
+                        arg_names: vec![],
                         span: *call_span,
                     };
                     collect_constraints_expr(&desugared, constraints, types, graph)
@@ -1278,6 +1281,7 @@ fn collect_constraints_expr(
                     let desugared = Expression::Call {
                         callee: right.clone(),
                         args: vec![*left.clone()],
+                        arg_names: vec![],
                         span: *span,
                     };
                     collect_constraints_expr(&desugared, constraints, types, graph)
@@ -3075,5 +3079,120 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
                 check_expr_nested_blocks(cond, warnings);
             }
         }
+    }
+}
+
+// ── T3.5: Dead code detection ──────────────────────────────────────────────
+
+/// Get the span of a statement (for warning locations).
+fn statement_span(stmt: &Statement) -> Span {
+    match stmt {
+        Statement::Binding(b) => b.value.span(),
+        Statement::Expression(e) => e.span(),
+        Statement::Return(_, span) => *span,
+        Statement::If { span, .. } => *span,
+        Statement::While { span, .. } => *span,
+        Statement::For { span, .. } => *span,
+        Statement::ForKV { span, .. } => *span,
+        Statement::ForRange { span, .. } => *span,
+        Statement::FieldAssign { span, .. } => *span,
+        Statement::Break(span) => *span,
+        Statement::Continue(span) => *span,
+        Statement::PatternBinding { span, .. } => *span,
+    }
+}
+
+/// Check all function bodies for dead code after unconditional terminators.
+fn check_dead_code(
+    functions: &[Function],
+    warnings: &mut Vec<Diagnostic>,
+) {
+    for function in functions {
+        check_block_for_dead_code(&function.body, warnings);
+    }
+}
+
+/// Walk a block and warn on statements that follow an unconditional Return, Break, or Continue.
+fn check_block_for_dead_code(block: &Block, warnings: &mut Vec<Diagnostic>) {
+    let mut terminated = false;
+    let mut terminator_kind: &str = "";
+
+    for statement in &block.statements {
+        if terminated {
+            warnings.push(
+                Diagnostic::warning(
+                    format!("unreachable code after {}", terminator_kind),
+                    statement_span(statement),
+                )
+                .with_help("consider removing the unreachable statements"),
+            );
+            // Only warn once per block — stop after first unreachable statement
+            break;
+        }
+
+        match statement {
+            Statement::Return(_, _) => {
+                terminated = true;
+                terminator_kind = "return";
+            }
+            Statement::Break(_) => {
+                terminated = true;
+                terminator_kind = "break";
+            }
+            Statement::Continue(_) => {
+                terminated = true;
+                terminator_kind = "continue";
+            }
+            _ => {}
+        }
+
+        // Recurse into nested blocks
+        check_statement_nested_blocks_for_dead_code(statement, warnings);
+    }
+}
+
+/// Recurse into nested blocks within a statement to detect dead code.
+fn check_statement_nested_blocks_for_dead_code(
+    statement: &Statement,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    match statement {
+        Statement::If { body, elif_branches, else_body, .. } => {
+            check_block_for_dead_code(body, warnings);
+            for (_, blk) in elif_branches {
+                check_block_for_dead_code(blk, warnings);
+            }
+            if let Some(else_blk) = else_body {
+                check_block_for_dead_code(else_blk, warnings);
+            }
+        }
+        Statement::While { body, .. }
+        | Statement::For { body, .. }
+        | Statement::ForKV { body, .. }
+        | Statement::ForRange { body, .. } => {
+            check_block_for_dead_code(body, warnings);
+        }
+        Statement::Expression(expr) => {
+            check_expr_for_dead_code(expr, warnings);
+        }
+        Statement::Binding(binding) => {
+            check_expr_for_dead_code(&binding.value, warnings);
+        }
+        _ => {}
+    }
+}
+
+/// Check expressions that contain nested blocks (match, lambda) for dead code.
+fn check_expr_for_dead_code(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
+    match expr {
+        Expression::Match(match_expr) => {
+            for arm in &match_expr.arms {
+                check_block_for_dead_code(&arm.body, warnings);
+            }
+        }
+        Expression::Lambda { body, .. } => {
+            check_block_for_dead_code(body, warnings);
+        }
+        _ => {}
     }
 }

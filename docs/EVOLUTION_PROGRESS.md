@@ -127,6 +127,12 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **S3.2 — Guard Clauses in Match**: Complete. `guard` field on `MatchArm` AST node; parser/codegen/semantic analysis updated for `if condition` syntax after pattern.
 - **S3.3 — Or-Patterns in Match**: Complete. `MatchPattern::Or` variant with `or` keyword in parser. Codegen generates condition for each sub-pattern. Exhaustiveness checker handles or-patterns.
 - **S3.6 — Match as Statement**: Complete. Match expressions usable in statement position without capturing a value.
+- **S4.1 — Named Arguments**: Complete. `func(name: value)` syntax parsed and resolved to positional order in codegen. Works with default params.
+- **S4.2 — Default Parameter Values**: Complete. `*f(x, port ? 5432)` syntax. Defaults filled at call sites, support referencing earlier params.
+- **S5.1–S5.3 — unless/until/loop**: Complete. Pure parser desugaring. Self-hosted, tree-sitter, VS Code extension all updated.
+- **S5.4 — when Expression**: Complete. Multi-branch conditionals desugared to nested ternaries with wildcard default.
+- **C4.1 — Optimization Flags**: Complete. `-O` CLI flag for JIT and binary compilation.
+- **T3.5 — Dead Code Detection**: Complete. Warns on unreachable statements after return/break/continue in all block types.
 
 ---
 
@@ -411,3 +417,14 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
   - Recursive freeze propagates to list items and map key/value pairs
 - **7 new tests**: owner_thread stamping, non-atomic retain/release round-trip, heap string RC, freeze-to-atomic promotion, freeze-list-promotes-children, unique thread IDs across threads, cross-thread retain/release on frozen values
 - **Results**: 816 tests pass (workspace), 7 new M2 runtime tests all pass, 0 failures
+
+### Sprint Session — SPRINT_NEXT_PLAN.md Implementation
+- **S5.1 COMPLETE** (`unless` keyword): Pure parser desugaring to `If` with `Not` condition. Lexer keyword, parser, self-hosted, tree-sitter, VS Code extension updated.
+- **S5.2 COMPLETE** (`until` loop): Pure parser desugaring to `While` with `Not` condition. Full toolchain updated.
+- **S5.3 COMPLETE** (`loop` keyword): Pure parser desugaring to `While(true)`. Full toolchain updated.
+- **S5.4 COMPLETE** (`when` expression): Multi-branch conditionals desugared to nested ternaries. Supports wildcard `_` default arm. Full toolchain updated.
+- **C4.1 COMPLETE** (Optimization flags): `-O` CLI flag passed to `lli`/`llc`/`clang`. Default: `-O0` for JIT, `-O2` for binary.
+- **S4.2 COMPLETE** (Default parameter values): Codegen fills defaults at call sites via `fn_param_defaults` HashMap. Supports defaults referencing earlier params (`*f(a, b ? a)`).
+- **T3.5 COMPLETE** (Dead code detection): Warns on statements after `return`/`break`/`continue`. Recursive into nested blocks (if/while/for/match/lambda).
+- **S4.1 COMPLETE** (Named arguments): `func(name: value)` syntax. Parser detects `ident:` in argument lists. Codegen resolves named args to positional order using parameter definitions. Works with default parameter values.
+- **Results**: 905 tests pass (865 baseline + 18 control_flow_sugar + 4 default_params + 9 dead_code + 9 named_args), 0 failures

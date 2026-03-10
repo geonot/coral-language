@@ -138,7 +138,7 @@
       "patterns": [
         {
           "name": "keyword.control.coral",
-          "match": "\\b(if|elif|else|while|for|in|match|return|break|continue|unsafe)\\b"
+          "match": "\\b(if|elif|else|while|for|in|match|return|break|continue|unsafe|unless|until|loop|when)\\b"
         },
         {
           "name": "keyword.operator.word.coral",

@@ -899,8 +899,17 @@ impl Parser {
             TokenKind::KeywordIf => {
                 return self.parse_if_statement();
             }
+            TokenKind::KeywordUnless => {
+                return self.parse_unless_statement();
+            }
             TokenKind::KeywordWhile => {
                 return self.parse_while_statement();
+            }
+            TokenKind::KeywordUntil => {
+                return self.parse_until_statement();
+            }
+            TokenKind::KeywordLoop => {
+                return self.parse_loop_statement();
             }
             TokenKind::KeywordFor => {
                 return self.parse_for_statement();
@@ -1012,6 +1021,60 @@ impl Parser {
         let span = self.current_span();
         self.expect(TokenKind::KeywordWhile, "expected 'while'")?;
         let condition = self.parse_expression()?;
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(Statement::While {
+            condition,
+            body,
+            span,
+        })
+    }
+
+    /// Parse `unless condition\n  body` — desugars to `if !(condition) { body }`
+    fn parse_unless_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        self.expect(TokenKind::KeywordUnless, "expected 'unless'")?;
+        let raw_condition = self.parse_expression()?;
+        let condition = Expression::Unary {
+            op: UnaryOp::Not,
+            span: raw_condition.span(),
+            expr: Box::new(raw_condition),
+        };
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(Statement::If {
+            condition,
+            body,
+            elif_branches: vec![],
+            else_body: None,
+            span,
+        })
+    }
+
+    /// Parse `until condition\n  body` — desugars to `while !(condition) { body }`
+    fn parse_until_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        self.expect(TokenKind::KeywordUntil, "expected 'until'")?;
+        let raw_condition = self.parse_expression()?;
+        let condition = Expression::Unary {
+            op: UnaryOp::Not,
+            span: raw_condition.span(),
+            expr: Box::new(raw_condition),
+        };
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(Statement::While {
+            condition,
+            body,
+            span,
+        })
+    }
+
+    /// Parse `loop\n  body` — desugars to `while true { body }`
+    fn parse_loop_statement(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        self.expect(TokenKind::KeywordLoop, "expected 'loop'")?;
+        let condition = Expression::Bool(true, span);
         self.skip_newlines();
         let body = self.parse_block()?;
         Ok(Statement::While {
@@ -1471,11 +1534,12 @@ impl Parser {
         let mut expr = self.parse_primary()?;
         loop {
             if self.matches(TokenKind::LParen) {
-                let args = self.parse_arguments()?;
+                let (args, arg_names) = self.parse_arguments()?;
                 let span = expr.span().join(self.previous_span());
                 expr = Expression::Call {
                     callee: Box::new(expr),
                     args,
+                    arg_names,
                     span,
                 };
             } else if self.matches(TokenKind::Dot) {
@@ -1517,12 +1581,16 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_arguments(&mut self) -> ParseResult<Vec<Expression>> {
+    /// Parse function call arguments, supporting both positional and named args.
+    /// Named args use `name: value` syntax. Positional args must come before named args.
+    fn parse_arguments(&mut self) -> ParseResult<(Vec<Expression>, Vec<Option<String>>)> {
         let mut args = Vec::new();
+        let mut arg_names: Vec<Option<String>> = Vec::new();
+        let mut seen_named = false;
         
         // Handle empty argument list
         if self.matches(TokenKind::RParen) {
-            return Ok(args);
+            return Ok((args, arg_names));
         }
         
         // Check if arguments are indented (multiline)
@@ -1554,8 +1622,33 @@ impl Parser {
                 }
             }
             
-            // Parse the argument expression
-            args.push(self.parse_expression()?);
+            // S4.1: Check for named argument: `identifier: expression`
+            // Look ahead for Identifier followed by Colon (not inside taxonomy path)
+            let is_named_arg = if let TokenKind::Identifier(_) = self.peek_kind() {
+                // Check if next-next token is a Colon
+                self.index + 1 < self.tokens.len() && self.tokens[self.index + 1].kind == TokenKind::Colon
+            } else {
+                false
+            };
+            
+            if is_named_arg {
+                let (name, _name_span) = self.consume_identifier_or_keyword()?;
+                self.advance(); // consume Colon
+                let value = self.parse_expression()?;
+                args.push(value);
+                arg_names.push(Some(name));
+                seen_named = true;
+            } else {
+                if seen_named {
+                    return Err(Diagnostic::new(
+                        "positional arguments must come before named arguments",
+                        self.current_span(),
+                    ));
+                }
+                // Parse the argument expression
+                args.push(self.parse_expression()?);
+                arg_names.push(None);
+            }
             
             // Handle comma separator
             if self.matches(TokenKind::Comma) {
@@ -1579,7 +1672,12 @@ impl Parser {
             break;
         }
         
-        Ok(args)
+        // Only include arg_names if there are named args
+        if !seen_named {
+            arg_names.clear();
+        }
+        
+        Ok((args, arg_names))
     }
 
     fn parse_primary(&mut self) -> ParseResult<Expression> {
@@ -1681,6 +1779,7 @@ impl Parser {
                 Ok(Expression::Identifier(name, span))
             }
             TokenKind::KeywordMatch => self.parse_match_expression(),
+            TokenKind::KeywordWhen => self.parse_when_expression(),
             TokenKind::KeywordUnsafe => self.parse_unsafe_block(),
             TokenKind::KeywordAsm => self.parse_inline_asm(),
             TokenKind::KeywordErr => self.parse_error_value(),
@@ -2020,6 +2119,81 @@ impl Parser {
         Ok(Expression::List(items, start.join(end)))
     }
 
+    /// Parse `when` expression — desugars to nested ternary expressions.
+    /// Syntax:
+    /// ```text
+    /// when
+    ///   condition1 ? value1
+    ///   condition2 ? value2
+    ///   _          ? default_value
+    /// ```
+    /// Desugars to: `condition1 ? value1 ! (condition2 ? value2 ! default_value)`
+    fn parse_when_expression(&mut self) -> ParseResult<Expression> {
+        let when_span = self.advance().span; // consume 'when'
+        self.expect(TokenKind::Newline, "expected newline after 'when'")?;
+        let arms_start = match self.consume_indent_with_recovery(
+            "expected indented when arms",
+            "Indent each when arm under the when expression",
+        ) {
+            Some(span) => span,
+            None => {
+                return Ok(Expression::None(when_span));
+            }
+        };
+        
+        let mut arms: Vec<(Expression, Expression)> = Vec::new();
+        let mut default_expr: Option<Expression> = None;
+        
+        loop {
+            self.skip_newlines();
+            if self.check(TokenKind::Dedent) {
+                let span = self.current_span();
+                self.leave_layout_block(span);
+                self.advance();
+                break;
+            }
+            if self.check(TokenKind::Eof) {
+                self.report_missing_dedent(arms_start, "missing dedent to close when arms");
+                break;
+            }
+            // Check for wildcard/default arm: `_ ? value`
+            if self.check(TokenKind::Identifier("_".into())) {
+                let tok = self.peek_kind().clone();
+                if let TokenKind::Identifier(name) = &tok {
+                    if name == "_" {
+                        self.advance(); // consume _
+                        self.expect(TokenKind::Question, "expected '?' after '_' in when arm")?;
+                        default_expr = Some(self.parse_expression()?);
+                        self.skip_newlines();
+                        continue;
+                    }
+                }
+            }
+            // Normal arm: `condition ? value`
+            let condition = self.parse_pipeline()?;
+            self.expect(TokenKind::Question, "expected '?' in when arm")?;
+            let value = self.parse_expression()?;
+            arms.push((condition, value));
+            self.skip_newlines();
+        }
+        
+        // Build the expression from the bottom up (right fold into nested ternaries)
+        let none_expr = Expression::None(when_span);
+        let base = default_expr.unwrap_or(none_expr);
+        
+        let result = arms.into_iter().rev().fold(base, |else_branch, (condition, then_branch)| {
+            let span = condition.span().join(else_branch.span());
+            Expression::Ternary {
+                condition: Box::new(condition),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+                span,
+            }
+        });
+        
+        Ok(result)
+    }
+
     fn parse_match_expression(&mut self) -> ParseResult<Expression> {
         let match_span = self.advance().span;
         let value = self.parse_expression()?;
@@ -2301,6 +2475,10 @@ impl Parser {
             TokenKind::KeywordContinue => { self.advance(); Ok(("continue".to_string(), span)) }
             TokenKind::KeywordTo => { self.advance(); Ok(("to".to_string(), span)) }
             TokenKind::KeywordStep => { self.advance(); Ok(("step".to_string(), span)) }
+            TokenKind::KeywordUnless => { self.advance(); Ok(("unless".to_string(), span)) }
+            TokenKind::KeywordUntil => { self.advance(); Ok(("until".to_string(), span)) }
+            TokenKind::KeywordLoop => { self.advance(); Ok(("loop".to_string(), span)) }
+            TokenKind::KeywordWhen => { self.advance(); Ok(("when".to_string(), span)) }
             _ => Err(self.error_here("expected identifier")),
         }
     }

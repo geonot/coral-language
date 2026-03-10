@@ -152,7 +152,7 @@ These functions are available in all Coral programs without explicit import:
     log_line(value)
     value
 
-*when(condition, value)
+*if_value(condition, value)
     condition ? value ! none
 
 # Constants

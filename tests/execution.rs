@@ -3449,3 +3449,69 @@ enum Pair[K with Hashable, V]
         &["99"],
     );
 }
+
+// ─── S4.2: Default Parameter Values ────────────────────────────────
+
+#[test]
+fn e2e_default_param_basic() {
+    assert_output(
+        r#"
+*greet(name, greeting ? "hello")
+    log(greeting + " " + name)
+
+*main()
+    greet("world")
+    greet("world", "hi")
+"#,
+        &["hello world", "hi world"],
+    );
+}
+
+#[test]
+fn e2e_default_param_numeric() {
+    assert_output(
+        r#"
+*connect(host, port ? 5432)
+    log(host + ":" + port)
+
+*main()
+    connect("db.local")
+    connect("db.local", 3306)
+"#,
+        &["db.local:5432", "db.local:3306"],
+    );
+}
+
+#[test]
+fn e2e_default_param_multiple() {
+    assert_output(
+        r#"
+*config(host ? "localhost", port ? 8080, debug ? false)
+    log(host)
+    log(port)
+    log(debug)
+
+*main()
+    config()
+    config("example.com")
+    config("example.com", 9090)
+    config("example.com", 9090, true)
+"#,
+        &["localhost", "8080", "false", "example.com", "8080", "false", "example.com", "9090", "false", "example.com", "9090", "true"],
+    );
+}
+
+#[test]
+fn e2e_default_param_expression() {
+    assert_output(
+        r#"
+*compute(x, factor ? 2 * 3)
+    log(x * factor)
+
+*main()
+    compute(5)
+    compute(5, 10)
+"#,
+        &["30", "50"],
+    );
+}
