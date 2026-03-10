@@ -8,9 +8,9 @@
 
 ## Preamble
 
-Coral has reached an extraordinary milestone. The self-hosted compiler bootstraps — gen2 equals gen3 byte-for-byte. 816 tests pass with zero failures. The language compiles itself. NaN-boxing has been implemented, transforming the value representation from 40-byte heap-allocated structs to 64-bit immediate values. Type specialization generates native `fadd`/`fcmp` instructions for numeric hot paths. Pattern matching supports guards, or-patterns, and multi-statement arms. The compiler performs dead function elimination, common subexpression elimination, tail call optimization, and small function inlining.
+Coral has reached an extraordinary milestone. The self-hosted compiler bootstraps — gen2 equals gen3 byte-for-byte. 920 tests pass with zero failures. The language compiles itself. NaN-boxing has been implemented, transforming the value representation from 40-byte heap-allocated structs to 64-bit immediate values. Type specialization generates native `fadd`/`fcmp` instructions for numeric hot paths. Pattern matching supports guards, or-patterns, and multi-statement arms. The compiler performs dead function elimination, common subexpression elimination, tail call optimization, and small function inlining. Named arguments, default parameters, `unless`/`until`/`loop`/`when` syntax sugar, dead code detection, AST-level modules with namespacing and selective imports, and an LSP server with real-time diagnostics have all been implemented.
 
-Phase Alpha is **complete**. Phase Beta is approximately **90% complete**. This is the proof that Coral *works* — and increasingly, works *fast*.
+Phase Alpha is **complete**. Phase Beta is **complete**. Early Phase Gamma/Delta items are in progress. This is the proof that Coral *works* — and increasingly, works *fast*.
 
 But working is not enough. To achieve the audacious goal of becoming the language that Rust or Zig could have been — a language that combines low-level systems power with high-level expressiveness — Coral must evolve across six foundational pillars:
 
@@ -462,7 +462,7 @@ All Phase Alpha tasks have been completed:
 - **S2.1** ✅ Pipeline operator — desugaring in lowering pass
 - **CC2.1-CC2.3** ✅ Error reporting — source-mapped errors, multi-error reporting, DWARF debug info
 
-### Phase Beta — IN PROGRESS (est. 90% complete)
+### Phase Beta — ✅ COMPLETE
 
 **Goal:** The type system catches real bugs. The compiler generates smart code. The syntax handles every common pattern elegantly.
 
@@ -470,9 +470,9 @@ All Phase Alpha tasks have been completed:
 |----------|-------|--------|
 | T2.1-T2.3 (User generics — syntax, inference, instantiation) | ✅ Complete |
 | T2.4 (Trait bounds on generics) | ✅ Complete |
-| T2.5 (Monomorphization) | Not started |
+| T2.5 (Monomorphization) | Deferred to Gamma |
 | C2.1-C2.3 (Type specialization) | ✅ Complete |
-| C2.4-C2.5 (Unboxed lists, store field specialization) | Not started |
+| C2.4-C2.5 (Unboxed lists, store field specialization) | Deferred to Gamma |
 | S3.1-S3.3 (Multi-statement arms, guards, or-patterns) | ✅ Complete |
 | S3.4-S3.5 (Nested patterns, range patterns) | ✅ Complete |
 | S3.6 (Match as statement) | ✅ Complete |
@@ -480,19 +480,27 @@ All Phase Alpha tasks have been completed:
 | C3.2 (Lambda inlining in higher-order functions) | ✅ Complete |
 | S2.2-S2.7 (Collection expressions) | ✅ Complete |
 | M2.1-M2.4 (Non-atomic RC fast path) | ✅ Complete |
+| S4.1 (Named arguments) | ✅ Complete |
+| S4.2 (Default parameter values) | ✅ Complete |
+| S5.1-S5.3 (unless/until/loop) | ✅ Complete |
+| S5.4 (when expression) | ✅ Complete |
+| C4.1 (Optimization level flags) | ✅ Complete |
+| T3.5 (Dead code detection) | ✅ Complete |
+| CC3.1-CC3.3 (Module system, namespacing, selective imports) | ✅ Complete |
+| CC2.5 (LSP MVP — diagnostics) | ✅ Complete |
 
 ### Phase Gamma (Months 9-12): Runtime & Ecosystem
 
 **Goal:** The runtime is production-grade. The standard library handles real workloads. The actor system scales.
 
-| Priority | Tasks | Rationale |
-|----------|-------|-----------|
-| **Month 9-10** | R2.1-R2.12 (Actor performance & completion) | Work-stealing, typed messages, monitoring, supervision |
-| **Month 9-10** | L2.1-L2.6 (Core module completion) | Random, regex, time, io, process, testing |
-| **Month 10-11** | R3.1-R3.9 (Store performance & completion) | Indexes, compaction, transactions, query syntax |
-| **Month 10-12** | CC3.1-CC3.3 (Module system) | Proper namespacing, selective imports |
-| **Month 11-12** | L3.1-L3.4 (Networking & data) | HTTP client/server, crypto |
-| **Month 11-12** | CC2.5 (LSP) | Editor integration for adoption |
+| Priority | Tasks | Rationale | Status |
+|----------|-------|-----------|--------|
+| **Month 9-10** | R2.1-R2.12 (Actor performance & completion) | Work-stealing, typed messages, monitoring, supervision | Not started |
+| **Month 9-10** | L2.1-L2.6 (Core module completion) | Random, regex, time, io, process, testing | Not started |
+| **Month 10-11** | R3.1-R3.9 (Store performance & completion) | Indexes, compaction, transactions, query syntax | Not started |
+| ~~Month 10-12~~ | ~~CC3.1-CC3.3 (Module system)~~ | ~~Proper namespacing, selective imports~~ | ✅ Done (Sprint 1) |
+| **Month 11-12** | L3.1-L3.4 (Networking & data) | HTTP client/server, crypto | Not started |
+| ~~Month 11-12~~ | ~~CC2.5 (LSP)~~ | ~~Editor integration for adoption~~ | ✅ Done (Sprint 1) |
 
 ### Phase Delta (Months 13-18): Mastery & Polish
 
@@ -500,14 +508,20 @@ All Phase Alpha tasks have been completed:
 
 | Priority | Tasks | Rationale |
 |----------|-------|-----------|
-| **Month 13-14** | T3.1-T3.5 (Flow-sensitive typing) | Null safety, error exhaustiveness |
-| **Month 13-14** | M3.1-M3.5 (Generational cycle detection) | Eliminates GC pauses |
-| **Month 14-15** | C4.1-C4.5 (LLVM optimization) | PGO, LTO, optimization flags |
-| **Month 14-16** | M4.1-M4.4 (Escape analysis) | Stack allocation, region-based memory |
-| **Month 15-16** | S4.1-S4.6 (Function expressiveness) | Named args, defaults, extension methods |
-| **Month 16-17** | C5.1-C5.4 (Advanced comptime) | Compile-time code generation |
-| **Month 17-18** | CC4.1-CC4.4 (Compilation targets) | WASM, macOS, Windows, static linking |
-| **Month 17-18** | L4.1-L4.5 (Developer experience) | Docs, packages, debug tools |
+| Priority | Tasks | Rationale | Status |
+|----------|-------|-----------|--------|
+| **Month 13-14** | T3.1-T3.4 (Flow-sensitive typing) | Null safety, error exhaustiveness | Not started |
+| ~~Month 13-14~~ | ~~T3.5 (Dead code detection)~~ | ~~Dead code warnings~~ | ✅ Done (Sprint 1) |
+| **Month 13-14** | M3.1-M3.5 (Generational cycle detection) | Eliminates GC pauses | Not started |
+| ~~Month 14-15~~ | ~~C4.1 (Optimization flags)~~ | ~~-O flag for JIT/binary~~ | ✅ Done (Sprint 1) |
+| **Month 14-15** | C4.2-C4.5 (LLVM optimization) | PGO, LTO, function attributes | Not started |
+| **Month 14-16** | M4.1-M4.4 (Escape analysis) | Stack allocation, region-based memory | Not started |
+| ~~Month 15-16~~ | ~~S4.1-S4.2 (Named args, defaults)~~ | ~~Named arguments, default params~~ | ✅ Done (Sprint 1) |
+| **Month 15-16** | S4.3-S4.6 (Function expressiveness) | Multi-line lambdas, extension methods | Not started |
+| ~~Month 15-16~~ | ~~S5.1-S5.4 (Conversational sugar)~~ | ~~unless/until/loop/when~~ | ✅ Done (Sprint 1) |
+| **Month 16-17** | C5.1-C5.4 (Advanced comptime) | Compile-time code generation | Not started |
+| **Month 17-18** | CC4.1-CC4.4 (Compilation targets) | WASM, macOS, Windows, static linking | Not started |
+| **Month 17-18** | L4.1-L4.5 (Developer experience) | Docs, packages, debug tools | Not started |
 
 ### Phase Epsilon (Months 19-24): Self-Hosted Runtime & Full Independence
 
@@ -540,7 +554,7 @@ All Phase Alpha tasks have been completed:
 
 | Metric | Current | Alpha | Beta | Delta |
 |--------|---------|-------|------|-------|
-| Tests | 816 | 1500+ | 3000+ | 5000+ |
+| Tests | 920 | 1500+ | 3000+ | 5000+ |
 | Examples that compile | 5/7 | 7/7 | 15+ | 30+ |
 | Type errors caught (true positives) | ~30% | ~70% | ~90% | ~99% |
 | Type errors missed (false negatives) | ~70% | ~30% | ~10% | ~1% |
@@ -556,7 +570,11 @@ All Phase Alpha tasks have been completed:
 | `for i in 1..100` | `for..to..step` counted loop ✅ | Counted loop, no allocation |
 | `match x / Some(v) if v > 0 ? ...` | Guard clauses + or-patterns ✅ | Full guard + narrowing |
 | `{name, age} is user` | Not implemented | Destructuring with type inference |
-| `server.handle(path: '/', method: 'GET')` | Not implemented | Named arguments |
+| `server.handle(path: '/', method: 'GET')` | ✅ Named args implemented (S4.1) | Named arguments |
+| `*connect(host, port ? 5432)` | ✅ Default params implemented (S4.2) | Default parameter values |
+| `unless ready ? return` | ✅ Desugared to if-not (S5.1) | Conversational sugar |
+| `use std.math.{sin, cos}` | ✅ Selective imports (CC3.3) | Module system |
+| `math.sin(x)` | ✅ Qualified access (CC3.2) | Namespacing |
 
 ---
 

@@ -133,6 +133,10 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **S5.4 — when Expression**: Complete. Multi-branch conditionals desugared to nested ternaries with wildcard default.
 - **C4.1 — Optimization Flags**: Complete. `-O` CLI flag for JIT and binary compilation.
 - **T3.5 — Dead Code Detection**: Complete. Warns on unreachable statements after return/break/continue in all block types.
+- **CC3.1 — AST-Level Module System**: Complete. `ModuleLoader::load_modules()` returns per-module `ModuleSource` structs in topo order. `Compiler::compile_modules_to_ir()` parses each independently. `Program::from_modules()` merges.
+- **CC3.2 — Namespacing / Qualified Access**: Complete. `module.func()` resolved in codegen via `module_exports` map in `emit_member_call`.
+- **CC3.3 — Selective Imports**: Complete. `use std.math.{sin, cos}` syntax via `ImportDirective` struct with module_path + selections.
+- **CC2.5 — LSP MVP (Diagnostics)**: Complete. `coral-lsp` workspace crate using tower-lsp + tokio. Diagnostics on open/change/save with span→position via `LineIndex`.
 
 ---
 
