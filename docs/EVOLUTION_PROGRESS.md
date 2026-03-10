@@ -10,7 +10,7 @@
 | Metric | Value | Date |
 |--------|-------|------|
 | Initial tests passing | 203 | 2026-03-08 |
-| Current tests passing | 816 + 7 runtime | 2026-03-09 |
+| Current tests passing | 920 + 7 runtime | 2026-03-10 |
 | Pre-existing failures | 0 |
 | Runtime build | debug + release |
 
@@ -428,3 +428,10 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **T3.5 COMPLETE** (Dead code detection): Warns on statements after `return`/`break`/`continue`. Recursive into nested blocks (if/while/for/match/lambda).
 - **S4.1 COMPLETE** (Named arguments): `func(name: value)` syntax. Parser detects `ident:` in argument lists. Codegen resolves named args to positional order using parameter definitions. Works with default parameter values.
 - **Results**: 905 tests pass (865 baseline + 18 control_flow_sugar + 4 default_params + 9 dead_code + 9 named_args), 0 failures
+
+### Sprint Session — CC3 Module System + CC2.5 LSP
+- **CC3.1 COMPLETE** (AST-level module system): `ModuleLoader::load_modules()` returns per-module `ModuleSource` structs in topo order. `Compiler::compile_modules_to_ir()` parses each module independently, builds `Module` ASTs with name/items/imports/exports, merges via `Program::from_modules()`. 8 new tests.
+- **CC3.2 COMPLETE** (Qualified module access): `module.func()` resolved in codegen via `module_exports` map. `emit_member_call` checks if target identifier matches a known module namespace and dispatches to the function by its unqualified name.
+- **CC3.3 COMPLETE** (Selective imports): `use std.math.{sin, cos}` syntax. `ImportDirective` struct tracks module_path + selections. Parser handles `{...}` braced symbol lists. 7 new tests in module_namespaces.rs.
+- **CC2.5 COMPLETE** (LSP MVP): `coral-lsp` workspace crate using tower-lsp + tokio. Provides diagnostics on open/change/save with proper span→position conversion via `LineIndex`. Module-aware compilation for saved files, direct compilation for unsaved buffers.
+- **Results**: 920 tests pass (905 prior + 8 modules + 7 module_namespaces), 0 failures

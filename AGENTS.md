@@ -11,7 +11,7 @@
 - Emit IR:           cargo run -- --emit-ir output.ll examples/hello.coral
 
 ## Test Baseline (update after each session)
-- Tests: 905 pass + 7 runtime-crate M2 tests, 0 failures
+- Tests: 920 pass + 7 runtime-crate M2 tests, 0 failures
 - Runtime: cargo test -p runtime
 
 ## Key File Locations
@@ -26,6 +26,8 @@
 - Runtime NaN:    runtime/src/nanbox.rs, runtime/src/nanbox_ffi.rs
 - Pipeline:       src/compiler.rs
 - CLI:            src/main.rs
+- Module Loader:  src/module_loader.rs
+- LSP Server:     coral-lsp/src/main.rs
 
 ## Critical Patterns
 - Binding: `is` keyword, NEVER = or ==
