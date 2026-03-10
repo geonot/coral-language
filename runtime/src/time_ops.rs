@@ -108,3 +108,11 @@ pub extern "C" fn coral_time_format_iso(value: ValueHandle) -> ValueHandle {
     let iso = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, minute, second);
     coral_make_string_from_rust(&iso)
 }
+
+/// Sleep for the given number of milliseconds (blocking).
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_sleep(ms_value: ValueHandle) -> ValueHandle {
+    let ms = get_ts_arg(ms_value) as u64;
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+    coral_make_unit()
+}

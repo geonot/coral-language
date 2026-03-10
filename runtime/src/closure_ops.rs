@@ -8,11 +8,12 @@ pub extern "C" fn coral_make_closure(
     invoke: ClosureInvokeFn,
     release: ClosureReleaseFn,
     env: *mut c_void,
+    capture_count: usize,
 ) -> ValueHandle {
     if invoke.is_none() {
         return coral_make_unit();
     }
-    let object = Box::new(ClosureObject { invoke, release, env });
+    let object = Box::new(ClosureObject { invoke, release, env, capture_count });
     alloc_value(Value::from_heap(
         ValueTag::Closure,
         Box::into_raw(object) as *mut c_void,

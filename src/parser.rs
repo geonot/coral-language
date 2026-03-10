@@ -878,9 +878,17 @@ impl Parser {
         if self.peek_is_self_field_assignment() {
             return self.parse_self_field_assignment();
         }
+        // S1.5: self.field += value (augmented field assignment)
+        if self.peek_is_self_field_augmented_assign() {
+            return self.parse_self_field_augmented_assign();
+        }
         let stmt = match self.peek_kind() {
             TokenKind::Identifier(_) if self.peek_is_binding() => {
                 Statement::Binding(self.parse_binding()?)
+            }
+            // S1.5: Augmented assignment — `x += 1` desugars to `x is x + 1`
+            TokenKind::Identifier(_) if self.peek_is_augmented_assign() => {
+                return self.parse_augmented_assign();
             }
             // S2.4: List destructuring — [a, b, c] is expr
             TokenKind::LBracket if self.peek_is_pattern_binding() => {
@@ -893,8 +901,13 @@ impl Parser {
             TokenKind::KeywordReturn => {
                 let span = self.current_span();
                 self.advance(); // consume 'return'
-                let expr = self.parse_expression()?;
-                Statement::Return(expr, span)
+                // S5.6: `return if cond` / `return unless cond` — bare return wrapped by postfix handler
+                if self.check(TokenKind::KeywordIf) || self.check(TokenKind::KeywordUnless) {
+                    Statement::Return(Expression::None(span), span)
+                } else {
+                    let expr = self.parse_expression()?;
+                    Statement::Return(expr, span)
+                }
             }
             TokenKind::KeywordIf => {
                 return self.parse_if_statement();
@@ -926,6 +939,46 @@ impl Parser {
             }
             _ => Statement::Expression(self.parse_expression()?),
         };
+        // S5.6: Postfix `if` / `unless` — wraps the preceding statement in a conditional.
+        // `log("warning") if debug_mode` → `if debug_mode { log("warning") }`
+        // `exit(1) unless valid` → `if not valid { exit(1) }`
+        if self.check(TokenKind::KeywordIf) || self.check(TokenKind::KeywordUnless) {
+            let is_unless = self.check(TokenKind::KeywordUnless);
+            self.advance(); // consume 'if' or 'unless'
+            let raw_condition = self.parse_expression()?;
+            let condition = if is_unless {
+                Expression::Unary {
+                    op: UnaryOp::Not,
+                    span: raw_condition.span(),
+                    expr: Box::new(raw_condition),
+                }
+            } else {
+                raw_condition
+            };
+            let stmt_span = match &stmt {
+                Statement::Return(_, s) | Statement::Break(s) | Statement::Continue(s) => *s,
+                Statement::Expression(e) => e.span(),
+                Statement::If { span, .. } | Statement::While { span, .. }
+                | Statement::For { span, .. } | Statement::ForKV { span, .. }
+                | Statement::ForRange { span, .. } => *span,
+                Statement::Binding(b) => b.span,
+                Statement::FieldAssign { span, .. } => *span,
+                Statement::PatternBinding { span, .. } => *span,
+            };
+            let body = Block {
+                statements: vec![stmt],
+                value: None,
+                span: stmt_span,
+            };
+            let span = stmt_span.join(condition.span());
+            return Ok(Statement::If {
+                condition,
+                body,
+                elif_branches: vec![],
+                else_body: None,
+                span,
+            });
+        }
         // Guard statement: `condition ? body` desugars to `if condition { body }`
         // Also handles binding-as-condition: `x is val ? body` → `if (x == val) { body }`
         if self.check(TokenKind::Question) {
@@ -1195,6 +1248,113 @@ impl Parser {
         
         let self_expr = Expression::Identifier("self".to_string(), start_span);
         
+        self.skip_newlines();
+        Ok(Statement::FieldAssign {
+            target: self_expr,
+            field: field_name,
+            value,
+            span,
+        })
+    }
+
+    // ─── S1.5: Augmented Assignment ────────────────────────────────
+
+    fn is_augmented_assign_token(kind: &TokenKind) -> Option<BinaryOp> {
+        match kind {
+            TokenKind::PlusEquals => Some(BinaryOp::Add),
+            TokenKind::MinusEquals => Some(BinaryOp::Sub),
+            TokenKind::StarEquals => Some(BinaryOp::Mul),
+            TokenKind::SlashEquals => Some(BinaryOp::Div),
+            _ => None,
+        }
+    }
+
+    /// Check if current position is `identifier +=` (or `-=`, `*=`, `/=`)
+    fn peek_is_augmented_assign(&self) -> bool {
+        matches!(
+            self.tokens.get(self.index + 1).map(|t| &t.kind),
+            Some(TokenKind::PlusEquals)
+            | Some(TokenKind::MinusEquals)
+            | Some(TokenKind::StarEquals)
+            | Some(TokenKind::SlashEquals)
+        )
+    }
+
+    /// Parse `x += expr` and desugar to `x is x + expr` (Binding)
+    fn parse_augmented_assign(&mut self) -> ParseResult<Statement> {
+        let (name, name_span) = self.consume_identifier()?;
+        let op_token = self.advance(); // consume +=, -=, *=, /=
+        let op = Self::is_augmented_assign_token(&op_token.kind)
+            .expect("augmented assign token");
+        self.skip_newlines();
+        let rhs = self.parse_expression()?;
+        let span = name_span.join(rhs.span());
+        let value = Expression::Binary {
+            op,
+            left: Box::new(Expression::Identifier(name.clone(), name_span)),
+            right: Box::new(rhs),
+            span,
+        };
+        Ok(Statement::Binding(Binding {
+            name,
+            type_annotation: None,
+            value,
+            span,
+        }))
+    }
+
+    /// Check if current position is `self.field +=` (or `-=`, `*=`, `/=`)
+    fn peek_is_self_field_augmented_assign(&self) -> bool {
+        let tok0 = self.tokens.get(self.index);
+        let tok1 = self.tokens.get(self.index + 1);
+        let tok2 = self.tokens.get(self.index + 2);
+        let tok3 = self.tokens.get(self.index + 3);
+        
+        let is_self_dot_field = matches!(
+            (tok0, tok1, tok2),
+            (
+                Some(Token { kind: TokenKind::Identifier(name), .. }),
+                Some(Token { kind: TokenKind::Dot, .. }),
+                Some(Token { kind: TokenKind::Identifier(_), .. }),
+            ) if name == "self"
+        );
+        if !is_self_dot_field { return false; }
+        matches!(
+            tok3.map(|t| &t.kind),
+            Some(TokenKind::PlusEquals)
+            | Some(TokenKind::MinusEquals)
+            | Some(TokenKind::StarEquals)
+            | Some(TokenKind::SlashEquals)
+        )
+    }
+
+    /// Parse `self.field += expr` and desugar to `self.field is self.field + expr`
+    fn parse_self_field_augmented_assign(&mut self) -> ParseResult<Statement> {
+        let start_span = self.current_span();
+        self.advance(); // consume 'self'
+        self.advance(); // consume '.'
+        let (field_name, field_span) = self.consume_identifier()?;
+        let op_token = self.advance(); // consume +=, -=, *=, /=
+        let op = Self::is_augmented_assign_token(&op_token.kind)
+            .expect("augmented assign token");
+        self.skip_newlines();
+        let rhs = self.parse_expression()?;
+        let span = start_span.join(rhs.span());
+
+        let self_expr = Expression::Identifier("self".to_string(), start_span);
+        // Build `self.field` as the existing value
+        let field_access = Expression::Member {
+            target: Box::new(self_expr.clone()),
+            property: field_name.clone(),
+            span: start_span.join(field_span),
+        };
+        let value = Expression::Binary {
+            op,
+            left: Box::new(field_access),
+            right: Box::new(rhs),
+            span,
+        };
+
         self.skip_newlines();
         Ok(Statement::FieldAssign {
             target: self_expr,

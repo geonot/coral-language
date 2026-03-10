@@ -1174,6 +1174,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let v = self.emit_expression(ctx, &args[0])?;
                 Ok(Some(self.call_bridged(self.runtime.json_serialize_pretty, &[v], "json_pretty_call")))
             }
+            // Random operations (L2.1)
+            "random" => {
+                Ok(Some(self.call_bridged(self.runtime.random, &[], "random_call")))
+            }
+            "random_int" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("random_int expects two arguments (min, max)", span));
+                }
+                let min_v = self.emit_expression(ctx, &args[0])?;
+                let max_v = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.random_int, &[min_v, max_v], "random_int_call")))
+            }
+            "random_seed" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("random_seed expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.random_seed, &[v], "random_seed_call")))
+            }
+            // Sleep (L2.3)
+            "time_sleep" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("time_sleep expects one argument (milliseconds)", span));
+                }
+                let ms = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.sleep, &[ms], "sleep_call")))
+            }
             // Time operations (SL-9)
             "time_now" => {
                 Ok(Some(self.call_bridged(self.runtime.time_now, &[], "time_now_call")))

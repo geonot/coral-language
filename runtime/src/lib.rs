@@ -25,6 +25,7 @@ pub mod list_ops;
 pub mod map_ops;
 pub mod math_ops;
 pub mod metrics;
+pub mod random_ops;
 pub mod rc_ops;
 pub mod string_ops;
 pub mod tagged_ops;
@@ -43,6 +44,7 @@ pub use list_ops::*;
 pub use map_ops::*;
 pub use math_ops::*;
 pub use metrics::*;
+pub use random_ops::*;
 pub use rc_ops::*;
 pub use string_ops::*;
 pub use tagged_ops::*;
@@ -273,6 +275,8 @@ struct ClosureObject {
     invoke: ClosureInvokeFn,
     release: ClosureReleaseFn,
     env: *mut c_void,
+    /// M3.4: Number of captured NaN-boxed i64 values in the env struct.
+    capture_count: usize,
 }
 
 /// Tagged value for ADT (algebraic data type / sum type) variants.

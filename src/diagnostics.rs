@@ -8,12 +8,58 @@ pub enum Severity {
     Info,
 }
 
+/// CC2.4: Warning categories for filtering via --allow/--warn CLI flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WarningCategory {
+    UnusedVariable,
+    DeadCode,
+    ShadowedBinding,
+    TypeMismatchBranch,
+    UnreachableCode,
+    General,
+}
+
+impl WarningCategory {
+    /// Parse a category name from a CLI string (e.g., "dead_code").
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "unused_variable" | "unused" => Some(Self::UnusedVariable),
+            "dead_code" => Some(Self::DeadCode),
+            "shadowed_binding" | "shadow" => Some(Self::ShadowedBinding),
+            "type_mismatch_branch" | "branch_types" => Some(Self::TypeMismatchBranch),
+            "unreachable_code" | "unreachable" => Some(Self::UnreachableCode),
+            "general" => Some(Self::General),
+            _ => None,
+        }
+    }
+
+    /// Return the canonical name of this category.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::UnusedVariable => "unused_variable",
+            Self::DeadCode => "dead_code",
+            Self::ShadowedBinding => "shadowed_binding",
+            Self::TypeMismatchBranch => "type_mismatch_branch",
+            Self::UnreachableCode => "unreachable_code",
+            Self::General => "general",
+        }
+    }
+}
+
+impl fmt::Display for WarningCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub span: Span,
     pub help: Option<String>,
     pub severity: Severity,
+    /// CC2.4: Optional warning category for filtering.
+    pub category: Option<WarningCategory>,
 }
 
 impl Diagnostic {
@@ -23,6 +69,7 @@ impl Diagnostic {
             span,
             help: None,
             severity: Severity::Error,
+            category: None,
         }
     }
 
@@ -32,6 +79,18 @@ impl Diagnostic {
             span,
             help: None,
             severity: Severity::Warning,
+            category: None,
+        }
+    }
+
+    /// CC2.4: Create a categorized warning.
+    pub fn categorized_warning(message: impl Into<String>, span: Span, category: WarningCategory) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            help: None,
+            severity: Severity::Warning,
+            category: Some(category),
         }
     }
 

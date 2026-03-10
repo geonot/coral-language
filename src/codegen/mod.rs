@@ -226,6 +226,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn compile(mut self, model: &SemanticModel) -> Result<Module<'ctx>, Diagnostic> {
+        // C4.2: Apply LLVM attributes to runtime FFI declarations.
+        self.apply_runtime_attributes();
         self.allocation_hints = model.allocation.symbols.clone();
         // CC3.2: Populate module namespace map for qualified function access
         self.module_exports = model.module_exports.clone();
@@ -467,6 +469,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     handler_fn.as_global_value().as_pointer_value().into(),
                     self.runtime.value_ptr_type.const_null().into(),
                     self.runtime.value_ptr_type.const_null().into(),
+                    self.usize_type.const_zero().into(),
                 ],
                 "main_handler_closure",
             );
@@ -695,6 +698,118 @@ impl<'ctx> CodeGenerator<'ctx> {
         matches!(name, "len" | "length" | "abs" | "sqrt" | "min" | "max"
             | "floor" | "ceil" | "round" | "to_string" | "to_number"
             | "type_of" | "is_number" | "is_string" | "is_bool" | "is_list" | "is_map")
+    }
+
+    // ====================== C4.2: LLVM Function Attributes ======================
+
+    /// Check if a user-defined function body is free of side effects (pure).
+    /// Conservative: returns true only for simple functions with no calls to
+    /// non-pure builtins, no log/print, no I/O, no actor sends.
+    fn is_function_pure(body: &Block) -> bool {
+        for stmt in &body.statements {
+            if !Self::is_statement_pure(stmt) {
+                return false;
+            }
+        }
+        if let Some(ref val) = body.value {
+            Self::is_expression_pure(val)
+        } else {
+            true
+        }
+    }
+
+    fn is_statement_pure(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Binding(binding) => Self::is_expression_pure(&binding.value),
+            Statement::Expression(expr) => Self::is_expression_pure(expr),
+            Statement::If { condition, body, else_body, .. } => {
+                Self::is_expression_pure(condition)
+                    && Self::is_block_pure(body)
+                    && else_body.as_ref().map_or(true, |eb| Self::is_block_pure(eb))
+            }
+            Statement::Return(expr, _) => Self::is_expression_pure(expr),
+            _ => false, // For/while/match/send/spawn etc. are not pure
+        }
+    }
+
+    fn is_block_pure(block: &Block) -> bool {
+        for stmt in &block.statements {
+            if !Self::is_statement_pure(stmt) {
+                return false;
+            }
+        }
+        block.value.as_ref().map_or(true, |v| Self::is_expression_pure(v))
+    }
+
+    fn is_expression_pure(expr: &Expression) -> bool {
+        match expr {
+            Expression::Integer(_, _) | Expression::Float(_, _) | Expression::String(_, _)
+            | Expression::Bool(_, _) | Expression::Unit | Expression::None(_)
+            | Expression::Identifier(_, _) => true,
+            Expression::Binary { left, right, .. } => {
+                Self::is_expression_pure(left) && Self::is_expression_pure(right)
+            }
+            Expression::Unary { expr: inner, .. } => Self::is_expression_pure(inner),
+            Expression::Call { callee, args, .. } => {
+                if let Expression::Identifier(name, _) = callee.as_ref() {
+                    if Self::is_pure_function(name) {
+                        return args.iter().all(|a| Self::is_expression_pure(a));
+                    }
+                }
+                false
+            }
+            Expression::Ternary { condition, then_branch, else_branch, .. } => {
+                Self::is_expression_pure(condition)
+                    && Self::is_expression_pure(then_branch)
+                    && Self::is_expression_pure(else_branch)
+            }
+            _ => false,
+        }
+    }
+
+    /// C4.2: Apply LLVM function attributes based on purity analysis.
+    fn apply_function_attributes(&self, llvm_fn: FunctionValue<'ctx>, is_pure: bool) {
+        // All Coral user functions can be marked nounwind — Coral doesn't use
+        // LLVM exception handling (unwind/invoke); errors are value-based.
+        let nounwind_id = Attribute::get_named_enum_kind_id("nounwind");
+        let nounwind = self.context.create_enum_attribute(nounwind_id, 0);
+        llvm_fn.add_attribute(AttributeLoc::Function, nounwind);
+
+        if is_pure {
+            // Pure functions: no observable side effects, reads no external state
+            let readnone_id = Attribute::get_named_enum_kind_id("memory");
+            // memory(none) = 0 — tells LLVM the function doesn't access any memory
+            let readnone = self.context.create_enum_attribute(readnone_id, 0);
+            llvm_fn.add_attribute(AttributeLoc::Function, readnone);
+
+            let willreturn_id = Attribute::get_named_enum_kind_id("willreturn");
+            let willreturn = self.context.create_enum_attribute(willreturn_id, 0);
+            llvm_fn.add_attribute(AttributeLoc::Function, willreturn);
+        }
+    }
+
+    /// C4.2: Apply attributes to known-pure runtime FFI declarations.
+    fn apply_runtime_attributes(&self) {
+        let nounwind_id = Attribute::get_named_enum_kind_id("nounwind");
+        let nounwind = self.context.create_enum_attribute(nounwind_id, 0);
+
+        // Core runtime functions that don't throw LLVM exceptions
+        let nounwind_fns = [
+            self.runtime.make_number, self.runtime.make_string,
+            self.runtime.make_bool, self.runtime.make_unit,
+            self.runtime.make_bytes, self.runtime.make_list,
+            self.runtime.make_map,
+            self.runtime.value_add, self.runtime.value_equals,
+            self.runtime.value_not_equals, self.runtime.value_length,
+            self.runtime.type_of,
+            self.runtime.list_push, self.runtime.list_get,
+            self.runtime.list_length, self.runtime.list_pop,
+            self.runtime.map_get, self.runtime.map_set,
+            self.runtime.map_length, self.runtime.map_keys,
+        ];
+        for f in &nounwind_fns {
+            f.add_attribute(AttributeLoc::Function, nounwind);
+        }
     }
 
     /// Compute the set of function names transitively reachable from `main` and
@@ -1150,6 +1265,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        // C4.2: Apply LLVM function attributes based on purity analysis.
+        let is_pure = Self::is_function_pure(&function.body);
+        self.apply_function_attributes(llvm_fn, is_pure);
+
         // CC2.3: Attach DISubprogram debug metadata to the function.
         let di_scope: Option<DIScope<'ctx>> = if let Some(dbg) = &self.debug_ctx {
             let (line, _) = dbg.line_index.line_col(function.body.span.start);
@@ -1184,6 +1303,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: function.name.clone(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: None,
         };
 
         // Parameters are NaN-boxed i64 values
@@ -1223,6 +1343,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: function.name.clone(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: None,
         };
 
         // First param is the state (NaN-boxed i64), inject as `self`
@@ -1277,7 +1398,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ctx.in_tail_position = true;
                     let value = self.emit_expression(ctx, expr)?;
                     ctx.in_tail_position = false;
-                    self.builder.build_return(Some(&value)).unwrap();
+                    // S4.6: If inside a lambda, store to out_param and ret void
+                    if let Some(out_ptr) = ctx.lambda_out_param {
+                        let result_ptr = self.nb_to_ptr(value);
+                        self.builder.build_store(out_ptr, result_ptr).unwrap();
+                        self.builder.build_return(None).unwrap();
+                    } else {
+                        self.builder.build_return(Some(&value)).unwrap();
+                    }
                     // Return a zero sentinel without emitting any LLVM instruction.
                     // const_zero() is a compile-time constant, so no instruction is added
                     // after the `ret` terminator.
@@ -3520,6 +3648,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: String::from("__coral_init_globals"),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: None,
         };
 
         for binding in globals {
@@ -3560,4 +3689,7 @@ struct FunctionContext<'ctx> {
     /// Maps a normalized expression key to the previously emitted LLVM value.
     /// Cleared on mutation (variable assignment, store field write, etc.).
     cse_cache: HashMap<String, IntValue<'ctx>>,
+    /// S4.6: When inside a lambda invoke function, holds the `out` pointer.
+    /// `return` stores to this pointer and emits `ret void` instead of `ret i64`.
+    lambda_out_param: Option<PointerValue<'ctx>>,
 }

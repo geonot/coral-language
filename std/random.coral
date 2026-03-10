@@ -1,0 +1,33 @@
+-- std.random — Random number generation for Coral
+-- L2.1: Provides random floats, integers, choice, and shuffle.
+
+-- Return a random float in [0.0, 1.0)
+*random()
+    random()
+
+-- Return a random integer in [min, max] (inclusive)
+*random_int(min, max)
+    random_int(min, max)
+
+-- Set the PRNG seed for reproducibility
+*seed(s)
+    random_seed(s)
+
+-- Pick a random element from a list
+*random_choice(items)
+    idx is random_int(0, len(items) - 1)
+    items[idx]
+
+-- Fisher-Yates shuffle — returns a new shuffled list
+*shuffle(items)
+    result is items
+    i is len(result) - 1
+    loop
+        break if i < 1
+        j is random_int(0, i)
+        -- swap via temp
+        tmp is result[i]
+        result is list_set(result, i, result[j])
+        result is list_set(result, j, tmp)
+        i -= 1
+    result

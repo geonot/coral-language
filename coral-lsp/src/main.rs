@@ -34,7 +34,7 @@ impl CoralLanguageServer {
                         range: Range::new(Position::new(0, 0), Position::new(0, 0)),
                         severity: Some(DiagnosticSeverity::WARNING),
                         source: Some("coral".to_string()),
-                        message: w.clone(),
+                        message: w.message.clone(),
                         ..Default::default()
                     })
                     .collect()
@@ -87,7 +87,7 @@ impl CoralLanguageServer {
                                 range: Range::new(Position::new(0, 0), Position::new(0, 0)),
                                 severity: Some(DiagnosticSeverity::WARNING),
                                 source: Some("coral".to_string()),
-                                message: w.clone(),
+                                message: w.message.clone(),
                                 ..Default::default()
                             })
                             .collect()

@@ -1,10 +1,10 @@
 use coralc::compiler::Compiler;
 
-/// Helper: compile source and return warnings
+/// Helper: compile source and return warning messages
 fn warnings_for(source: &str) -> Vec<String> {
     let compiler = Compiler;
     match compiler.compile_to_ir_with_warnings(source) {
-        Ok((_ir, warnings)) => warnings,
+        Ok((_ir, warnings)) => warnings.iter().map(|w| w.message.clone()).collect(),
         Err(e) => panic!("compilation failed: {}", e.diagnostic.message),
     }
 }

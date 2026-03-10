@@ -49,11 +49,23 @@
 # Sleep for a given number of milliseconds (blocking)
 # Note: For non-blocking delays in actors, use timer_send_after
 *sleep(ms)
-	# Uses timer internally; this is a simple busy-wait
-	start is now()
-	*loop()
-		if now() - start >= ms
-			0
-		else
-			loop()
-	loop()
+	time_sleep(ms)
+
+# Elapsed time since a given start timestamp (in ms)
+*elapsed(start)
+	now() - start
+
+# Convert a human-readable duration to milliseconds
+# *duration(5, "seconds") -> 5000
+# *duration(2, "minutes") -> 120000
+*duration(amount, unit)
+	match unit
+		"ms" -> amount
+		"milliseconds" -> amount
+		"s" -> amount * 1000
+		"seconds" -> amount * 1000
+		"m" -> amount * 60000
+		"minutes" -> amount * 60000
+		"h" -> amount * 3600000
+		"hours" -> amount * 3600000
+		_ -> amount

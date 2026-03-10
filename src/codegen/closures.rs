@@ -13,17 +13,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         body: &Block,
         span: Span,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
-        if body
-            .statements
-            .iter()
-            .any(|stmt| matches!(stmt, Statement::Return(_, _)))
-        {
-            return Err(Diagnostic::new(
-                "return statements inside lambdas are not supported yet",
-                span,
-            ));
-        }
-
         let capture_names = self.determine_lambda_captures(params, body, ctx);
         let mut capture_values = Vec::new();
         for name in &capture_names {
@@ -91,7 +80,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let release_ptr = release_fn
             .map(|f| f.as_global_value().as_pointer_value())
             .unwrap_or_else(|| release_ptr_type.const_null());
-        let args = &[invoke_ptr.into(), release_ptr.into(), env_ptr.into()];
+        let capture_count_val = self.usize_type.const_int(capture_names.len() as u64, false);
+        let args = &[invoke_ptr.into(), release_ptr.into(), env_ptr.into(), capture_count_val.into()];
         let closure_ptr = self.call_runtime_ptr(self.runtime.make_closure, args, "make_closure");
         Ok(self.ptr_to_nb(closure_ptr))
     }
@@ -181,7 +171,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ptr_type(inkwell::AddressSpace::default());
         let null_release = release_ptr_type.const_null();
         let null_env = self.runtime.value_ptr_type.const_null();
-        let closure_args = &[invoke_ptr.into(), null_release.into(), null_env.into()];
+        let zero_captures = self.usize_type.const_zero();
+        let closure_args = &[invoke_ptr.into(), null_release.into(), null_env.into(), zero_captures.into()];
         let closure_ptr = self.call_runtime_ptr(self.runtime.make_closure, closure_args, "fn_as_closure");
         Ok(self.ptr_to_nb(closure_ptr))
     }
@@ -578,6 +569,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: String::new(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: Some(out_param),
         };
 
         if let Some(struct_type) = env_struct {

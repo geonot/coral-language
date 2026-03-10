@@ -29,6 +29,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: String::new(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: None,
         };
         for field in &store.fields {
             let key = self.emit_string_literal(&field.name);
@@ -72,6 +73,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 handler_invoke_fn.as_global_value().as_pointer_value().into(),
                 release_fn.as_global_value().as_pointer_value().into(),
                 state_map.into(), // state Map as closure environment
+                self.usize_type.const_zero().into(), // actor env is not NaN-boxed captures
             ],
             "handler_closure",
         );
@@ -269,6 +271,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: String::new(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: None,
         };
         
         // Set __type__ field so we know what store type this is for method dispatch
@@ -413,6 +416,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_name: String::new(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
+            lambda_out_param: None,
         };
 
         // First param is the store (Map), inject as `self`

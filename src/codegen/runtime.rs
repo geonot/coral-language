@@ -244,6 +244,12 @@ pub struct RuntimeBindings<'ctx> {
     pub time_hour: FunctionValue<'ctx>,
     pub time_minute: FunctionValue<'ctx>,
     pub time_second: FunctionValue<'ctx>,
+    // Sleep (L2.3)
+    pub sleep: FunctionValue<'ctx>,
+    // Random operations (L2.1)
+    pub random: FunctionValue<'ctx>,
+    pub random_int: FunctionValue<'ctx>,
+    pub random_seed: FunctionValue<'ctx>,
     // String lines (SL-6 ext)
     pub string_lines: FunctionValue<'ctx>,
     // Sort (SL-11)
@@ -748,6 +754,7 @@ impl<'ctx> RuntimeBindings<'ctx> {
                     closure_invoke_type.ptr_type(AddressSpace::default()).into(),
                     closure_release_type.ptr_type(AddressSpace::default()).into(),
                     i8_ptr.into(),
+                    usize_type.into(),
                 ],
                 false,
             ),
@@ -1546,6 +1553,30 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Sleep (L2.3)
+        let sleep = module.add_function(
+            "coral_sleep",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Random operations (L2.1)
+        let random = module.add_function(
+            "coral_random",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+        let random_int = module.add_function(
+            "coral_random_int",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let random_seed = module.add_function(
+            "coral_random_seed",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         // String lines
         let string_lines = module.add_function(
             "coral_string_lines",
@@ -1854,6 +1885,10 @@ impl<'ctx> RuntimeBindings<'ctx> {
             time_hour,
             time_minute,
             time_second,
+            sleep,
+            random,
+            random_int,
+            random_seed,
             string_lines,
             list_sort_natural,
             bytes_from_hex,

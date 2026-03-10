@@ -1,7 +1,9 @@
 use anyhow::{ensure, Context};
 use clap::Parser;
+use coralc::diagnostics::WarningCategory;
 use coralc::module_loader::ModuleLoader;
 use coralc::Compiler;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -56,6 +58,14 @@ struct Args {
     /// Optimization level (0-3). Default: 0 for --jit, 2 for --emit-binary.
     #[arg(short = 'O', value_name = "LEVEL")]
     opt_level: Option<u8>,
+
+    /// CC2.4: Suppress specific warning categories (e.g., --allow dead_code)
+    #[arg(long = "allow", value_name = "CATEGORY")]
+    allow: Vec<String>,
+
+    /// CC2.4: Enable specific warning categories (overrides --allow)
+    #[arg(long = "warn", value_name = "CATEGORY")]
+    warn: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -68,9 +78,24 @@ fn main() -> anyhow::Result<()> {
     let compiler = Compiler;
     match compiler.compile_modules_to_ir(&module_sources) {
         Ok((ir, warnings)) => {
+            // CC2.4: Build suppressed categories set.
+            let suppressed: HashSet<WarningCategory> = args.allow.iter()
+                .filter_map(|s| WarningCategory::from_str(s))
+                .collect();
+            let forced: HashSet<WarningCategory> = args.warn.iter()
+                .filter_map(|s| WarningCategory::from_str(s))
+                .collect();
+
             // CC2.2: Print any warnings collected during compilation.
             for w in &warnings {
-                eprintln!("warning: {}", w);
+                // CC2.4: Filter warnings by category.
+                if let Some(cat) = &w.category {
+                    if suppressed.contains(cat) && !forced.contains(cat) {
+                        continue;
+                    }
+                }
+                let cat_label = w.category.map_or(String::new(), |c| format!(" [{}]", c));
+                eprintln!("warning{}: {}", cat_label, w.message);
             }
             let needs_disk_ir = args.emit_binary.is_some() || args.run_jit;
             let mut temp_ir: Option<TempPath> = None;

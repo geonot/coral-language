@@ -64,3 +64,54 @@
 	else
 		log(concat("PASS: ", name))
 		1
+
+# Assert that two numbers are close within a tolerance (for float comparison)
+*assert_close(actual, expected, tolerance, label)
+	diff is actual - expected
+	if diff < 0
+		diff is 0 - diff
+	if diff <= tolerance
+		0
+	else
+		msg is concat(concat(concat(concat(label, ": expected ~"), to_string(expected)), " but got "), to_string(actual))
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Assert that a list contains a given item
+*assert_contains(collection, item, label)
+	if list_contains(collection, item)
+		0
+	else
+		msg is concat(concat(concat(label, ": expected collection to contain "), to_string(item)), "")
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Assert that a string starts with a given prefix
+*assert_starts_with(text, prefix, label)
+	if string_starts_with(text, prefix)
+		0
+	else
+		msg is concat(concat(concat(concat(label, ": expected \""), text), "\" to start with \""), concat(prefix, "\""))
+		log(concat("ASSERTION FAILED: ", msg))
+		error("assertion_failed", msg)
+
+# Run a suite of tests and report a summary
+# tests is a list of [name, test_fn] pairs
+*suite(name, tests)
+	log(concat("Suite: ", name))
+	passed is 0
+	failed is 0
+	i is 0
+	for test in tests
+		test_name is list_get(test, 0)
+		test_fn is list_get(test, 1)
+		result is test_fn()
+		if is_err(result)
+			log(concat(concat("  FAIL: ", test_name), concat(" - ", error_name(result))))
+			failed is failed + 1
+		else
+			log(concat("  PASS: ", test_name))
+			passed is passed + 1
+		i is i + 1
+	log(concat(concat(concat(concat(to_string(passed), " passed, "), to_string(failed)), " failed out of "), to_string(i)))
+	failed

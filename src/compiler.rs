@@ -81,7 +81,7 @@ impl Compiler {
     }
 
     /// Compile source to LLVM IR and return any warnings collected during analysis.
-    pub fn compile_to_ir_with_warnings(&self, source: &str) -> Result<(String, Vec<String>), CompileError> {
+    pub fn compile_to_ir_with_warnings(&self, source: &str) -> Result<(String, Vec<crate::diagnostics::Diagnostic>), CompileError> {
         let tokens = lexer::lex(source).map_err(|diag| CompileError::with_source(Stage::Lex, diag, source))?;
         let parser = Parser::new(tokens, source.len());
         let program = parser
@@ -94,7 +94,7 @@ impl Compiler {
         self.maybe_emit_alloc_report(&model);
         
         // Collect warnings before folding
-        let warnings: Vec<String> = model.warnings.iter().map(|w| w.message.clone()).collect();
+        let warnings: Vec<crate::diagnostics::Diagnostic> = model.warnings.clone();
         
         // Fold constant expressions (1 + 2 → 3, true and false → false, etc.)
         Self::fold_expressions(&mut model);
@@ -120,7 +120,7 @@ impl Compiler {
     /// Compile a list of modules (from `ModuleLoader::load_modules()`) to LLVM IR.
     /// Each module is parsed independently, then all ASTs are merged into a single
     /// Program for semantic analysis and codegen. Returns (IR, warnings).
-    pub fn compile_modules_to_ir(&self, module_sources: &[ModuleSource]) -> Result<(String, Vec<String>), CompileError> {
+    pub fn compile_modules_to_ir(&self, module_sources: &[ModuleSource]) -> Result<(String, Vec<crate::diagnostics::Diagnostic>), CompileError> {
         // Parse each module independently and build Module ASTs
         let mut modules = Vec::new();
         // We also need the concatenated source for error reporting
@@ -154,7 +154,7 @@ impl Compiler {
             .map_err(|diag| CompileError::with_source(Stage::Semantic, diag, &all_source))?;
         self.maybe_emit_alloc_report(&model);
 
-        let warnings: Vec<String> = model.warnings.iter().map(|w| w.message.clone()).collect();
+        let warnings: Vec<crate::diagnostics::Diagnostic> = model.warnings.clone();
         Self::fold_expressions(&mut model);
 
         let context = Context::create();

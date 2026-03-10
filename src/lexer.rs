@@ -75,9 +75,13 @@ pub enum TokenKind {
     Dot,
     Ellipsis,
     Plus,
+    PlusEquals,
     Minus,
+    MinusEquals,
     Slash,
+    SlashEquals,
     Percent,
+    StarEquals,
     Greater,
     GreaterEq,
     Less,
@@ -674,20 +678,44 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                 }
             }
             '+' => {
-                tokens.push(Token::new(TokenKind::Plus, Span::new(pos, pos + ch_len)));
+                let start = pos;
                 pos += ch_len;
+                if pos < len && source[pos..].starts_with('=') {
+                    pos += 1;
+                    tokens.push(Token::new(TokenKind::PlusEquals, Span::new(start, pos)));
+                } else {
+                    tokens.push(Token::new(TokenKind::Plus, Span::new(start, pos)));
+                }
             }
             '-' => {
-                tokens.push(Token::new(TokenKind::Minus, Span::new(pos, pos + ch_len)));
+                let start = pos;
                 pos += ch_len;
+                if pos < len && source[pos..].starts_with('=') {
+                    pos += 1;
+                    tokens.push(Token::new(TokenKind::MinusEquals, Span::new(start, pos)));
+                } else {
+                    tokens.push(Token::new(TokenKind::Minus, Span::new(start, pos)));
+                }
             }
             '*' => {
-                tokens.push(Token::new(TokenKind::Star, Span::new(pos, pos + ch_len)));
+                let start = pos;
                 pos += ch_len;
+                if pos < len && source[pos..].starts_with('=') {
+                    pos += 1;
+                    tokens.push(Token::new(TokenKind::StarEquals, Span::new(start, pos)));
+                } else {
+                    tokens.push(Token::new(TokenKind::Star, Span::new(start, pos)));
+                }
             }
             '/' => {
-                tokens.push(Token::new(TokenKind::Slash, Span::new(pos, pos + ch_len)));
+                let start = pos;
                 pos += ch_len;
+                if pos < len && source[pos..].starts_with('=') {
+                    pos += 1;
+                    tokens.push(Token::new(TokenKind::SlashEquals, Span::new(start, pos)));
+                } else {
+                    tokens.push(Token::new(TokenKind::Slash, Span::new(start, pos)));
+                }
             }
             '%' => {
                 tokens.push(Token::new(TokenKind::Percent, Span::new(pos, pos + ch_len)));

@@ -75,7 +75,7 @@ fn detector() -> &'static Mutex<CycleDetector> {
 fn is_container(value: &Value) -> bool {
     matches!(
         ValueTag::try_from(value.tag),
-        Ok(ValueTag::List) | Ok(ValueTag::Map) | Ok(ValueTag::Store) | Ok(ValueTag::Tagged)
+        Ok(ValueTag::List) | Ok(ValueTag::Map) | Ok(ValueTag::Store) | Ok(ValueTag::Tagged) | Ok(ValueTag::Closure)
     )
 }
 
@@ -130,6 +130,23 @@ fn get_children(handle: ValueHandle) -> Vec<ValueHandle> {
         // are managed by the persistent store engine, not by refcounting.
         // No child handles to traverse.
         Ok(ValueTag::Store) => {}
+        Ok(ValueTag::Closure) => {
+            // M3.4: Traverse captured values in the closure environment.
+            let ptr = value.heap_ptr();
+            if !ptr.is_null() {
+                let closure = unsafe { &*(ptr as *const crate::ClosureObject) };
+                if !closure.env.is_null() && closure.capture_count > 0 {
+                    let env_ptr = closure.env as *const i64;
+                    for i in 0..closure.capture_count {
+                        let nb_val = unsafe { *env_ptr.add(i) } as u64;
+                        let handle = crate::nanbox_ffi::nb_to_handle(nb_val);
+                        if !handle.is_null() {
+                            children.push(handle);
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
     

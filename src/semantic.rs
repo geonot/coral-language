@@ -12,7 +12,7 @@ use crate::ast::{
     Expression,
     TraitDefinition,
 };
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, WarningCategory};
 use crate::types::{
     AllocationHints,
     AllocationStrategy,
@@ -350,7 +350,9 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     }
     let mut constraints = ConstraintSet::default();
     let mut graph = TypeGraph::default();
-    collect_program_constraints(&globals, &functions, &mut constraints, &mut types, &mut graph);
+    // T4.4: Collect branch type pairs for If/elif/else to check consistency post-solving
+    let mut branch_type_hints: Vec<(Vec<TypeId>, Span)> = Vec::new();
+    collect_program_constraints(&globals, &functions, &mut constraints, &mut types, &mut graph, &mut branch_type_hints);
     if let Err(errors) = crate::types::solve_constraints(&constraints, &mut graph) {
         // Use the first error's span for precise location, list all messages.
         let first_span = errors.first().map(|e| e.span).unwrap_or(program.span);
@@ -378,9 +380,10 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
             && !name.contains("::")
             && !is_builtin_name(&name)
         {
-            warnings.push(Diagnostic::warning(
+            warnings.push(Diagnostic::categorized_warning(
                 format!("type of `{}` could not be fully inferred (contains Unknown)", name),
                 Span::new(0, 0),
+                WarningCategory::General,
             ));
         }
     }
@@ -390,6 +393,10 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     check_unhandled_errors(&globals, &functions, &mut warnings);
     // T3.5: Dead code detection — warn on statements after return/break/continue
     check_dead_code(&functions, &mut warnings);
+    // T3.2: Definite assignment analysis — warn on variables that may be uninitialized
+    check_definite_assignment(&functions, &mut warnings);
+    // T4.4: Check branch type consistency for if/elif/else
+    check_branch_type_consistency(&branch_type_hints, &mut graph, &mut warnings);
 
     // Inject default trait method bodies into types/stores that don't override them
     inject_trait_default_methods(&mut type_defs, &mut stores, &trait_defs);
@@ -660,6 +667,7 @@ fn collect_program_constraints(
     constraints: &mut ConstraintSet,
     types: &mut TypeEnv,
     graph: &mut TypeGraph,
+    branch_type_hints: &mut Vec<(Vec<TypeId>, Span)>,
 ) {
     for binding in globals {
         let ty = collect_constraints_expr(&binding.value, constraints, types, graph);
@@ -668,7 +676,7 @@ fn collect_program_constraints(
         }
     }
     for function in functions {
-        collect_function_constraints(function, constraints, types, graph);
+        collect_function_constraints(function, constraints, types, graph, branch_type_hints);
     }
 }
 
@@ -677,6 +685,7 @@ fn collect_function_constraints(
     constraints: &mut ConstraintSet,
     types: &mut TypeEnv,
     graph: &mut TypeGraph,
+    branch_type_hints: &mut Vec<(Vec<TypeId>, Span)>,
 ) {
     let mut params_tys = Vec::new();
     for param in &function.params {
@@ -692,7 +701,7 @@ fn collect_function_constraints(
     // inferred even when the body ends with a `return` statement (which has no
     // trailing block expression).
     let return_ty = TypeId::TypeVar(graph.fresh());
-    let body_ty = collect_block_constraints(&function.body, constraints, types, graph, Some(&return_ty));
+    let body_ty = collect_block_constraints(&function.body, constraints, types, graph, Some(&return_ty), branch_type_hints);
     // If the body has a trailing expression, use its type; otherwise use the
     // return-type TypeVar (which was constrained by any `return` statements).
     let fn_return = if function.body.value.is_some() {
@@ -741,6 +750,7 @@ fn collect_block_constraints(
     types: &mut TypeEnv,
     graph: &mut TypeGraph,
     return_ty: Option<&TypeId>,
+    branch_type_hints: &mut Vec<(Vec<TypeId>, Span)>,
 ) -> TypeId {
     for statement in &block.statements {
         match statement {
@@ -764,27 +774,39 @@ fn collect_block_constraints(
                     constraints.push(ConstraintKind::EqualAt(ret_expr_ty, ret_ty.clone(), *span));
                 }
             }
-            crate::ast::Statement::If { condition, body, elif_branches, else_body, .. } => {
+            crate::ast::Statement::If { condition, body, elif_branches, else_body, span } => {
                 let _ = collect_constraints_expr(condition, constraints, types, graph);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
-                for (cond, blk) in elif_branches {
-                    let _ = collect_constraints_expr(cond, constraints, types, graph);
-                    let _ = collect_block_constraints(blk, constraints, types, graph, return_ty);
-                }
-                if let Some(else_blk) = else_body {
-                    let _ = collect_block_constraints(else_blk, constraints, types, graph, return_ty);
+                let body_ty = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
+                // T4.4: Collect branch types for consistency check
+                if else_body.is_some() {
+                    let mut branch_tys = vec![body_ty];
+                    for (cond, blk) in elif_branches {
+                        let _ = collect_constraints_expr(cond, constraints, types, graph);
+                        let blk_ty = collect_block_constraints(blk, constraints, types, graph, return_ty, branch_type_hints);
+                        branch_tys.push(blk_ty);
+                    }
+                    if let Some(else_blk) = else_body {
+                        let else_ty = collect_block_constraints(else_blk, constraints, types, graph, return_ty, branch_type_hints);
+                        branch_tys.push(else_ty);
+                    }
+                    branch_type_hints.push((branch_tys, *span));
+                } else {
+                    for (cond, blk) in elif_branches {
+                        let _ = collect_constraints_expr(cond, constraints, types, graph);
+                        let _ = collect_block_constraints(blk, constraints, types, graph, return_ty, branch_type_hints);
+                    }
                 }
             }
             crate::ast::Statement::While { condition, body, .. } => {
                 let _ = collect_constraints_expr(condition, constraints, types, graph);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
+                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
             }
             crate::ast::Statement::For { variable, iterable, body, span } => {
                 let iterable_ty = collect_constraints_expr(iterable, constraints, types, graph);
                 let elem_ty = TypeId::TypeVar(graph.fresh());
                 constraints.push(ConstraintKind::IterableAt(iterable_ty, elem_ty.clone(), *span));
                 types.insert(variable.clone(), elem_ty);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
+                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
             }
             crate::ast::Statement::ForKV { key_var, value_var, iterable, body, span } => {
                 let iterable_ty = collect_constraints_expr(iterable, constraints, types, graph);
@@ -792,7 +814,7 @@ fn collect_block_constraints(
                 constraints.push(ConstraintKind::IterableAt(iterable_ty, elem_ty.clone(), *span));
                 types.insert(key_var.clone(), elem_ty.clone());
                 types.insert(value_var.clone(), elem_ty);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
+                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
             }
             crate::ast::Statement::ForRange { variable, start, end, step, body, .. } => {
                 let _ = collect_constraints_expr(start, constraints, types, graph);
@@ -801,7 +823,7 @@ fn collect_block_constraints(
                     let _ = collect_constraints_expr(s, constraints, types, graph);
                 }
                 types.insert(variable.clone(), TypeId::Primitive(Primitive::Float));
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty);
+                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
             }
             crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_) => {}
             crate::ast::Statement::FieldAssign { target, value, .. } => {
@@ -1240,11 +1262,11 @@ fn collect_constraints_expr(
                 if let Some(guard) = &arm.guard {
                     collect_constraints_expr(guard, constraints, types, graph);
                 }
-                let arm_ty = collect_block_constraints(&arm.body, constraints, types, graph, None);
+                let arm_ty = collect_block_constraints(&arm.body, constraints, types, graph, None, &mut Vec::new());
                 arm_tys.push(arm_ty);
             }
             if let Some(default) = &match_expr.default {
-                arm_tys.push(collect_block_constraints(default, constraints, types, graph, None));
+                arm_tys.push(collect_block_constraints(default, constraints, types, graph, None, &mut Vec::new()));
             }
             arm_tys
                 .into_iter()
@@ -1268,7 +1290,7 @@ fn collect_constraints_expr(
             }
             let mut nested_graph = graph.clone();
             let mut nested_constraints = ConstraintSet::default();
-            let body_ty = collect_block_constraints(body, &mut nested_constraints, &mut shadow, &mut nested_graph, None);
+            let body_ty = collect_block_constraints(body, &mut nested_constraints, &mut shadow, &mut nested_graph, None, &mut Vec::new());
             constraints.constraints.extend(nested_constraints.constraints);
             TypeId::Func(param_tys, Box::new(body_ty))
         }
@@ -1747,6 +1769,10 @@ fn is_builtin_name(name: &str) -> bool {
         "time_now" | "time_timestamp" | "time_format_iso" |
         "time_year" | "time_month" | "time_day" |
         "time_hour" | "time_minute" | "time_second" |
+        // Sleep (L2.3)
+        "time_sleep" |
+        // Random operations (L2.1)
+        "random" | "random_int" | "random_seed" |
         // String extended
         "string_lines" |
         // Sort operations
@@ -3117,6 +3143,260 @@ fn statement_span(stmt: &Statement) -> Span {
     }
 }
 
+/// T4.4: Check that if/elif/else branches return consistent types.
+/// Emits warnings (not errors) when branch types differ.
+fn check_branch_type_consistency(
+    branch_type_hints: &[(Vec<TypeId>, Span)],
+    graph: &mut TypeGraph,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    use crate::types::resolve;
+    for (branch_tys, span) in branch_type_hints {
+        if branch_tys.len() < 2 {
+            continue;
+        }
+        // Resolve all branch types
+        let resolved: Vec<TypeId> = branch_tys
+            .iter()
+            .map(|ty| resolve(ty.clone(), graph))
+            .collect();
+
+        // Check if all resolved types are the same (ignoring Unknown/Any/None)
+        let first = &resolved[0];
+        let mut mismatch = false;
+        for ty in &resolved[1..] {
+            if !types_compatible_for_branch(first, ty) {
+                mismatch = true;
+                break;
+            }
+        }
+
+        if mismatch {
+            let type_names: Vec<String> = resolved
+                .iter()
+                .map(|t| format!("{:?}", t))
+                .collect();
+            warnings.push(
+                Diagnostic::categorized_warning(
+                    format!(
+                        "if/else branches return different types: {}",
+                        type_names.join(" vs ")
+                    ),
+                    *span,
+                    WarningCategory::TypeMismatchBranch,
+                )
+                .with_help("all branches should return the same type for consistency"),
+            );
+        }
+    }
+}
+
+/// Check if two types are compatible for branch consistency.
+/// Permissive: Unknown, Any, None are compatible with anything.
+/// TypeVars are compatible with anything (not yet resolved).
+fn types_compatible_for_branch(a: &TypeId, b: &TypeId) -> bool {
+    use crate::types::core::Primitive;
+    match (a, b) {
+        // Wildcard types are always compatible
+        (TypeId::Unknown, _) | (_, TypeId::Unknown) => true,
+        (TypeId::Primitive(Primitive::Any), _) | (_, TypeId::Primitive(Primitive::Any)) => true,
+        (TypeId::Primitive(Primitive::None), _) | (_, TypeId::Primitive(Primitive::None)) => true,
+        (TypeId::TypeVar(_), _) | (_, TypeId::TypeVar(_)) => true,
+        // Int and Float are compatible (numeric promotion)
+        (TypeId::Primitive(Primitive::Int), TypeId::Primitive(Primitive::Float)) => true,
+        (TypeId::Primitive(Primitive::Float), TypeId::Primitive(Primitive::Int)) => true,
+        // Same type
+        _ => a == b,
+    }
+}
+
+// ====================== T3.2: Definite Assignment Analysis ======================
+
+/// Check function bodies for variables that may be used before being
+/// definitely assigned on all execution paths.
+fn check_definite_assignment(
+    functions: &[Function],
+    warnings: &mut Vec<Diagnostic>,
+) {
+    for function in functions {
+        let mut definitely_assigned: HashSet<String> = HashSet::new();
+        // Parameters are always assigned
+        for param in &function.params {
+            definitely_assigned.insert(param.name.clone());
+        }
+        da_check_block(&function.body, &mut definitely_assigned, warnings);
+    }
+}
+
+/// Walk a block collecting definite assignments and checking uses.
+fn da_check_block(
+    block: &Block,
+    assigned: &mut HashSet<String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    for stmt in &block.statements {
+        da_check_statement(stmt, assigned, warnings);
+    }
+    if let Some(ref val) = block.value {
+        da_check_expression_uses(val, assigned, warnings);
+    }
+}
+
+fn da_check_statement(
+    stmt: &Statement,
+    assigned: &mut HashSet<String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    match stmt {
+        Statement::Binding(binding) => {
+            // Check the RHS for uses first
+            da_check_expression_uses(&binding.value, assigned, warnings);
+            // Then mark the LHS as assigned
+            assigned.insert(binding.name.clone());
+        }
+        Statement::Expression(expr) => {
+            da_check_expression_uses(expr, assigned, warnings);
+        }
+        Statement::Return(expr, _) => {
+            da_check_expression_uses(expr, assigned, warnings);
+        }
+        Statement::If { condition, body, elif_branches, else_body, .. } => {
+            da_check_expression_uses(condition, assigned, warnings);
+            // Compute names assigned in each branch
+            let mut then_assigned = assigned.clone();
+            da_check_block(body, &mut then_assigned, warnings);
+
+            let mut all_branches_assigned = Vec::new();
+            all_branches_assigned.push(then_assigned);
+
+            for (elif_cond, elif_body) in elif_branches {
+                da_check_expression_uses(elif_cond, assigned, warnings);
+                let mut branch_assigned = assigned.clone();
+                da_check_block(elif_body, &mut branch_assigned, warnings);
+                all_branches_assigned.push(branch_assigned);
+            }
+
+            if let Some(else_body) = else_body {
+                let mut else_assigned = assigned.clone();
+                da_check_block(else_body, &mut else_assigned, warnings);
+                all_branches_assigned.push(else_assigned);
+
+                // Only if all branches (including else) exist:
+                // intersect to find names assigned on ALL paths
+                if !all_branches_assigned.is_empty() {
+                    let intersection: HashSet<String> = all_branches_assigned[0]
+                        .iter()
+                        .filter(|name| all_branches_assigned.iter().all(|s| s.contains(*name)))
+                        .cloned()
+                        .collect();
+                    *assigned = intersection;
+                }
+            }
+            // Without else: no new names are definitely assigned
+        }
+        Statement::For { variable, iterable, body, .. } => {
+            da_check_expression_uses(iterable, assigned, warnings);
+            let mut loop_assigned = assigned.clone();
+            loop_assigned.insert(variable.clone());
+            da_check_block(body, &mut loop_assigned, warnings);
+            // After for: loop variable is not definitely assigned (loop may not execute)
+        }
+        Statement::ForRange { variable, start, end, step, body, .. } => {
+            da_check_expression_uses(start, assigned, warnings);
+            da_check_expression_uses(end, assigned, warnings);
+            if let Some(s) = step {
+                da_check_expression_uses(s, assigned, warnings);
+            }
+            let mut loop_assigned = assigned.clone();
+            loop_assigned.insert(variable.clone());
+            da_check_block(body, &mut loop_assigned, warnings);
+        }
+        Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+            da_check_expression_uses(iterable, assigned, warnings);
+            let mut loop_assigned = assigned.clone();
+            loop_assigned.insert(key_var.clone());
+            loop_assigned.insert(value_var.clone());
+            da_check_block(body, &mut loop_assigned, warnings);
+        }
+        Statement::While { condition, body, .. } => {
+            da_check_expression_uses(condition, assigned, warnings);
+            let mut loop_assigned = assigned.clone();
+            da_check_block(body, &mut loop_assigned, warnings);
+        }
+        Statement::FieldAssign { target, value, .. } => {
+            da_check_expression_uses(target, assigned, warnings);
+            da_check_expression_uses(value, assigned, warnings);
+        }
+        Statement::PatternBinding { value, .. } => {
+            da_check_expression_uses(value, assigned, warnings);
+        }
+        Statement::Break(_) | Statement::Continue(_) => {}
+    }
+}
+
+/// Check an expression for uses of potentially-uninitialized variables.
+fn da_check_expression_uses(
+    expr: &Expression,
+    assigned: &HashSet<String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        Expression::Identifier(name, span) => {
+            // Only warn for simple lowercase names (not builtins, not type constructors)
+            if !assigned.contains(name)
+                && !is_builtin_name(name)
+                && !name.is_empty()
+                && name.chars().next().map_or(false, |c| c.is_lowercase())
+            {
+                warnings.push(
+                    Diagnostic::categorized_warning(
+                        format!("variable `{}` may not be initialized on all paths", name),
+                        *span,
+                        WarningCategory::UnusedVariable,
+                    )
+                    .with_help("ensure the variable is assigned before use, or add an else branch"),
+                );
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            da_check_expression_uses(left, assigned, warnings);
+            da_check_expression_uses(right, assigned, warnings);
+        }
+        Expression::Unary { expr: inner, .. } => {
+            da_check_expression_uses(inner, assigned, warnings);
+        }
+        Expression::Call { callee, args, .. } => {
+            da_check_expression_uses(callee, assigned, warnings);
+            for arg in args {
+                da_check_expression_uses(arg, assigned, warnings);
+            }
+        }
+        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+            da_check_expression_uses(condition, assigned, warnings);
+            da_check_expression_uses(then_branch, assigned, warnings);
+            da_check_expression_uses(else_branch, assigned, warnings);
+        }
+        Expression::Member { target, .. } => {
+            da_check_expression_uses(target, assigned, warnings);
+        }
+        Expression::List(items, _) => {
+            for item in items {
+                da_check_expression_uses(item, assigned, warnings);
+            }
+        }
+        Expression::Map(entries, _) => {
+            for (k, v) in entries {
+                da_check_expression_uses(k, assigned, warnings);
+                da_check_expression_uses(v, assigned, warnings);
+            }
+        }
+        Expression::Lambda { .. } => {
+            // Lambdas capture their own scope — skip deep analysis
+        }
+        _ => {}
+    }
+}
+
 /// Check all function bodies for dead code after unconditional terminators.
 fn check_dead_code(
     functions: &[Function],
@@ -3135,9 +3415,10 @@ fn check_block_for_dead_code(block: &Block, warnings: &mut Vec<Diagnostic>) {
     for statement in &block.statements {
         if terminated {
             warnings.push(
-                Diagnostic::warning(
+                Diagnostic::categorized_warning(
                     format!("unreachable code after {}", terminator_kind),
                     statement_span(statement),
+                    WarningCategory::UnreachableCode,
                 )
                 .with_help("consider removing the unreachable statements"),
             );

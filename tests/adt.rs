@@ -23,11 +23,12 @@ fn expect_compile_error(source: &str, expected_substring: &str) {
             // Check if warnings contain the expected substring via compile_with_warnings.
             let (_, warnings) = compiler.compile_to_ir_with_warnings(source)
                 .expect("Should compile (checking warnings)");
-            let has_warning = warnings.iter().any(|w| w.contains(expected_substring));
+            let has_warning = warnings.iter().any(|w| w.message.contains(expected_substring));
             if !has_warning {
+                let wmsgs: Vec<_> = warnings.iter().map(|w| w.message.as_str()).collect();
                 panic!(
                     "Expected compile error or warning containing '{}', but compilation succeeded with no matching warning. Warnings: {:?}",
-                    expected_substring, warnings
+                    expected_substring, wmsgs
                 );
             }
         }

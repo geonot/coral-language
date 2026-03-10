@@ -3515,3 +3515,427 @@ fn e2e_default_param_expression() {
         &["30", "50"],
     );
 }
+
+// ─── S1.5: Augmented Assignment ──────────────────────────────────────
+
+#[test]
+fn e2e_augmented_assign_plus() {
+    assert_output(
+        r#"
+*main()
+    x is 10
+    x += 5
+    log(x)
+"#,
+        &["15"],
+    );
+}
+
+#[test]
+fn e2e_augmented_assign_minus() {
+    assert_output(
+        r#"
+*main()
+    x is 20
+    x -= 7
+    log(x)
+"#,
+        &["13"],
+    );
+}
+
+#[test]
+fn e2e_augmented_assign_mul() {
+    assert_output(
+        r#"
+*main()
+    x is 6
+    x *= 3
+    log(x)
+"#,
+        &["18"],
+    );
+}
+
+#[test]
+fn e2e_augmented_assign_div() {
+    assert_output(
+        r#"
+*main()
+    x is 100
+    x /= 4
+    log(x)
+"#,
+        &["25"],
+    );
+}
+
+#[test]
+fn e2e_augmented_assign_in_loop() {
+    assert_output(
+        r#"
+*main()
+    sum is 0
+    for i in 1 to 5
+        sum += i
+    log(sum)
+"#,
+        &["10"],
+    );
+}
+
+#[test]
+fn e2e_augmented_assign_chained() {
+    assert_output(
+        r#"
+*main()
+    x is 2
+    x += 3
+    x *= 4
+    x -= 1
+    log(x)
+"#,
+        &["19"],
+    );
+}
+
+// ─── L2.1: Random Operations ─────────────────────────────────────────
+
+#[test]
+fn e2e_random_seed_and_random() {
+    // After seeding, random() should return a number between 0 and 1
+    assert_output(
+        r#"
+*main()
+    random_seed(42)
+    r is random()
+    log(r >= 0.0 and r < 1.0)
+"#,
+        &["true"],
+    );
+}
+
+#[test]
+fn e2e_random_int_in_range() {
+    assert_output(
+        r#"
+*main()
+    random_seed(42)
+    r is random_int(1, 10)
+    log(r >= 1 and r <= 10)
+"#,
+        &["true"],
+    );
+}
+
+#[test]
+fn e2e_random_seed_reproducibility() {
+    assert_output(
+        r#"
+*main()
+    random_seed(99)
+    a is random()
+    random_seed(99)
+    b is random()
+    diff is a - b
+    log(diff < 0.0001 and diff > -0.0001)
+"#,
+        &["true"],
+    );
+}
+
+#[test]
+fn e2e_random_int_multiple() {
+    assert_output(
+        r#"
+*main()
+    random_seed(7)
+    all_valid is true
+    for i in 0 to 9
+        r is random_int(5, 15)
+        if r < 5 or r > 15
+            all_valid is false
+    log(all_valid)
+"#,
+        &["true"],
+    );
+}
+
+// ---- L2.3: std.time sleep FFI + duration ----
+
+#[test]
+fn e2e_time_sleep_basic() {
+    // Sleep for 10ms, measure elapsed time — should be >= 10
+    assert_output(
+        r#"
+*main()
+    start is time_now()
+    time_sleep(10)
+    elapsed is time_now() - start
+    log(elapsed >= 10)
+"#,
+        &["true"],
+    );
+}
+
+#[test]
+fn e2e_time_sleep_zero() {
+    // Sleep for 0ms should return immediately
+    assert_output(
+        r#"
+*main()
+    time_sleep(0)
+    log("done")
+"#,
+        &["done"],
+    );
+}
+
+#[test]
+fn e2e_time_now_monotonic() {
+    // Two consecutive time_now() calls should be non-decreasing
+    assert_output(
+        r#"
+*main()
+    a is time_now()
+    b is time_now()
+    log(b >= a)
+"#,
+        &["true"],
+    );
+}
+
+#[test]
+fn e2e_time_timestamp_returns_number() {
+    // time_timestamp should return a positive number
+    assert_output(
+        r#"
+*main()
+    ts is time_timestamp()
+    log(ts > 0)
+"#,
+        &["true"],
+    );
+}
+
+// ---- L2.6: std.testing enhancements ----
+
+#[test]
+fn e2e_assert_close() {
+    assert_output(
+        r#"
+*main()
+    a is 3.14159
+    b is 3.14160
+    diff is a - b
+    if diff < 0
+        diff is 0 - diff
+    close is diff <= 0.001
+    log(close)
+"#,
+        &["true"],
+    );
+}
+
+#[test]
+fn e2e_assert_contains_list() {
+    assert_output(
+        r#"
+*main()
+    items is [10, 20, 30]
+    log(list_contains(items, 20))
+    log(list_contains(items, 99))
+"#,
+        &["true", "false"],
+    );
+}
+
+#[test]
+fn e2e_assert_starts_with() {
+    assert_output(
+        r#"
+*main()
+    text is "hello world"
+    log(string_starts_with(text, "hello"))
+    log(string_starts_with(text, "world"))
+"#,
+        &["true", "false"],
+    );
+}
+
+#[test]
+fn e2e_string_contains_check() {
+    assert_output(
+        r#"
+*main()
+    text is "the quick brown fox"
+    log(string_contains(text, "quick"))
+    log(string_contains(text, "lazy"))
+"#,
+        &["true", "false"],
+    );
+}
+
+// ── S4.3: Multi-line lambda syntax ──────────────────────────────
+
+#[test]
+fn s43_multiline_lambda_basic() {
+    assert_output(
+        r#"
+*main()
+    transform is *fn(x)
+        doubled is x * 2
+        doubled + 1
+    log(transform(5))
+"#,
+        &["11"],
+    );
+}
+
+#[test]
+fn s43_multiline_lambda_with_closure() {
+    assert_output(
+        r#"
+*main()
+    offset is 100
+    add_offset is *fn(x)
+        result is x + offset
+        result
+    log(add_offset(42))
+"#,
+        &["142"],
+    );
+}
+
+#[test]
+fn s43_singleline_lambda_still_works() {
+    assert_output(
+        r#"
+*main()
+    double is *fn(x) x * 2
+    log(double(7))
+"#,
+        &["14"],
+    );
+}
+
+#[test]
+fn s43_multiline_lambda_control_flow() {
+    assert_output(
+        r#"
+*main()
+    classify is *fn(x)
+        if x > 0
+            log("positive")
+        else
+            log("non-positive")
+    classify(5)
+    classify(-3)
+"#,
+        &["positive", "non-positive"],
+    );
+}
+
+#[test]
+fn s43_multiline_lambda_multiple_statements() {
+    assert_output(
+        r#"
+*main()
+    process is *fn(a, b)
+        sum is a + b
+        product is a * b
+        log(sum)
+        log(product)
+    process(3, 4)
+"#,
+        &["7", "12"],
+    );
+}
+
+// ── S4.6: Return expressions in lambdas ─────────────────────────
+
+#[test]
+fn s46_return_early_from_lambda() {
+    assert_output(
+        r#"
+*main()
+    find_positive is *fn(items)
+        for item in items
+            if item > 0
+                return item
+        return 0
+    log(find_positive([-3, -1, 5, 7]))
+    log(find_positive([-3, -1, -5]))
+"#,
+        &["5", "0"],
+    );
+}
+
+#[test]
+fn s46_return_value_from_lambda() {
+    assert_output(
+        r#"
+*main()
+    compute is *fn(x)
+        if x > 10
+            return x * 2
+        return x + 100
+    log(compute(20))
+    log(compute(3))
+"#,
+        &["40", "103"],
+    );
+}
+
+#[test]
+fn s46_return_in_nested_if() {
+    assert_output(
+        r#"
+*main()
+    classify is *fn(x)
+        if x > 0
+            if x > 100
+                return "big"
+            return "small"
+        return "negative"
+    log(classify(200))
+    log(classify(5))
+    log(classify(-1))
+"#,
+        &["big", "small", "negative"],
+    );
+}
+
+// ── M3.4: Closure cycle tracking ────────────────────────────────
+
+#[test]
+fn m34_closure_with_captures_works() {
+    // Closures that capture variables should work correctly after M3.4 changes
+    assert_output(
+        r#"
+*main()
+    x is 10
+    y is 20
+    add is *fn(z) x + y + z
+    log(add(5))
+    log(add(100))
+"#,
+        &["35", "130"],
+    );
+}
+
+#[test]
+fn m34_multiple_closures_shared_captures() {
+    // Multiple closures capturing the same variable
+    assert_output(
+        r#"
+*main()
+    base is 100
+    inc is *fn(x) base + x
+    dec is *fn(x) base - x
+    log(inc(5))
+    log(dec(5))
+"#,
+        &["105", "95"],
+    );
+}

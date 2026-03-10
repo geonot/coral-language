@@ -17,7 +17,9 @@ fn compile(source: &str) -> Result<String, String> {
 
 fn compile_with_warnings(source: &str) -> Result<(String, Vec<String>), String> {
     let compiler = Compiler;
-    compiler.compile_to_ir_with_warnings(source).map_err(|e| format!("{:?}", e))
+    compiler.compile_to_ir_with_warnings(source)
+        .map(|(ir, warnings)| (ir, warnings.iter().map(|w| w.message.clone()).collect()))
+        .map_err(|e| format!("{:?}", e))
 }
 
 // ========== TS-9: Exhaustiveness Checking (Warnings) ==========
