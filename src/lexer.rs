@@ -69,6 +69,7 @@ pub enum TokenKind {
     Colon,
     Comma,
     Dot,
+    Ellipsis,
     Plus,
     Minus,
     Slash,
@@ -656,8 +657,13 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                 pos += ch_len;
             }
             '.' => {
-                tokens.push(Token::new(TokenKind::Dot, Span::new(pos, pos + ch_len)));
-                pos += ch_len;
+                if pos + 2 < len && source[pos..].starts_with("...") {
+                    tokens.push(Token::new(TokenKind::Ellipsis, Span::new(pos, pos + 3)));
+                    pos += 3;
+                } else {
+                    tokens.push(Token::new(TokenKind::Dot, Span::new(pos, pos + ch_len)));
+                    pos += ch_len;
+                }
             }
             '+' => {
                 tokens.push(Token::new(TokenKind::Plus, Span::new(pos, pos + ch_len)));

@@ -1,6 +1,6 @@
 //! Extended parser tests for Phase B — edge cases, error recovery, and complex syntax.
 
-use coralc::ast::{Expression, Item, BinaryOp};
+use coralc::ast::{Expression, Item, BinaryOp, MatchPattern};
 use coralc::lexer;
 use coralc::parser::Parser;
 
@@ -303,7 +303,7 @@ fn parse_enum_with_type_params() {
     match &program.items[0] {
         Item::Type(t) => {
             assert_eq!(t.name, "Option");
-            assert_eq!(t.type_params, vec!["T"]);
+            assert_eq!(t.param_names(), vec!["T"]);
             assert_eq!(t.variants.len(), 2);
             assert_eq!(t.variants[0].name, "Some");
             assert_eq!(t.variants[1].name, "None");
@@ -318,7 +318,7 @@ fn parse_enum_with_multiple_type_params() {
     match &program.items[0] {
         Item::Type(t) => {
             assert_eq!(t.name, "Result");
-            assert_eq!(t.type_params, vec!["T", "E"]);
+            assert_eq!(t.param_names(), vec!["T", "E"]);
             assert_eq!(t.variants.len(), 2);
         }
         _ => panic!("expected type definition"),
@@ -334,6 +334,47 @@ fn parse_enum_no_type_params() {
             assert_eq!(t.name, "Color");
             assert!(t.type_params.is_empty());
             assert_eq!(t.variants.len(), 3);
+        }
+        _ => panic!("expected type definition"),
+    }
+}
+
+// ─── T2.4: Trait Bounds on Generic Type Parameters ───────────────────
+
+#[test]
+fn parse_enum_with_trait_bound() {
+    let program = parse_ok("enum SortedList[T with Comparable]\n    Cons(head, tail)\n    Nil\n");
+    match &program.items[0] {
+        Item::Type(t) => {
+            assert_eq!(t.name, "SortedList");
+            assert_eq!(t.param_names(), vec!["T"]);
+            assert_eq!(t.type_params[0].bounds, vec!["Comparable"]);
+            assert_eq!(t.variants.len(), 2);
+        }
+        _ => panic!("expected type definition"),
+    }
+}
+
+#[test]
+fn parse_enum_with_multiple_trait_bounds() {
+    let program = parse_ok("enum Index[K with Hashable with Comparable]\n    Entry(key, value)\n    Empty\n");
+    match &program.items[0] {
+        Item::Type(t) => {
+            assert_eq!(t.name, "Index");
+            assert_eq!(t.type_params[0].bounds, vec!["Hashable", "Comparable"]);
+        }
+        _ => panic!("expected type definition"),
+    }
+}
+
+#[test]
+fn parse_enum_mixed_bounded_and_unbounded() {
+    let program = parse_ok("enum Map[K with Hashable, V]\n    Entry(key, value)\n    Empty\n");
+    match &program.items[0] {
+        Item::Type(t) => {
+            assert_eq!(t.param_names(), vec!["K", "V"]);
+            assert_eq!(t.type_params[0].bounds, vec!["Hashable"]);
+            assert!(t.type_params[1].bounds.is_empty());
         }
         _ => panic!("expected type definition"),
     }
@@ -367,6 +408,90 @@ fn parse_nested_type_annotation_args() {
             assert_eq!(ann.type_args[1].segments, vec!["List"]);
             assert_eq!(ann.type_args[1].type_args.len(), 1);
             assert_eq!(ann.type_args[1].type_args[0].segments, vec!["Int"]);
+        }
+        _ => panic!("expected function"),
+    }
+}
+
+// ─── S3.5: Range Pattern Parsing ────────────────────────────────────
+
+#[test]
+fn parse_range_pattern() {
+    let program = parse_ok("*test(x)\n    return match x\n        200 to 299 ? \"ok\"\n        _ ? \"other\"\n");
+    match &program.items[0] {
+        Item::Function(f) => {
+            let body_stmt = &f.body.statements[0];
+            if let coralc::ast::Statement::Return(expr, _) = body_stmt {
+                if let Expression::Match(m) = expr {
+                    // 2 arms: 200..299 and wildcard _
+                    assert!(m.arms.len() >= 1);
+                    match &m.arms[0].pattern {
+                        MatchPattern::Range { start, end, .. } => {
+                            assert_eq!(*start, 200);
+                            assert_eq!(*end, 299);
+                        }
+                        other => panic!("expected Range pattern, got {:?}", other),
+                    }
+                } else {
+                    panic!("expected Match expression");
+                }
+            } else {
+                panic!("expected Return statement");
+            }
+        }
+        _ => panic!("expected function"),
+    }
+}
+
+#[test]
+fn parse_range_pattern_in_or() {
+    // Range patterns can appear inside or-patterns
+    let program = parse_ok("*test(x)\n    return match x\n        1 to 9 or 100 ? \"special\"\n        _ ? \"other\"\n");
+    match &program.items[0] {
+        Item::Function(f) => {
+            if let coralc::ast::Statement::Return(expr, _) = &f.body.statements[0] {
+                if let Expression::Match(m) = expr {
+                    match &m.arms[0].pattern {
+                        MatchPattern::Or(alts) => {
+                            assert_eq!(alts.len(), 2);
+                            assert!(matches!(&alts[0], MatchPattern::Range { start: 1, end: 9, .. }));
+                            assert!(matches!(&alts[1], MatchPattern::Integer(100)));
+                        }
+                        other => panic!("expected Or pattern, got {:?}", other),
+                    }
+                } else {
+                    panic!("expected Match expression");
+                }
+            } else {
+                panic!("expected Return statement");
+            }
+        }
+        _ => panic!("expected function"),
+    }
+}
+
+#[test]
+fn parse_list_rest_pattern() {
+    // List pattern with ...rest spread syntax
+    let program = parse_ok("*test(xs)\n    return match xs\n        [a, ...rest] ? rest\n        _ ? []\n");
+    match &program.items[0] {
+        Item::Function(f) => {
+            if let coralc::ast::Statement::Return(expr, _) = &f.body.statements[0] {
+                if let Expression::Match(m) = expr {
+                    match &m.arms[0].pattern {
+                        MatchPattern::List(pats) => {
+                            assert_eq!(pats.len(), 2);
+                            assert!(matches!(&pats[0], MatchPattern::Identifier(n) if n == "a"));
+                            assert!(matches!(&pats[1], MatchPattern::Rest(n, _) if n == "rest"));
+                        }
+                        other => panic!("expected List pattern, got {:?}", other),
+                    }
+                } else {
+                    panic!("expected Match expression");
+                }
+            } else {
+                panic!("expected Return statement");
+            }
         }
         _ => panic!("expected function"),
     }

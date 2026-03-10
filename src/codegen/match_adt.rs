@@ -10,9 +10,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn pattern_has_bindings(pattern: &MatchPattern) -> bool {
         match pattern {
             MatchPattern::Identifier(_) => true,
+            MatchPattern::Rest(..) => true,
             MatchPattern::Constructor { fields, .. } => fields.iter().any(Self::pattern_has_bindings),
             MatchPattern::Or(alts) => alts.iter().any(Self::pattern_has_bindings),
             MatchPattern::List(pats) => pats.iter().any(Self::pattern_has_bindings),
+            MatchPattern::Range { .. } => false,
             _ => false,
         }
     }
@@ -150,23 +152,115 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(self.value_to_bool(eq))
             }
             MatchPattern::List(patterns) => {
-                let items: Vec<Expression> = patterns.iter().map(|p| match p {
-                    MatchPattern::Integer(n) => Expression::Integer(*n, Span::new(0, 0)),
-                    MatchPattern::Bool(b) => Expression::Bool(*b, Span::new(0, 0)),
-                    MatchPattern::String(s) => Expression::String(s.clone(), Span::new(0, 0)),
-                    MatchPattern::Identifier(name) => Expression::Identifier(name.clone(), Span::new(0, 0)),
-                    _ => Expression::Identifier("_".to_string(), Span::new(0, 0)),
-                }).collect();
-                let list_lit = self.emit_list_literal(ctx, &items)?;
-                let eq = self.call_nb(
-                    self.runtime.nb_equals,
-                    &[match_value.into(), list_lit.into()],
-                    "match_eq_list",
+                // S3.4: Proper list pattern matching with recursion and variable binding.
+                // Check list length, then recursively check each element pattern.
+                let has_rest = patterns.iter().any(|p| matches!(p, MatchPattern::Rest(..)));
+                let fixed_count = patterns.iter().filter(|p| !matches!(p, MatchPattern::Rest(..))).count();
+
+                // Get list length as NaN-boxed number
+                let len_nb = self.call_bridged(
+                    self.runtime.list_length,
+                    &[match_value],
+                    "list_len",
                 );
-                Ok(self.value_to_bool(eq))
+                let expected_len = self.wrap_number(self.f64_type.const_float(fixed_count as f64));
+
+                // Check length: >= fixed_count if has_rest, == fixed_count otherwise
+                let len_ok = if has_rest {
+                    let ge = self.call_nb(
+                        self.runtime.nb_greater_equal,
+                        &[len_nb.into(), expected_len.into()],
+                        "len_ge",
+                    );
+                    self.value_to_bool(ge)
+                } else {
+                    let eq = self.call_nb(
+                        self.runtime.nb_equals,
+                        &[len_nb.into(), expected_len.into()],
+                        "len_eq",
+                    );
+                    self.value_to_bool(eq)
+                };
+
+                // If there are no sub-patterns to check, length check is sufficient
+                let has_nontrivial = patterns.iter().any(|p| !matches!(p,
+                    MatchPattern::Identifier(_) | MatchPattern::Wildcard(_) | MatchPattern::Rest(..)
+                ));
+                if !has_nontrivial {
+                    return Ok(len_ok);
+                }
+
+                // Create blocks for element-by-element checking
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let check_bb = self.context.append_basic_block(function, "list_check");
+                let fail_bb = self.context.append_basic_block(function, "list_fail");
+                let cont_bb = self.context.append_basic_block(function, "list_cont");
+
+                self.builder.build_conditional_branch(len_ok, check_bb, fail_bb).unwrap();
+
+                // Check block: recursively check each element pattern
+                self.builder.position_at_end(check_bb);
+                let mut all_match = self.bool_type.const_int(1, false);
+
+                for (idx, pat) in patterns.iter().enumerate() {
+                    match pat {
+                        MatchPattern::Identifier(_) | MatchPattern::Wildcard(_) | MatchPattern::Rest(..) => continue,
+                        _ => {}
+                    }
+                    let idx_nb = self.wrap_number(self.f64_type.const_float(idx as f64));
+                    let elem = self.call_bridged(
+                        self.runtime.list_get,
+                        &[match_value, idx_nb],
+                        &format!("list_elem_{}", idx),
+                    );
+                    let elem_match = self.emit_match_condition(ctx, elem, pat, _span)?;
+                    all_match = self.builder.build_and(all_match, elem_match, "and_elem").unwrap();
+                }
+
+                self.builder.build_unconditional_branch(cont_bb).unwrap();
+                let check_end = self.builder.get_insert_block().unwrap();
+
+                // Fail block
+                self.builder.position_at_end(fail_bb);
+                self.builder.build_unconditional_branch(cont_bb).unwrap();
+
+                // Continue block with phi
+                self.builder.position_at_end(cont_bb);
+                let phi = self.builder.build_phi(self.bool_type, "list_result").unwrap();
+                phi.add_incoming(&[
+                    (&all_match, check_end),
+                    (&self.bool_type.const_int(0, false), fail_bb),
+                ]);
+
+                Ok(phi.as_basic_value().into_int_value())
             }
             MatchPattern::Identifier(_) => Ok(self.bool_type.const_int(1, false)),
             MatchPattern::Wildcard(_) => Ok(self.bool_type.const_int(1, false)),
+            MatchPattern::Rest(..) => Ok(self.bool_type.const_int(1, false)),
+            MatchPattern::Range { start, end, .. } => {
+                // S3.5: Range pattern — check start <= value <= end (inclusive)
+                let start_val = self.wrap_number(self.f64_type.const_float(*start as f64));
+                let end_val = self.wrap_number(self.f64_type.const_float(*end as f64));
+
+                // value >= start
+                let ge_result = self.call_nb(
+                    self.runtime.nb_greater_equal,
+                    &[match_value.into(), start_val.into()],
+                    "range_ge",
+                );
+                let ge_bool = self.value_to_bool(ge_result);
+
+                // value <= end
+                let le_result = self.call_nb(
+                    self.runtime.nb_less_equal,
+                    &[match_value.into(), end_val.into()],
+                    "range_le",
+                );
+                let le_bool = self.value_to_bool(le_result);
+
+                let in_range = self.builder.build_and(ge_bool, le_bool, "in_range").unwrap();
+                Ok(in_range)
+            }
             MatchPattern::Or(alternatives) => {
                 // Or-pattern: succeed if ANY alternative matches
                 let mut result = self.bool_type.const_int(0, false);
@@ -327,8 +421,47 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 self.builder.position_at_end(cont_bb);
             }
+            MatchPattern::List(patterns) => {
+                // S3.4: Bind variables from list patterns by extracting elements by index.
+                let has_bindings = patterns.iter().any(|p| Self::pattern_has_bindings(p));
+                if !has_bindings {
+                    return;
+                }
+                for (idx, pat) in patterns.iter().enumerate() {
+                    match pat {
+                        MatchPattern::Rest(name, _) => {
+                            // Rest pattern: extract sublist from idx to end
+                            let start_nb = self.wrap_number(self.f64_type.const_float(idx as f64));
+                            let len_nb = self.call_bridged(
+                                self.runtime.list_length,
+                                &[value],
+                                "rest_len",
+                            );
+                            let rest_val = self.call_bridged(
+                                self.runtime.list_slice,
+                                &[value, start_nb, len_nb],
+                                "rest_slice",
+                            );
+                            self.call_nb_void(self.runtime.nb_retain, &[rest_val.into()]);
+                            self.store_variable(ctx, name, rest_val);
+                        }
+                        _ => {
+                            if !Self::pattern_has_bindings(pat) && !matches!(pat, MatchPattern::Identifier(_)) {
+                                continue;
+                            }
+                            let idx_nb = self.wrap_number(self.f64_type.const_float(idx as f64));
+                            let elem = self.call_bridged(
+                                self.runtime.list_get,
+                                &[value, idx_nb],
+                                &format!("bind_elem_{}", idx),
+                            );
+                            self.bind_pattern_variables(ctx, elem, pat);
+                        }
+                    }
+                }
+            }
             _ => {
-                // Other patterns (Integer, Bool, String, List) don't create bindings
+                // Other patterns (Integer, Bool, String, Range) don't create bindings
             }
         }
     }

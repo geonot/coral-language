@@ -2754,3 +2754,698 @@ fn e2e_match_or_pattern_with_guard() {
         &["low", "low", "low-high", "other", "other", "other"],
     );
 }
+
+// ====================== S3.5: Range patterns ======================
+
+#[test]
+fn e2e_match_range_pattern_basic() {
+    // Basic range pattern matching on HTTP status codes
+    assert_output(
+        r#"
+*main()
+    for code in [200, 301, 404, 500]
+        label is match code
+            200 to 299 ? "success"
+            300 to 399 ? "redirect"
+            400 to 499 ? "client error"
+            500 to 599 ? "server error"
+            _ ? "unknown"
+        log(label)
+"#,
+        &["success", "redirect", "client error", "server error"],
+    );
+}
+
+#[test]
+fn e2e_match_range_pattern_boundaries() {
+    // Range boundaries are inclusive on both ends
+    assert_output(
+        r#"
+*main()
+    for x in [0, 1, 5, 10, 11]
+        label is match x
+            1 to 10 ? "in"
+            _ ? "out"
+        log(label)
+"#,
+        &["out", "in", "in", "in", "out"],
+    );
+}
+
+#[test]
+fn e2e_match_range_pattern_with_default() {
+    // Range pattern with default arm
+    assert_output(
+        r#"
+*main()
+    x is 42
+    result is match x
+        0 to 9 ? "single digit"
+        10 to 99 ? "double digit"
+        _ ? "big number"
+    log(result)
+"#,
+        &["double digit"],
+    );
+}
+
+#[test]
+fn e2e_match_range_pattern_with_exact() {
+    // Mix of range patterns and exact integer patterns
+    assert_output(
+        r#"
+*main()
+    for x in [0, 1, 5, 100]
+        label is match x
+            0 ? "zero"
+            1 to 9 ? "small"
+            _ ? "large"
+        log(label)
+"#,
+        &["zero", "small", "small", "large"],
+    );
+}
+
+#[test]
+fn e2e_match_range_pattern_or_combo() {
+    // Range pattern combined with or-pattern
+    assert_output(
+        r#"
+*main()
+    for x in [1, 50, 100, 200]
+        label is match x
+            1 to 99 or 200 ? "special"
+            _ ? "normal"
+        log(label)
+"#,
+        &["special", "special", "normal", "special"],
+    );
+}
+
+// S3.4 — Nested Pattern Matching Tests
+
+#[test]
+fn e2e_nested_list_variable_binding() {
+    // List pattern with variable bindings
+    assert_output(
+        r#"
+*main()
+    xs is [10, 20, 30]
+    match xs
+        [a, b, c] ? log(a + b + c)
+        _ ? log("no match")
+"#,
+        &["60"],
+    );
+}
+
+#[test]
+fn e2e_nested_list_rest_pattern() {
+    // Rest pattern captures remaining elements
+    assert_output(
+        r#"
+*first_and_rest(xs)
+    return match xs
+        [h, ...tail] ? h
+        _ ? -1
+
+*main()
+    log(first_and_rest([100, 200, 300]))
+    log(first_and_rest([42]))
+    log(first_and_rest([]))
+"#,
+        &["100", "42", "-1"],
+    );
+}
+
+#[test]
+fn e2e_nested_list_rest_use_rest() {
+    // Use the rest variable
+    assert_output(
+        r#"
+*second(xs)
+    return match xs
+        [_, second, ...rest] ? second
+        _ ? 0
+
+*main()
+    log(second([10, 20, 30, 40]))
+"#,
+        &["20"],
+    );
+}
+
+#[test]
+fn e2e_nested_list_literal_pattern() {
+    // List pattern matching specific literal values
+    assert_output(
+        r#"
+*classify(xs)
+    return match xs
+        [1, 2, 3] ? "one-two-three"
+        [0] ? "just zero"
+        _ ? "other"
+
+*main()
+    log(classify([1, 2, 3]))
+    log(classify([0]))
+    log(classify([4, 5]))
+"#,
+        &["one-two-three", "just zero", "other"],
+    );
+}
+
+#[test]
+fn e2e_nested_list_empty_match() {
+    // Empty list pattern
+    assert_output(
+        r#"
+*describe(xs)
+    return match xs
+        [] ? "empty"
+        [x] ? "singleton"
+        _ ? "many"
+
+*main()
+    log(describe([]))
+    log(describe([42]))
+    log(describe([1, 2]))
+"#,
+        &["empty", "singleton", "many"],
+    );
+}
+
+#[test]
+fn e2e_nested_constructor_in_list() {
+    // Constructor patterns inside list patterns
+    assert_output(
+        r#"
+enum Option
+    Some(value)
+    None
+
+*main()
+    xs is [Some(10), Some(20)]
+    match xs
+        [Some(a), Some(b)] ? log(a + b)
+        _ ? log("no match")
+"#,
+        &["30"],
+    );
+}
+
+#[test]
+fn e2e_nested_deep_constructor_list() {
+    // Constructor wrapping a list; extract and use the list
+    assert_output(
+        r#"
+enum Wrapper
+    Box(value)
+
+*main()
+    w is Box(42)
+    result is match w
+        Box(x) ? x
+        _ ? 0
+    log(result)
+"#,
+        &["42"],
+    );
+}
+
+#[test]
+fn e2e_nested_rest_only_pattern() {
+    // Rest-only pattern captures all elements
+    assert_output(
+        r#"
+*len(xs)
+    return match xs
+        [] ? 0
+        [_, ...rest] ? 1 + len(rest)
+
+*main()
+    log(len([10, 20, 30, 40]))
+"#,
+        &["4"],
+    );
+}
+
+// C3.2 — Lambda Inlining Tests
+
+#[test]
+fn e2e_inline_map_lambda() {
+    // Inline lambda in map — no closure allocation
+    assert_output(
+        r#"
+*main()
+    xs is [1, 2, 3, 4]
+    doubled is xs.map(*fn(x) x * 2)
+    for v in doubled
+        log(v)
+"#,
+        &["2", "4", "6", "8"],
+    );
+}
+
+#[test]
+fn e2e_inline_filter_lambda() {
+    // Inline lambda in filter — no closure allocation
+    assert_output(
+        r#"
+*main()
+    xs is [1, 2, 3, 4, 5, 6]
+    big is xs.filter(*fn(x) x > 3)
+    for v in big
+        log(v)
+"#,
+        &["4", "5", "6"],
+    );
+}
+
+#[test]
+fn e2e_inline_map_filter_chain() {
+    // Chain of inline map and filter
+    assert_output(
+        r#"
+*main()
+    xs is [1, 2, 3, 4, 5]
+    result is xs.map(*fn(x) x * 10).filter(*fn(x) x > 20)
+    for v in result
+        log(v)
+"#,
+        &["30", "40", "50"],
+    );
+}
+
+#[test]
+fn e2e_inline_map_with_capture() {
+    // Lambda captures variable from enclosing scope
+    assert_output(
+        r#"
+*main()
+    factor is 3
+    xs is [1, 2, 3]
+    result is xs.map(*fn(x) x * factor)
+    for v in result
+        log(v)
+"#,
+        &["3", "6", "9"],
+    );
+}
+
+// ─── S2.4: Destructuring assignment ───
+
+#[test]
+fn e2e_destructure_list_basic() {
+    assert_output(
+        r#"
+*main()
+    [a, b, c] is [10, 20, 30]
+    log(a)
+    log(b)
+    log(c)
+"#,
+        &["10", "20", "30"],
+    );
+}
+
+#[test]
+fn e2e_destructure_list_rest() {
+    assert_output(
+        r#"
+*main()
+    [head, ...tail] is [1, 2, 3, 4]
+    log(head)
+    log(tail.length())
+"#,
+        &["1", "3"],
+    );
+}
+
+#[test]
+fn e2e_destructure_constructor() {
+    assert_output(
+        r#"
+enum Option
+    Some(value)
+    None
+
+*main()
+    Some(x) is Some(42)
+    log(x)
+"#,
+        &["42"],
+    );
+}
+
+#[test]
+fn e2e_destructure_in_function() {
+    // Destructuring with a computed value
+    assert_output(
+        r#"
+*pair()
+    return [5, 10]
+
+*main()
+    [a, b] is pair()
+    log(a + b)
+"#,
+        &["15"],
+    );
+}
+
+#[test]
+fn e2e_destructure_list_with_expression() {
+    assert_output(
+        r#"
+*make_pair()
+    return [100, 200]
+
+*main()
+    [x, y] is make_pair()
+    log(x)
+    log(y)
+"#,
+        &["100", "200"],
+    );
+}
+
+#[test]
+fn e2e_destructure_constructor_nested() {
+    assert_output(
+        r#"
+enum Wrapper
+    Pair(a, b)
+
+*main()
+    Pair(x, y) is Pair(7, 8)
+    log(x + y)
+"#,
+        &["15"],
+    );
+}
+
+// ─── S2.5: Slice syntax ───
+
+#[test]
+fn e2e_slice_list_basic() {
+    assert_output(
+        r#"
+*main()
+    xs is [10, 20, 30, 40, 50]
+    ys is xs[1 to 4]
+    for v in ys
+        log(v)
+"#,
+        &["20", "30", "40"],
+    );
+}
+
+#[test]
+fn e2e_slice_list_from_start() {
+    assert_output(
+        r#"
+*main()
+    xs is [1, 2, 3, 4, 5]
+    ys is xs[0 to 3]
+    for v in ys
+        log(v)
+"#,
+        &["1", "2", "3"],
+    );
+}
+
+#[test]
+fn e2e_slice_list_to_end() {
+    assert_output(
+        r#"
+*main()
+    xs is [1, 2, 3, 4, 5]
+    ys is xs[2 to 5]
+    for v in ys
+        log(v)
+"#,
+        &["3", "4", "5"],
+    );
+}
+
+#[test]
+fn e2e_slice_with_variables() {
+    assert_output(
+        r#"
+*main()
+    xs is [10, 20, 30, 40, 50]
+    a is 1
+    b is 3
+    ys is xs[a to b]
+    for v in ys
+        log(v)
+"#,
+        &["20", "30"],
+    );
+}
+
+// ─── S2.6: Spread operator ───
+
+#[test]
+fn e2e_spread_basic() {
+    assert_output(
+        r#"
+*main()
+    xs is [1, 2, 3]
+    ys is [0, ...xs, 4]
+    for v in ys
+        log(v)
+"#,
+        &["0", "1", "2", "3", "4"],
+    );
+}
+
+#[test]
+fn e2e_spread_multiple() {
+    assert_output(
+        r#"
+*main()
+    a is [1, 2]
+    b is [3, 4]
+    c is [...a, ...b]
+    for v in c
+        log(v)
+"#,
+        &["1", "2", "3", "4"],
+    );
+}
+
+#[test]
+fn e2e_spread_empty() {
+    assert_output(
+        r#"
+*main()
+    empty is []
+    xs is [...empty, 1, ...empty, 2]
+    for v in xs
+        log(v)
+"#,
+        &["1", "2"],
+    );
+}
+
+#[test]
+fn e2e_spread_from_function() {
+    assert_output(
+        r#"
+*make_list()
+    return [10, 20]
+
+*main()
+    result is [5, ...make_list(), 30]
+    for v in result
+        log(v)
+"#,
+        &["5", "10", "20", "30"],
+    );
+}
+
+// ─── S2.2: List comprehensions ───
+
+#[test]
+fn e2e_list_comprehension_basic() {
+    assert_output(
+        r#"
+*main()
+    squares is [x * x for x in [1, 2, 3, 4]]
+    for v in squares
+        log(v)
+"#,
+        &["1", "4", "9", "16"],
+    );
+}
+
+#[test]
+fn e2e_list_comprehension_with_filter() {
+    assert_output(
+        r#"
+*main()
+    evens is [x for x in [1, 2, 3, 4, 5, 6] if x % 2 is 0]
+    for v in evens
+        log(v)
+"#,
+        &["2", "4", "6"],
+    );
+}
+
+#[test]
+fn e2e_list_comprehension_transform_and_filter() {
+    assert_output(
+        r#"
+*main()
+    result is [x * 10 for x in [1, 2, 3, 4, 5] if x > 2]
+    for v in result
+        log(v)
+"#,
+        &["30", "40", "50"],
+    );
+}
+
+#[test]
+fn e2e_list_comprehension_with_function() {
+    assert_output(
+        r#"
+*double(n)
+    return n * 2
+
+*main()
+    result is [double(x) for x in [5, 10, 15]]
+    for v in result
+        log(v)
+"#,
+        &["10", "20", "30"],
+    );
+}
+
+// ─── S2.3: Map comprehensions ───
+
+#[test]
+fn e2e_map_comprehension_basic() {
+    assert_output(
+        r#"
+*main()
+    m is map(x: x * x for x in [1, 2, 3])
+    log(m.get(1))
+    log(m.get(2))
+    log(m.get(3))
+"#,
+        &["1", "4", "9"],
+    );
+}
+
+#[test]
+fn e2e_map_comprehension_with_filter() {
+    assert_output(
+        r#"
+*main()
+    m is map(x: x * 10 for x in [1, 2, 3, 4, 5] if x > 2)
+    log(m.get(3))
+    log(m.get(4))
+    log(m.get(5))
+"#,
+        &["30", "40", "50"],
+    );
+}
+
+// ─── S2.7: Tuple syntax ───
+
+#[test]
+fn e2e_tuple_basic() {
+    assert_output(
+        r#"
+*main()
+    point is (10, 20)
+    log(point[0])
+    log(point[1])
+"#,
+        &["10", "20"],
+    );
+}
+
+#[test]
+fn e2e_tuple_destructure() {
+    assert_output(
+        r#"
+*main()
+    [x, y] is (3, 4)
+    log(x)
+    log(y)
+"#,
+        &["3", "4"],
+    );
+}
+
+#[test]
+fn e2e_tuple_triple() {
+    assert_output(
+        r#"
+*main()
+    t is (1, 2, 3)
+    log(t.length())
+    log(t[2])
+"#,
+        &["3", "3"],
+    );
+}
+
+#[test]
+fn e2e_tuple_from_function() {
+    assert_output(
+        r#"
+*get_pair()
+    return (100, 200)
+
+*main()
+    [a, b] is get_pair()
+    log(a + b)
+"#,
+        &["300"],
+    );
+}
+
+// ─── T2.4: Trait Bounds on Generics ──────────────────────────────────
+
+#[test]
+fn e2e_trait_bounds_basic() {
+    // Bounded generic type: enum with trait-bounded type parameter.
+    // The bound is recorded in the constraint system (advisory).
+    // The generic type still works at runtime via NaN-boxing.
+    assert_output(
+        r#"
+enum Wrapper[T with Printable]
+    Val(x)
+    Empty
+
+*main()
+    v is Val(42)
+    match v
+        Val(x) ? log(x)
+        _ ? log('empty')
+"#,
+        &["42"],
+    );
+}
+
+#[test]
+fn e2e_trait_bounds_multiple_params() {
+    // Multiple type params, only some bounded
+    assert_output(
+        r#"
+enum Pair[K with Hashable, V]
+    MkPair(key, val)
+
+*main()
+    p is MkPair('hello', 99)
+    match p
+        MkPair(k, v) ? log(v)
+        _ ? log('none')
+"#,
+        &["99"],
+    );
+}

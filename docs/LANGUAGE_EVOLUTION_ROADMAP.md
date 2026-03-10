@@ -10,7 +10,7 @@
 
 Coral has reached an extraordinary milestone. The self-hosted compiler bootstraps — gen2 equals gen3 byte-for-byte. 816 tests pass with zero failures. The language compiles itself. NaN-boxing has been implemented, transforming the value representation from 40-byte heap-allocated structs to 64-bit immediate values. Type specialization generates native `fadd`/`fcmp` instructions for numeric hot paths. Pattern matching supports guards, or-patterns, and multi-statement arms. The compiler performs dead function elimination, common subexpression elimination, tail call optimization, and small function inlining.
 
-Phase Alpha is **complete**. Phase Beta is approximately **75% complete**. This is the proof that Coral *works* — and increasingly, works *fast*.
+Phase Alpha is **complete**. Phase Beta is approximately **90% complete**. This is the proof that Coral *works* — and increasingly, works *fast*.
 
 But working is not enough. To achieve the audacious goal of becoming the language that Rust or Zig could have been — a language that combines low-level systems power with high-level expressiveness — Coral must evolve across six foundational pillars:
 
@@ -237,7 +237,7 @@ Each pillar contains a phased task list. Every task must be implemented in **bot
 | S3.2 | **Guard clauses in match** | `Some(v) if v > 0 ? handle_positive(v)` — conditional matching beyond structural pattern checks. | Medium | Both |
 | S3.3 | **Or-patterns** | `Circle(r) | Sphere(r) ? compute_area(r)` — match multiple patterns with the same body. | Medium | Both |
 | S3.4 | **Nested pattern matching** | `Some(Circle(r)) ? r` — currently partially supported. Ensure deep nesting works: `Ok(Some([first, ...rest])) ? process(first, rest)`. | High | Both |
-| S3.5 | **String/number range patterns** | `match code / 200..299 ? 'success' / 400..499 ? 'client error' / 500..599 ? 'server error'`. | Medium | Both |
+| S3.5 | **String/number range patterns** | `match code / 200 to 299 ? 'success' / 400 to 499 ? 'client error' / 500 to 599 ? 'server error'`. Uses existing `to` keyword (consistent with `for..in..to` range loops). | Medium | Both |
 | S3.6 | **`match` as statement** | Allow `match` to be used in statement position without capturing a value. Each arm executes side effects. Currently match is expression-only. | Low | Both |
 
 ### Phase S4: Function & Method Expressiveness
@@ -462,22 +462,23 @@ All Phase Alpha tasks have been completed:
 - **S2.1** ✅ Pipeline operator — desugaring in lowering pass
 - **CC2.1-CC2.3** ✅ Error reporting — source-mapped errors, multi-error reporting, DWARF debug info
 
-### Phase Beta — IN PROGRESS (est. 75% complete)
+### Phase Beta — IN PROGRESS (est. 90% complete)
 
 **Goal:** The type system catches real bugs. The compiler generates smart code. The syntax handles every common pattern elegantly.
 
 | Priority | Tasks | Status |
 |----------|-------|--------|
 | T2.1-T2.3 (User generics — syntax, inference, instantiation) | ✅ Complete |
-| T2.4-T2.5 (Trait bounds, monomorphization) | Not started |
+| T2.4 (Trait bounds on generics) | ✅ Complete |
+| T2.5 (Monomorphization) | Not started |
 | C2.1-C2.3 (Type specialization) | ✅ Complete |
 | C2.4-C2.5 (Unboxed lists, store field specialization) | Not started |
 | S3.1-S3.3 (Multi-statement arms, guards, or-patterns) | ✅ Complete |
-| S3.4-S3.5 (Nested patterns, range patterns) | Not started |
+| S3.4-S3.5 (Nested patterns, range patterns) | ✅ Complete |
 | S3.6 (Match as statement) | ✅ Complete |
 | C3.1, C3.3-C3.5 (Inlining, TCO, CSE, dead function elim) | ✅ Complete |
-| C3.2 (Lambda inlining in higher-order functions) | Not started |
-| S2.2-S2.7 (Collection expressions) | Not started |
+| C3.2 (Lambda inlining in higher-order functions) | ✅ Complete |
+| S2.2-S2.7 (Collection expressions) | ✅ Complete |
 | M2.1-M2.4 (Non-atomic RC fast path) | ✅ Complete |
 
 ### Phase Gamma (Months 9-12): Runtime & Ecosystem

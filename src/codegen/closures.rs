@@ -58,6 +58,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             body,
         )?;
 
+        // C3.2: Mark small lambda invoke functions as alwaysinline so LLVM can
+        // inline them at call sites, especially inside map/filter/reduce loops.
+        {
+            let stmt_count = body.statements.len()
+                + if body.value.is_some() { 1 } else { 0 };
+            if stmt_count <= 5 {
+                let kind_id = Attribute::get_named_enum_kind_id("alwaysinline");
+                let attr = self.context.create_enum_attribute(kind_id, 0);
+                invoke_fn.add_attribute(AttributeLoc::Function, attr);
+            }
+        }
+
         let release_fn = if let Some(struct_type) = env_struct {
             let release = self.module.add_function(
                 &format!("lambda_release_{}", lambda_id),
@@ -408,6 +420,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.collect_captures_expr(target, available, &mut locals, captures, seen);
                     self.collect_captures_expr(value, available, &mut locals, captures, seen);
                 }
+                Statement::PatternBinding { pattern, value, .. } => {
+                    self.collect_captures_expr(value, available, &mut locals, captures, seen);
+                    collect_pattern_locals(pattern, &mut locals);
+                }
             }
         }
         if let Some(value) = &block.value {
@@ -435,6 +451,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::Unary { expr, .. } =>
                 self.collect_captures_expr(expr, available, locals, captures, seen),
+            Expression::Spread(inner, _) =>
+                self.collect_captures_expr(inner, available, locals, captures, seen),
             Expression::List(items, _) => {
                 for item in items {
                     self.collect_captures_expr(item, available, locals, captures, seen);
@@ -458,6 +476,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Index { target, index, .. } => {
                 self.collect_captures_expr(target, available, locals, captures, seen);
                 self.collect_captures_expr(index, available, locals, captures, seen);
+            }
+            Expression::Slice { target, start, end, .. } => {
+                self.collect_captures_expr(target, available, locals, captures, seen);
+                self.collect_captures_expr(start, available, locals, captures, seen);
+                self.collect_captures_expr(end, available, locals, captures, seen);
             }
             Expression::Ternary {
                 condition,
@@ -500,6 +523,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::ErrorPropagate { expr, .. } => {
                 self.collect_captures_expr(expr, available, locals, captures, seen);
+            }
+            Expression::ListComprehension { body, iterable, condition, .. } => {
+                self.collect_captures_expr(iterable, available, locals, captures, seen);
+                self.collect_captures_expr(body, available, locals, captures, seen);
+                if let Some(cond) = condition {
+                    self.collect_captures_expr(cond, available, locals, captures, seen);
+                }
+            }
+            Expression::MapComprehension { key, value, iterable, condition, .. } => {
+                self.collect_captures_expr(iterable, available, locals, captures, seen);
+                self.collect_captures_expr(key, available, locals, captures, seen);
+                self.collect_captures_expr(value, available, locals, captures, seen);
+                if let Some(cond) = condition {
+                    self.collect_captures_expr(cond, available, locals, captures, seen);
+                }
             }
             Expression::Integer(_, _)
             | Expression::Float(_, _)
@@ -736,5 +774,37 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             Ok(i8_ptr_type.const_null())
         }
+    }
+}
+
+/// Collect variable names introduced by a destructuring pattern into a locals set.
+fn collect_pattern_locals(pattern: &crate::ast::MatchPattern, locals: &mut HashSet<String>) {
+    match pattern {
+        crate::ast::MatchPattern::Identifier(name) => {
+            locals.insert(name.clone());
+        }
+        crate::ast::MatchPattern::Constructor { fields, .. } => {
+            for pat in fields {
+                collect_pattern_locals(pat, locals);
+            }
+        }
+        crate::ast::MatchPattern::List(patterns) => {
+            for pat in patterns {
+                collect_pattern_locals(pat, locals);
+            }
+        }
+        crate::ast::MatchPattern::Or(alternatives) => {
+            for alt in alternatives {
+                collect_pattern_locals(alt, locals);
+            }
+        }
+        crate::ast::MatchPattern::Rest(name, _) => {
+            locals.insert(name.clone());
+        }
+        crate::ast::MatchPattern::Integer(_)
+        | crate::ast::MatchPattern::Bool(_)
+        | crate::ast::MatchPattern::String(_)
+        | crate::ast::MatchPattern::Wildcard(_)
+        | crate::ast::MatchPattern::Range { .. } => {}
     }
 }

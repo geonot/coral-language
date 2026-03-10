@@ -179,8 +179,18 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     if has_type_params {
                         types.register_generic_type(
                             r#type.name.clone(),
-                            r#type.type_params.iter().map(|s| s.as_str()).collect(),
+                            r#type.param_names(),
                         );
+                        // T2.4: Register trait bounds for each type parameter
+                        for tp in &r#type.type_params {
+                            if !tp.bounds.is_empty() {
+                                types.register_type_param_bounds(
+                                    &r#type.name,
+                                    &tp.name,
+                                    tp.bounds.clone(),
+                                );
+                            }
+                        }
                     }
                     
                     // Register the enum type itself as an ADT
@@ -211,7 +221,7 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                             types.register_generic_constructor(
                                 ctor_name.clone(),
                                 r#type.name.clone(),
-                                r#type.type_params.clone(),
+                                r#type.type_params.iter().map(|tp| tp.name.clone()).collect(),
                                 variant.fields.len(),
                             );
                         }
@@ -781,6 +791,10 @@ fn collect_block_constraints(
                 let _ = collect_constraints_expr(target, constraints, types, graph);
                 let _ = collect_constraints_expr(value, constraints, types, graph);
             }
+            crate::ast::Statement::PatternBinding { pattern, value, .. } => {
+                let rhs_ty = collect_constraints_expr(value, constraints, types, graph);
+                collect_pattern_bindings(pattern, &rhs_ty, types);
+            }
         }
     }
     if let Some(value) = &block.value {
@@ -807,7 +821,11 @@ fn collect_constraints_expr(
         Expression::InlineAsm { .. } => TypeId::Unknown,
         Expression::PtrLoad { .. } => TypeId::Unknown,
         Expression::Unsafe { .. } => TypeId::Unknown,
-        Expression::Identifier(name, _) => {
+        Expression::Spread(inner, _) => {
+            let inner_ty = collect_constraints_expr(inner, constraints, types, graph);
+            inner_ty
+        }
+        Expression::Identifier(name, span) => {
             // T2.2: Let-polymorphism for generic constructors.
             // Each use of a generic constructor (e.g., None, Some) gets fresh type vars.
             if let Some((enum_name, type_params, field_count)) = types.get_generic_constructor(name).cloned() {
@@ -815,6 +833,14 @@ fn collect_constraints_expr(
                 let fresh_args: Vec<TypeId> = type_params.iter()
                     .map(|_| TypeId::TypeVar(graph.fresh()))
                     .collect();
+                // T2.4: Emit HasTrait constraints for bounded type parameters
+                for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter()) {
+                    if let Some(bounds) = types.get_type_param_bounds(&enum_name, param_name) {
+                        for bound in bounds.clone() {
+                            constraints.push(ConstraintKind::HasTrait(fresh_ty.clone(), bound, *span));
+                        }
+                    }
+                }
                 let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
                 if field_count == 0 {
                     // Nullary constructor: return ADT directly
@@ -836,16 +862,20 @@ fn collect_constraints_expr(
         Expression::Placeholder(id, _) => TypeId::Placeholder(*id),
         Expression::TaxonomyPath { .. } => TypeId::Primitive(Primitive::String),
         Expression::List(items, span) => {
-            let elem_ty = if items.is_empty() {
-                TypeId::TypeVar(graph.fresh())
-            } else {
-                let first = collect_constraints_expr(&items[0], constraints, types, graph);
-                for item in &items[1..] {
-                    let ty = collect_constraints_expr(item, constraints, types, graph);
-                    constraints.push(ConstraintKind::EqualAt(first.clone(), ty, *span));
+            let elem_ty = TypeId::TypeVar(graph.fresh());
+            for item in items {
+                let ty = collect_constraints_expr(item, constraints, types, graph);
+                if matches!(item, Expression::Spread(..)) {
+                    // S2.6: Spread element has list type — constrain it to [elem_ty]
+                    constraints.push(ConstraintKind::EqualAt(
+                        TypeId::List(Box::new(elem_ty.clone())),
+                        ty,
+                        *span,
+                    ));
+                } else {
+                    constraints.push(ConstraintKind::EqualAt(elem_ty.clone(), ty, *span));
                 }
-                first
-            };
+            }
             TypeId::List(Box::new(elem_ty))
         }
         Expression::Map(entries, span) => {
@@ -977,6 +1007,13 @@ fn collect_constraints_expr(
                 _ => TypeId::Unknown,
             }
         }
+        Expression::Slice { target, start, end, .. } => {
+            let target_ty = collect_constraints_expr(target, constraints, types, graph);
+            let _start_ty = collect_constraints_expr(start, constraints, types, graph);
+            let _end_ty = collect_constraints_expr(end, constraints, types, graph);
+            // Slice returns the same collection type
+            target_ty
+        }
         Expression::Member { target, property, span } => {
             let target_ty = collect_constraints_expr(target, constraints, types, graph);
             match property.as_str() {
@@ -1046,15 +1083,17 @@ fn collect_constraints_expr(
                         let elem_ty = if patterns.is_empty() {
                             TypeId::TypeVar(graph.fresh())
                         } else {
-                            // All elements in a list pattern should have consistent types
-                            // For now, use Any since patterns don't carry type info directly
                             TypeId::Primitive(Primitive::Any)
                         };
                         constraints.push(ConstraintKind::EqualAt(
                             scrutinee_ty.clone(),
-                            TypeId::List(Box::new(elem_ty)),
+                            TypeId::List(Box::new(elem_ty.clone())),
                             match_span,
                         ));
+                        // S3.4: Recurse into list sub-patterns for bindings
+                        for pat in patterns {
+                            collect_pattern_bindings(pat, &elem_ty, types);
+                        }
                     }
                     crate::ast::MatchPattern::Identifier(name) => {
                         types.insert(name.clone(), scrutinee_ty.clone());
@@ -1067,6 +1106,14 @@ fn collect_constraints_expr(
                             let fresh_args: Vec<TypeId> = type_params.iter()
                                 .map(|_| TypeId::TypeVar(graph.fresh()))
                                 .collect();
+                            // T2.4: Emit HasTrait constraints for bounded type parameters
+                            for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter()) {
+                                if let Some(bounds) = types.get_type_param_bounds(&enum_name, param_name) {
+                                    for bound in bounds.clone() {
+                                        constraints.push(ConstraintKind::HasTrait(fresh_ty.clone(), bound, match_span));
+                                    }
+                                }
+                            }
                             let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
                             constraints.push(ConstraintKind::EqualAt(
                                 scrutinee_ty.clone(),
@@ -1101,6 +1148,14 @@ fn collect_constraints_expr(
                     crate::ast::MatchPattern::Wildcard(_) => {
                         // Wildcard matches anything, no type constraints
                     }
+                    crate::ast::MatchPattern::Range { .. } => {
+                        // S3.5: Range pattern constrains scrutinee to numeric
+                        constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                    }
+                    crate::ast::MatchPattern::Rest(name, _) => {
+                        // S3.4: Rest pattern binds remaining list elements
+                        types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
+                    }
                     crate::ast::MatchPattern::Or(alternatives) => {
                         // Or-pattern: collect constraints from each alternative
                         for alt in alternatives {
@@ -1126,11 +1181,37 @@ fn collect_constraints_expr(
                                         let fresh_args: Vec<TypeId> = type_params.iter()
                                             .map(|_| TypeId::TypeVar(graph.fresh()))
                                             .collect();
+                                        // T2.4: Emit HasTrait constraints for bounded type parameters
+                                        for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter()) {
+                                            if let Some(bounds) = types.get_type_param_bounds(&enum_name, param_name) {
+                                                for bound in bounds.clone() {
+                                                    constraints.push(ConstraintKind::HasTrait(fresh_ty.clone(), bound, match_span));
+                                                }
+                                            }
+                                        }
                                         let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
                                         constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), adt_ty, match_span));
                                     }
                                     for pat in fields {
                                         collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                    }
+                                }
+                                crate::ast::MatchPattern::Range { .. } => {
+                                    // S3.5: Range in or-pattern constrains scrutinee to numeric
+                                    constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                                }
+                                crate::ast::MatchPattern::Rest(name, _) => {
+                                    types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
+                                }
+                                crate::ast::MatchPattern::List(patterns) => {
+                                    let elem_ty = TypeId::Primitive(Primitive::Any);
+                                    constraints.push(ConstraintKind::EqualAt(
+                                        scrutinee_ty.clone(),
+                                        TypeId::List(Box::new(elem_ty.clone())),
+                                        match_span,
+                                    ));
+                                    for pat in patterns {
+                                        collect_pattern_bindings(pat, &elem_ty, types);
                                     }
                                 }
                                 _ => {}
@@ -1219,6 +1300,37 @@ fn collect_constraints_expr(
             // (when it's not an error). The propagation itself may return early.
             collect_constraints_expr(expr, constraints, types, graph)
         }
+        Expression::ListComprehension { body, var, iterable, condition, span } => {
+            let iter_ty = collect_constraints_expr(iterable, constraints, types, graph);
+            let elem_ty = TypeId::TypeVar(graph.fresh());
+            constraints.push(ConstraintKind::EqualAt(
+                TypeId::List(Box::new(elem_ty.clone())),
+                iter_ty,
+                *span,
+            ));
+            types.insert(var.clone(), elem_ty);
+            if let Some(cond) = condition {
+                collect_constraints_expr(cond, constraints, types, graph);
+            }
+            let body_ty = collect_constraints_expr(body, constraints, types, graph);
+            TypeId::List(Box::new(body_ty))
+        }
+        Expression::MapComprehension { key, value, var, iterable, condition, span } => {
+            let iter_ty = collect_constraints_expr(iterable, constraints, types, graph);
+            let elem_ty = TypeId::TypeVar(graph.fresh());
+            constraints.push(ConstraintKind::EqualAt(
+                TypeId::List(Box::new(elem_ty.clone())),
+                iter_ty,
+                *span,
+            ));
+            types.insert(var.clone(), elem_ty);
+            if let Some(cond) = condition {
+                collect_constraints_expr(cond, constraints, types, graph);
+            }
+            let key_ty = collect_constraints_expr(key, constraints, types, graph);
+            let _val_ty = collect_constraints_expr(value, constraints, types, graph);
+            TypeId::Map(Box::new(key_ty), Box::new(TypeId::Primitive(Primitive::Any)))
+        }
     }    
 }
 
@@ -1240,11 +1352,21 @@ fn collect_pattern_bindings(pattern: &crate::ast::MatchPattern, ty: &TypeId, typ
                 collect_pattern_bindings(alt, ty, types);
             }
         }
+        crate::ast::MatchPattern::List(patterns) => {
+            // S3.4: Recurse into list sub-patterns
+            for pat in patterns {
+                collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+            }
+        }
+        crate::ast::MatchPattern::Rest(name, _) => {
+            // S3.4: Rest captures remaining elements as a list
+            types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
+        }
         crate::ast::MatchPattern::Integer(_)
         | crate::ast::MatchPattern::Bool(_)
         | crate::ast::MatchPattern::String(_)
         | crate::ast::MatchPattern::Wildcard(_)
-        | crate::ast::MatchPattern::List(_) => {}
+        | crate::ast::MatchPattern::Range { .. } => {}
     }
 }
 
@@ -1393,6 +1515,10 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
                 check_expression(target, scopes, known_names)?;
                 check_expression(value, scopes, known_names)?;
             }
+            Statement::PatternBinding { pattern, value, span } => {
+                check_expression(value, scopes, known_names)?;
+                declare_pattern_scope_names(pattern, scopes, *span);
+            }
         }
     }
     if let Some(value) = &block.value {
@@ -1402,6 +1528,38 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
     Ok(())
 }
 
+/// Declare variable names introduced by a destructuring pattern into the scope stack.
+fn declare_pattern_scope_names(pattern: &crate::ast::MatchPattern, scopes: &mut ScopeStack, span: Span) {
+    match pattern {
+        crate::ast::MatchPattern::Identifier(name) => {
+            scopes.declare(name.clone(), span);
+        }
+        crate::ast::MatchPattern::Constructor { fields, .. } => {
+            for pat in fields {
+                declare_pattern_scope_names(pat, scopes, span);
+            }
+        }
+        crate::ast::MatchPattern::List(patterns) => {
+            for pat in patterns {
+                declare_pattern_scope_names(pat, scopes, span);
+            }
+        }
+        crate::ast::MatchPattern::Or(alternatives) => {
+            for alt in alternatives {
+                declare_pattern_scope_names(alt, scopes, span);
+            }
+        }
+        crate::ast::MatchPattern::Rest(name, _) => {
+            scopes.declare(name.clone(), span);
+        }
+        crate::ast::MatchPattern::Integer(_)
+        | crate::ast::MatchPattern::Bool(_)
+        | crate::ast::MatchPattern::String(_)
+        | crate::ast::MatchPattern::Wildcard(_)
+        | crate::ast::MatchPattern::Range { .. } => {}
+    }
+}
+
 fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions: &HashSet<String>) -> Result<(), Diagnostic> {
     match expr {
         Expression::Binary { left, right, .. } => {
@@ -1409,6 +1567,7 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
             check_expression(right, scopes, known_functions)?;
         }
         Expression::Unary { expr, .. } => check_expression(expr, scopes, known_functions)?,
+        Expression::Spread(inner, _) => check_expression(inner, scopes, known_functions)?,
         Expression::List(items, _) => {
             for item in items {
                 check_expression(item, scopes, known_functions)?;
@@ -1430,6 +1589,11 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
         Expression::Index { target, index, .. } => {
             check_expression(target, scopes, known_functions)?;
             check_expression(index, scopes, known_functions)?;
+        }
+        Expression::Slice { target, start, end, .. } => {
+            check_expression(target, scopes, known_functions)?;
+            check_expression(start, scopes, known_functions)?;
+            check_expression(end, scopes, known_functions)?;
         }
         Expression::Ternary {
             condition,
@@ -1466,6 +1630,27 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
                     *span,
                 ));
             }
+        }
+        Expression::ListComprehension { body, var, iterable, condition, .. } => {
+            check_expression(iterable, scopes, known_functions)?;
+            scopes.push();
+            scopes.declare(var.clone(), iterable.span());
+            check_expression(body, scopes, known_functions)?;
+            if let Some(cond) = condition {
+                check_expression(cond, scopes, known_functions)?;
+            }
+            scopes.pop();
+        }
+        Expression::MapComprehension { key, value, var, iterable, condition, .. } => {
+            check_expression(iterable, scopes, known_functions)?;
+            scopes.push();
+            scopes.declare(var.clone(), iterable.span());
+            check_expression(key, scopes, known_functions)?;
+            check_expression(value, scopes, known_functions)?;
+            if let Some(cond) = condition {
+                check_expression(cond, scopes, known_functions)?;
+            }
+            scopes.pop();
         }
         Expression::String(_, _)
         | Expression::Bytes(_, _)
@@ -1605,11 +1790,20 @@ fn declare_pattern_bindings(pattern: &crate::ast::MatchPattern, scopes: &mut Sco
                 declare_pattern_bindings(alt, scopes, span);
             }
         }
+        crate::ast::MatchPattern::List(patterns) => {
+            // S3.4: Recurse into list sub-patterns
+            for field_pattern in patterns {
+                declare_pattern_bindings(field_pattern, scopes, span);
+            }
+        }
+        crate::ast::MatchPattern::Rest(name, _) => {
+            scopes.declare(name.clone(), span);
+        }
         crate::ast::MatchPattern::Integer(_)
         | crate::ast::MatchPattern::Bool(_)
         | crate::ast::MatchPattern::String(_)
         | crate::ast::MatchPattern::Wildcard(_)
-        | crate::ast::MatchPattern::List(_) => {}
+        | crate::ast::MatchPattern::Range { .. } => {}
     }
 }
 
@@ -1706,6 +1900,9 @@ fn check_block_match_exhaustiveness(
             Statement::FieldAssign { value, .. } => {
                 check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
             }
+            Statement::PatternBinding { value, .. } => {
+                check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
+            }
         }
     }
     if let Some(value) = &block.value {
@@ -1726,6 +1923,9 @@ fn check_expr_match_exhaustiveness(
         }
         Expression::Unary { expr, .. } => {
             check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
+        }
+        Expression::Spread(inner, _) => {
+            check_expr_match_exhaustiveness(inner, ctor_map, enum_variants, warnings);
         }
         Expression::List(items, _) => {
             for item in items {
@@ -1750,6 +1950,11 @@ fn check_expr_match_exhaustiveness(
         Expression::Index { target, index, .. } => {
             check_expr_match_exhaustiveness(target, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(index, ctor_map, enum_variants, warnings);
+        }
+        Expression::Slice { target, start, end, .. } => {
+            check_expr_match_exhaustiveness(target, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(start, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(end, ctor_map, enum_variants, warnings);
         }
         Expression::Ternary { condition, then_branch, else_branch, .. } => {
             check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
@@ -1784,6 +1989,21 @@ fn check_expr_match_exhaustiveness(
         }
         Expression::ErrorPropagate { expr, .. } => {
             check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
+        }
+        Expression::ListComprehension { body, iterable, condition, .. } => {
+            check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
+            if let Some(cond) = condition {
+                check_expr_match_exhaustiveness(cond, ctor_map, enum_variants, warnings);
+            }
+        }
+        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+            check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(key, ctor_map, enum_variants, warnings);
+            check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
+            if let Some(cond) = condition {
+                check_expr_match_exhaustiveness(cond, ctor_map, enum_variants, warnings);
+            }
         }
         // Other expressions don't contain sub-expressions or match
         Expression::Identifier(_, _)
@@ -2164,6 +2384,10 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
                 visit_expression(target, tracker);
                 visit_expression(value, tracker);
             }
+            Statement::PatternBinding { pattern, value, .. } => {
+                visit_expression(value, tracker);
+                touch_pattern_names(pattern, tracker);
+            }
         }
     }
     if let Some(value) = &block.value {
@@ -2171,6 +2395,38 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
         if mark_returns_as_escape {
             mark_escapes(value, tracker);
         }
+    }
+}
+
+/// Touch variable names introduced by a destructuring pattern in the usage tracker.
+fn touch_pattern_names(pattern: &crate::ast::MatchPattern, tracker: &mut UsageTracker) {
+    match pattern {
+        crate::ast::MatchPattern::Identifier(name) => {
+            tracker.touch(name);
+        }
+        crate::ast::MatchPattern::Constructor { fields, .. } => {
+            for pat in fields {
+                touch_pattern_names(pat, tracker);
+            }
+        }
+        crate::ast::MatchPattern::List(patterns) => {
+            for pat in patterns {
+                touch_pattern_names(pat, tracker);
+            }
+        }
+        crate::ast::MatchPattern::Or(alternatives) => {
+            for alt in alternatives {
+                touch_pattern_names(alt, tracker);
+            }
+        }
+        crate::ast::MatchPattern::Rest(name, _) => {
+            tracker.touch(name);
+        }
+        crate::ast::MatchPattern::Integer(_)
+        | crate::ast::MatchPattern::Bool(_)
+        | crate::ast::MatchPattern::String(_)
+        | crate::ast::MatchPattern::Wildcard(_)
+        | crate::ast::MatchPattern::Range { .. } => {}
     }
 }
 
@@ -2202,10 +2458,16 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
             visit_expression(right, tracker);
         }
         Expression::Unary { expr, .. } => visit_expression(expr, tracker),
+        Expression::Spread(inner, _) => visit_expression(inner, tracker),
         Expression::Member { target, .. } => visit_expression(target, tracker),
         Expression::Index { target, index, .. } => {
             visit_expression(target, tracker);
             visit_expression(index, tracker);
+        }
+        Expression::Slice { target, start, end, .. } => {
+            visit_expression(target, tracker);
+            visit_expression(start, tracker);
+            visit_expression(end, tracker);
         }
         Expression::Call { callee, args, .. } => {
             visit_expression(callee, tracker);
@@ -2256,6 +2518,23 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
         Expression::ErrorValue { .. } => {}
         Expression::ErrorPropagate { expr, .. } => visit_expression(expr, tracker),
         Expression::InlineAsm { .. } | Expression::PtrLoad { .. } | Expression::Unsafe { .. } => {}
+        Expression::ListComprehension { body, var, iterable, condition, .. } => {
+            visit_expression(iterable, tracker);
+            tracker.touch(var);
+            visit_expression(body, tracker);
+            if let Some(cond) = condition {
+                visit_expression(cond, tracker);
+            }
+        }
+        Expression::MapComprehension { key, value, var, iterable, condition, .. } => {
+            visit_expression(iterable, tracker);
+            tracker.touch(var);
+            visit_expression(key, tracker);
+            visit_expression(value, tracker);
+            if let Some(cond) = condition {
+                visit_expression(cond, tracker);
+            }
+        }
     }
 }
 
@@ -2278,6 +2557,7 @@ fn mark_escapes(expr: &Expression, tracker: &mut UsageTracker) {
             mark_escapes(right, tracker);
         }
         Expression::Unary { expr, .. } => mark_escapes(expr, tracker),
+        Expression::Spread(inner, _) => mark_escapes(inner, tracker),
         Expression::Call { callee, args, .. } => {
             mark_escapes(callee, tracker);
             for arg in args {
@@ -2288,6 +2568,11 @@ fn mark_escapes(expr: &Expression, tracker: &mut UsageTracker) {
         Expression::Index { target, index, .. } => {
             mark_escapes(target, tracker);
             mark_escapes(index, tracker);
+        }
+        Expression::Slice { target, start, end, .. } => {
+            mark_escapes(target, tracker);
+            mark_escapes(start, tracker);
+            mark_escapes(end, tracker);
         }
         Expression::Ternary { condition, then_branch, else_branch, .. } => {
             mark_escapes(condition, tracker);
@@ -2327,6 +2612,21 @@ fn mark_escapes(expr: &Expression, tracker: &mut UsageTracker) {
         }
         Expression::ErrorValue { .. } => {}
         Expression::ErrorPropagate { expr, .. } => mark_escapes(expr, tracker),
+        Expression::ListComprehension { body, iterable, condition, .. } => {
+            mark_escapes(iterable, tracker);
+            mark_escapes(body, tracker);
+            if let Some(cond) = condition {
+                mark_escapes(cond, tracker);
+            }
+        }
+        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+            mark_escapes(iterable, tracker);
+            mark_escapes(key, tracker);
+            mark_escapes(value, tracker);
+            if let Some(cond) = condition {
+                mark_escapes(cond, tracker);
+            }
+        }
         Expression::Integer(_, _)
         | Expression::Float(_, _)
         | Expression::Bool(_, _)
@@ -2405,6 +2705,7 @@ fn find_forbidden_identifier(
                 .or_else(|| find_forbidden_identifier(right, forbidden))
         }
         Expression::Unary { expr, .. } => find_forbidden_identifier(expr, forbidden),
+        Expression::Spread(inner, _) => find_forbidden_identifier(inner, forbidden),
         Expression::List(items, _) => items
             .iter()
             .find_map(|item| find_forbidden_identifier(item, forbidden)),
@@ -2418,6 +2719,11 @@ fn find_forbidden_identifier(
         Expression::Index { target, index, .. } => {
             find_forbidden_identifier(target, forbidden)
                 .or_else(|| find_forbidden_identifier(index, forbidden))
+        }
+        Expression::Slice { target, start, end, .. } => {
+            find_forbidden_identifier(target, forbidden)
+                .or_else(|| find_forbidden_identifier(start, forbidden))
+                .or_else(|| find_forbidden_identifier(end, forbidden))
         }
         Expression::Ternary {
             condition,
@@ -2436,6 +2742,17 @@ fn find_forbidden_identifier(
         }
         Expression::ErrorValue { .. } => None,
         Expression::ErrorPropagate { expr, .. } => find_forbidden_identifier(expr, forbidden),
+        Expression::ListComprehension { body, iterable, condition, .. } => {
+            find_forbidden_identifier(iterable, forbidden)
+                .or_else(|| find_forbidden_identifier(body, forbidden))
+                .or_else(|| condition.as_ref().and_then(|c| find_forbidden_identifier(c, forbidden)))
+        }
+        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+            find_forbidden_identifier(iterable, forbidden)
+                .or_else(|| find_forbidden_identifier(key, forbidden))
+                .or_else(|| find_forbidden_identifier(value, forbidden))
+                .or_else(|| condition.as_ref().and_then(|c| find_forbidden_identifier(c, forbidden)))
+        }
         Expression::String(_, _)
         | Expression::Bytes(_, _)
         | Expression::Bool(_, _)
@@ -2519,6 +2836,9 @@ fn find_in_statement(
         Statement::FieldAssign { target, value, .. } => {
             find_forbidden_identifier(target, forbidden)
                 .or_else(|| find_forbidden_identifier(value, forbidden))
+        }
+        Statement::PatternBinding { value, .. } => {
+            find_forbidden_identifier(value, forbidden)
         }
     }
 }
@@ -2646,6 +2966,9 @@ fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic
             Statement::FieldAssign { value, .. } => {
                 check_expr_nested_blocks(value, warnings);
             }
+            Statement::PatternBinding { value, .. } => {
+                check_expr_nested_blocks(value, warnings);
+            }
         }
     }
     
@@ -2680,6 +3003,9 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
         Expression::Unary { expr: inner, .. } => {
             check_expr_nested_blocks(inner, warnings);
         }
+        Expression::Spread(inner, _) => {
+            check_expr_nested_blocks(inner, warnings);
+        }
         Expression::Call { callee, args, .. } => {
             check_expr_nested_blocks(callee, warnings);
             for arg in args {
@@ -2699,6 +3025,11 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
         Expression::Index { target, index, .. } => {
             check_expr_nested_blocks(target, warnings);
             check_expr_nested_blocks(index, warnings);
+        }
+        Expression::Slice { target, start, end, .. } => {
+            check_expr_nested_blocks(target, warnings);
+            check_expr_nested_blocks(start, warnings);
+            check_expr_nested_blocks(end, warnings);
         }
         Expression::List(items, _) => {
             for item in items {
@@ -2729,5 +3060,20 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
         | Expression::Throw { .. }
         | Expression::InlineAsm { .. }
         | Expression::PtrLoad { .. } => {}
+        Expression::ListComprehension { body, iterable, condition, .. } => {
+            check_expr_nested_blocks(iterable, warnings);
+            check_expr_nested_blocks(body, warnings);
+            if let Some(cond) = condition {
+                check_expr_nested_blocks(cond, warnings);
+            }
+        }
+        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+            check_expr_nested_blocks(iterable, warnings);
+            check_expr_nested_blocks(key, warnings);
+            check_expr_nested_blocks(value, warnings);
+            if let Some(cond) = condition {
+                check_expr_nested_blocks(cond, warnings);
+            }
+        }
     }
 }

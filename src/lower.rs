@@ -215,6 +215,12 @@ impl PlaceholderLowerer {
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 Ok(Statement::FieldAssign { target, field, value, span })
             }
+            Statement::PatternBinding { pattern, value, span } => {
+                let value = self
+                    .lower_expression(value)?
+                    .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
+                Ok(Statement::PatternBinding { pattern, value, span })
+            }
         }
     }
 
@@ -331,6 +337,39 @@ impl PlaceholderLowerer {
             // S2.1: Pipeline desugaring — `a ~ f(args)` → `f(a, args)` (or with $ replacement)
             Expression::Pipeline { left, right, span } => {
                 self.lower_pipeline(*left, *right, span)
+            }
+            // S2.2/S2.3: Comprehensions — lower sub-expressions
+            Expression::ListComprehension { body, var, iterable, condition, span } => {
+                let body = self.lower_expression(*body)?;
+                let iterable = self.lower_expression(*iterable)?;
+                let condition = match condition {
+                    Some(c) => Some(Box::new(self.lower_expression(*c)?.expr)),
+                    None => None,
+                };
+                Ok(ExprLowering::new(Expression::ListComprehension {
+                    body: Box::new(body.expr),
+                    var,
+                    iterable: Box::new(iterable.expr),
+                    condition,
+                    span,
+                }))
+            }
+            Expression::MapComprehension { key, value, var, iterable, condition, span } => {
+                let key = self.lower_expression(*key)?;
+                let value = self.lower_expression(*value)?;
+                let iterable = self.lower_expression(*iterable)?;
+                let condition = match condition {
+                    Some(c) => Some(Box::new(self.lower_expression(*c)?.expr)),
+                    None => None,
+                };
+                Ok(ExprLowering::new(Expression::MapComprehension {
+                    key: Box::new(key.expr),
+                    value: Box::new(value.expr),
+                    var,
+                    iterable: Box::new(iterable.expr),
+                    condition,
+                    span,
+                }))
             }
             other => Ok(ExprLowering::new(other)),
         }
@@ -732,6 +771,10 @@ impl PlaceholderInfo {
                     let target = self.replace_placeholders(target, names);
                     let value = self.replace_placeholders(value, names);
                     Statement::FieldAssign { target, field, value, span }
+                }
+                Statement::PatternBinding { pattern, value, span } => {
+                    let value = self.replace_placeholders(value, names);
+                    Statement::PatternBinding { pattern, value, span }
                 }
             })
             .collect();

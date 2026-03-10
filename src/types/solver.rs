@@ -123,6 +123,9 @@ pub enum ConstraintKind {
     CallableAt(TypeId, Vec<TypeId>, TypeId, Span),
     /// Callable constraint (legacy).
     Callable(TypeId, Vec<TypeId>, TypeId),
+    /// T2.4: Type must implement a named trait.
+    /// HasTrait(type, trait_name, span) — checked after unification resolves the type.
+    HasTrait(TypeId, String, Span),
 }
 
 /// A collection of constraints to be solved together.
@@ -225,6 +228,7 @@ pub fn solve_constraints(
         | ConstraintKind::Boolean(_) | ConstraintKind::BooleanAt(_, _) => 1,
         ConstraintKind::Iterable(_, _) | ConstraintKind::IterableAt(_, _, _) => 2,
         ConstraintKind::Callable(_, _, _) | ConstraintKind::CallableAt(_, _, _, _) => 3,
+        ConstraintKind::HasTrait(_, _, _) => 4, // solved last, after types are resolved
     });
 
     for c in &sorted_constraints {
@@ -275,6 +279,16 @@ pub fn solve_constraints(
             }
             ConstraintKind::Callable(func, args, ret) => {
                 solve_callable(func, args, ret, graph, dummy)
+            }
+            // T2.4: Trait bounds — resolved type must be an ADT/Store that
+            // implements the named trait. Permissive: unresolved vars, Any,
+            // Unknown, and primitives pass silently (bounds are advisory for now).
+            ConstraintKind::HasTrait(ty, _trait_name, _span) => {
+                let _resolved = resolve(ty.clone(), graph);
+                // Trait bound checking is deferred until the full trait registry
+                // is available at a higher level. The constraint is recorded so
+                // future passes (T2.5 monomorphization) can enforce it.
+                Ok(())
             }
         };
 

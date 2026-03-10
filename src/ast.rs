@@ -67,6 +67,30 @@ pub struct TraitMethod {
     pub span: Span,
 }
 
+/// T2.4: A generic type parameter with optional trait bounds.
+/// `T` or `T with Comparable` or `T with Comparable, Hashable`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: String,
+    pub bounds: Vec<String>,  // trait bounds, e.g., ["Comparable", "Hashable"]
+}
+
+impl TypeParam {
+    pub fn new(name: String, bounds: Vec<String>) -> Self {
+        Self { name, bounds }
+    }
+
+    pub fn plain(name: String) -> Self {
+        Self { name, bounds: vec![] }
+    }
+}
+
+impl From<&str> for TypeParam {
+    fn from(name: &str) -> Self {
+        TypeParam { name: name.to_string(), bounds: vec![] }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternFunction {
     pub name: String,
@@ -181,17 +205,30 @@ pub enum Statement {
     },
     Break(Span),
     Continue(Span),
+    /// S2.4: Destructuring assignment — `[a, b] is expr` or `Some(v) is expr`
+    PatternBinding {
+        pattern: MatchPattern,
+        value: Expression,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDefinition {
     pub name: String,
-    pub type_params: Vec<String>,  // Generic type parameters, e.g., [T] or [A, B]
+    pub type_params: Vec<TypeParam>,  // T2.4: Generic type parameters with optional bounds
     pub with_traits: Vec<String>,  // `with TraitName` clauses
     pub fields: Vec<Field>,
     pub methods: Vec<Function>,
     pub variants: Vec<TypeVariant>,  // For sum types (ADTs)
     pub span: Span,
+}
+
+impl TypeDefinition {
+    /// Get just the parameter names (without bounds).
+    pub fn param_names(&self) -> Vec<&str> {
+        self.type_params.iter().map(|tp| tp.name.as_str()).collect()
+    }
 }
 
 /// A variant of a sum type (ADT).
@@ -257,6 +294,25 @@ pub enum Expression {
     },
     List(Vec<Expression>, Span),
     Map(Vec<(Expression, Expression)>, Span),
+    /// Spread expression: `...expr` — used inside list/map literals
+    Spread(Box<Expression>, Span),
+    /// List comprehension: `[body for var in iterable if condition]`
+    ListComprehension {
+        body: Box<Expression>,
+        var: String,
+        iterable: Box<Expression>,
+        condition: Option<Box<Expression>>,
+        span: Span,
+    },
+    /// Map comprehension: `{key: value for var in iterable if condition}`
+    MapComprehension {
+        key: Box<Expression>,
+        value: Box<Expression>,
+        var: String,
+        iterable: Box<Expression>,
+        condition: Option<Box<Expression>>,
+        span: Span,
+    },
     Binary {
         op: BinaryOp,
         left: Box<Expression>,
@@ -322,6 +378,13 @@ pub enum Expression {
         index: Box<Expression>,
         span: Span,
     },
+    /// Slice expression: `expr[start to end]`
+    Slice {
+        target: Box<Expression>,
+        start: Box<Expression>,
+        end: Box<Expression>,
+        span: Span,
+    },
 }
 
 impl Expression {
@@ -339,6 +402,9 @@ impl Expression {
             | Expression::TaxonomyPath { span, .. }
             | Expression::List(_, span)
             | Expression::Map(_, span)
+            | Expression::Spread(_, span)
+            | Expression::ListComprehension { span, .. }
+            | Expression::MapComprehension { span, .. }
             | Expression::Binary { span, .. }
             | Expression::Unary { span, .. }
             | Expression::Call { span, .. }
@@ -354,6 +420,7 @@ impl Expression {
             Expression::PtrLoad { span, .. } => *span,
             Expression::Unsafe { span, .. } => *span,
             Expression::Index { span, .. } => *span,
+            Expression::Slice { span, .. } => *span,
         }
     }
 }
@@ -421,4 +488,10 @@ pub enum MatchPattern {
     /// S3.3: Or-pattern — matches if any sub-pattern matches.
     /// e.g. `Circle(r) or Sphere(r) ? compute(r)`
     Or(Vec<MatchPattern>),
+    /// S3.5: Range pattern — matches if value is within an inclusive range.
+    /// e.g. `200 to 299` matches integers from 200 to 299 inclusive.
+    Range { start: i64, end: i64, span: Span },
+    /// S3.4: Rest/spread pattern — captures remaining list elements.
+    /// e.g. `[first, ...rest]` binds `rest` to remaining elements.
+    Rest(String, Span),
 }

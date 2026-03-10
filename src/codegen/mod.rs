@@ -548,6 +548,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Self::expr_calls_self(target, name) || Self::expr_calls_self(value, name)
             }
             Statement::Break(_) | Statement::Continue(_) => false,
+            Statement::PatternBinding { value, .. } => Self::expr_calls_self(value, name),
         }
     }
 
@@ -582,6 +583,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Member { target, .. } => Self::expr_calls_self(target, name),
             Expression::Index { target, index, .. } => {
                 Self::expr_calls_self(target, name) || Self::expr_calls_self(index, name)
+            }
+            Expression::Slice { target, start, end, .. } => {
+                Self::expr_calls_self(target, name) || Self::expr_calls_self(start, name) || Self::expr_calls_self(end, name)
             }
             Expression::List(items, _) => items.iter().any(|i| Self::expr_calls_self(i, name)),
             Expression::Map(entries, _) => entries
@@ -641,7 +645,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             // Member and Index accesses are NOT cached — they may read from mutable
             // stores/maps and caching them could return stale values.
-            Expression::Member { .. } | Expression::Index { .. } => None,
+            Expression::Member { .. } | Expression::Index { .. } | Expression::Slice { .. } => None,
             // Only cache calls to known-pure global functions (not methods on objects)
             Expression::Call { callee, args, .. } => {
                 match callee.as_ref() {
@@ -881,6 +885,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Self::collect_expr_refs(value, all_names, method_map, worklist);
             }
             Statement::Break(_) | Statement::Continue(_) => {}
+            Statement::PatternBinding { value, .. } => {
+                Self::collect_expr_refs(value, all_names, method_map, worklist);
+            }
         }
     }
 
@@ -931,6 +938,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Unary { expr: e, .. } => {
                 Self::collect_expr_refs(e, all_names, method_map, worklist);
             }
+            Expression::Spread(inner, _) => {
+                Self::collect_expr_refs(inner, all_names, method_map, worklist);
+            }
             Expression::Ternary { condition, then_branch, else_branch, .. } => {
                 Self::collect_expr_refs(condition, all_names, method_map, worklist);
                 Self::collect_expr_refs(then_branch, all_names, method_map, worklist);
@@ -974,6 +984,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Self::collect_expr_refs(target, all_names, method_map, worklist);
                 Self::collect_expr_refs(index, all_names, method_map, worklist);
             }
+            Expression::Slice { target, start, end, .. } => {
+                Self::collect_expr_refs(target, all_names, method_map, worklist);
+                Self::collect_expr_refs(start, all_names, method_map, worklist);
+                Self::collect_expr_refs(end, all_names, method_map, worklist);
+            }
             Expression::Throw { value, .. } => {
                 Self::collect_expr_refs(value, all_names, method_map, worklist);
             }
@@ -987,6 +1002,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::PtrLoad { address, .. } => {
                 Self::collect_expr_refs(address, all_names, method_map, worklist);
+            }
+            Expression::ListComprehension { body, iterable, condition, .. } => {
+                Self::collect_expr_refs(iterable, all_names, method_map, worklist);
+                Self::collect_expr_refs(body, all_names, method_map, worklist);
+                if let Some(cond) = condition {
+                    Self::collect_expr_refs(cond, all_names, method_map, worklist);
+                }
+            }
+            Expression::MapComprehension { key, value, iterable, condition, .. } => {
+                Self::collect_expr_refs(iterable, all_names, method_map, worklist);
+                Self::collect_expr_refs(key, all_names, method_map, worklist);
+                Self::collect_expr_refs(value, all_names, method_map, worklist);
+                if let Some(cond) = condition {
+                    Self::collect_expr_refs(cond, all_names, method_map, worklist);
+                }
             }
             // Leaf expressions: no function references
             Expression::Unit
@@ -1033,7 +1063,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             MatchPattern::Integer(_) | MatchPattern::Bool(_) | MatchPattern::String(_)
-            | MatchPattern::Wildcard(_) => {}
+            | MatchPattern::Wildcard(_) | MatchPattern::Range { .. } | MatchPattern::Rest(..) => {}
         }
     }
 
@@ -1606,6 +1636,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let unreachable_bb = self.context.append_basic_block(function, "after_continue");
                     self.builder.position_at_end(unreachable_bb);
                 }
+                // S2.4: Destructuring pattern binding
+                Statement::PatternBinding { pattern, value, .. } => {
+                    let val = self.emit_expression(ctx, value)?;
+                    self.bind_pattern_variables(ctx, val, pattern);
+                }
             }
         }
 
@@ -1831,6 +1866,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 Ok(self.ptr_to_nb(result))
             }
+            Expression::Slice { target, start, end, .. } => {
+                let target_val = self.emit_expression(ctx, target)?;
+                let start_val = self.emit_expression(ctx, start)?;
+                let end_val = self.emit_expression(ctx, end)?;
+                let result = self.call_bridged(self.runtime.list_slice, &[target_val, start_val, end_val], "slice");
+                Ok(result)
+            }
             Expression::Ternary {
                 condition,
                 then_branch,
@@ -1968,6 +2010,228 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 Ok(self.ptr_to_nb(err_ptr))
             }
+            Expression::Spread(inner, _) => {
+                // Spread outside list literal context: just emit the inner expression
+                self.emit_expression(ctx, inner)
+            }
+            Expression::ListComprehension { body, var, iterable, condition, span: _ } => {
+                let function = ctx.function;
+                let list_value = self.emit_expression(ctx, iterable)?;
+
+                // Get list length as f64
+                let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "lc_len");
+                let len_f64 = self.value_to_number(len_nb);
+
+                // Create empty output list: coral_make_list(null, 0)
+                let null_ptr = self.runtime.value_ptr_type
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .const_null();
+                let zero_usize = self.usize_type.const_int(0, false);
+                let out_list_ptr = self.call_runtime_ptr(
+                    self.runtime.make_list,
+                    &[null_ptr.into(), zero_usize.into()],
+                    "lc_out_list",
+                );
+                let out_list_nb = self.ptr_to_nb(out_list_ptr);
+
+                // Alloca for output list (mutated by push)
+                let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "lc_out_alloca").unwrap();
+                self.builder.build_store(out_alloca, out_list_nb).unwrap();
+
+                // Counter alloca
+                let counter_alloca = self.builder.build_alloca(self.f64_type, "lc_counter").unwrap();
+                self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+                let loop_header = self.context.append_basic_block(function, "lc_cond");
+                let loop_body = self.context.append_basic_block(function, "lc_body");
+                let loop_exit = self.context.append_basic_block(function, "lc_exit");
+
+                self.builder.build_unconditional_branch(loop_header).unwrap();
+
+                // Header: check counter < length
+                self.builder.position_at_end(loop_header);
+                let current = self.builder.build_load(self.f64_type, counter_alloca, "lc_i")
+                    .unwrap().into_float_value();
+                let is_done = self.builder.build_float_compare(
+                    inkwell::FloatPredicate::OGE, current, len_f64, "lc_done",
+                ).unwrap();
+                self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+                // Body: get element, bind var, optionally check condition, emit body, push
+                self.builder.position_at_end(loop_body);
+                ctx.cse_cache.clear();
+                let idx_nb = self.wrap_number(current);
+                let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "lc_elem");
+                self.store_variable(ctx, var, elem_nb);
+
+                if let Some(cond) = condition {
+                    let cond_val = self.emit_expression(ctx, cond)?;
+                    let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[cond_val.into()], "lc_truthy");
+                    let truthy_bool = self.builder.build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_truthy,
+                        self.i8_type.const_int(0, false),
+                        "lc_cond_bool",
+                    ).unwrap();
+                    let lc_push = self.context.append_basic_block(function, "lc_push");
+                    let lc_skip = self.context.append_basic_block(function, "lc_skip");
+                    self.builder.build_conditional_branch(truthy_bool, lc_push, lc_skip).unwrap();
+
+                    // Push block
+                    self.builder.position_at_end(lc_push);
+                    let body_val = self.emit_expression(ctx, body)?;
+                    let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "lc_cur_out")
+                        .unwrap().into_int_value();
+                    let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, body_val], "lc_push_res");
+                    self.builder.build_store(out_alloca, new_out).unwrap();
+                    // Increment and loop back
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "lc_cur_upd")
+                            .unwrap().into_float_value();
+                        let next = self.builder.build_float_add(
+                            cur_f64, self.f64_type.const_float(1.0), "lc_next",
+                        ).unwrap();
+                        self.builder.build_store(counter_alloca, next).unwrap();
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+
+                    // Skip block: just increment counter
+                    self.builder.position_at_end(lc_skip);
+                    let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "lc_skip_upd")
+                        .unwrap().into_float_value();
+                    let next = self.builder.build_float_add(
+                        cur_f64, self.f64_type.const_float(1.0), "lc_skip_next",
+                    ).unwrap();
+                    self.builder.build_store(counter_alloca, next).unwrap();
+                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                } else {
+                    // No condition — unconditionally push
+                    let body_val = self.emit_expression(ctx, body)?;
+                    let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "lc_cur_out")
+                        .unwrap().into_int_value();
+                    let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, body_val], "lc_push_res");
+                    self.builder.build_store(out_alloca, new_out).unwrap();
+                    // Increment counter
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "lc_cur_upd")
+                            .unwrap().into_float_value();
+                        let next = self.builder.build_float_add(
+                            cur_f64, self.f64_type.const_float(1.0), "lc_next",
+                        ).unwrap();
+                        self.builder.build_store(counter_alloca, next).unwrap();
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+                }
+
+                // Return the output list
+                self.builder.position_at_end(loop_exit);
+                let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "lc_result")
+                    .unwrap().into_int_value();
+                Ok(final_out)
+            }
+            Expression::MapComprehension { key, value, var, iterable, condition, span: _ } => {
+                let function = ctx.function;
+                let list_value = self.emit_expression(ctx, iterable)?;
+
+                // Get list length
+                let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "mc_len");
+                let len_f64 = self.value_to_number(len_nb);
+
+                // Create empty output map
+                let entry_ptr_type = self.runtime.map_entry_type
+                    .ptr_type(inkwell::AddressSpace::default());
+                let null_entries = entry_ptr_type.const_null();
+                let zero_usize = self.usize_type.const_int(0, false);
+                let out_map_ptr = self.call_runtime_ptr(
+                    self.runtime.make_map,
+                    &[null_entries.into(), zero_usize.into()],
+                    "mc_out_map",
+                );
+                let out_map_nb = self.ptr_to_nb(out_map_ptr);
+
+                // Allocas
+                let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "mc_out_alloca").unwrap();
+                self.builder.build_store(out_alloca, out_map_nb).unwrap();
+                let counter_alloca = self.builder.build_alloca(self.f64_type, "mc_counter").unwrap();
+                self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+                let loop_header = self.context.append_basic_block(function, "mc_cond");
+                let loop_body = self.context.append_basic_block(function, "mc_body");
+                let loop_exit = self.context.append_basic_block(function, "mc_exit");
+
+                self.builder.build_unconditional_branch(loop_header).unwrap();
+
+                // Header: counter < length
+                self.builder.position_at_end(loop_header);
+                let current = self.builder.build_load(self.f64_type, counter_alloca, "mc_i")
+                    .unwrap().into_float_value();
+                let is_done = self.builder.build_float_compare(
+                    inkwell::FloatPredicate::OGE, current, len_f64, "mc_done",
+                ).unwrap();
+                self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+                // Body
+                self.builder.position_at_end(loop_body);
+                ctx.cse_cache.clear();
+                let idx_nb = self.wrap_number(current);
+                let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "mc_elem");
+                self.store_variable(ctx, var, elem_nb);
+
+                if let Some(cond) = condition {
+                    let cond_val = self.emit_expression(ctx, cond)?;
+                    let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[cond_val.into()], "mc_truthy");
+                    let truthy_bool = self.builder.build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_truthy,
+                        self.i8_type.const_int(0, false),
+                        "mc_cond_bool",
+                    ).unwrap();
+                    let mc_set = self.context.append_basic_block(function, "mc_set");
+                    let mc_skip = self.context.append_basic_block(function, "mc_skip");
+                    self.builder.build_conditional_branch(truthy_bool, mc_set, mc_skip).unwrap();
+
+                    self.builder.position_at_end(mc_set);
+                    let key_val = self.emit_expression(ctx, key)?;
+                    let val_val = self.emit_expression(ctx, value)?;
+                    let cur_map = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "mc_cur_map")
+                        .unwrap().into_int_value();
+                    let new_map = self.call_bridged(self.runtime.map_set, &[cur_map, key_val, val_val], "mc_set_res");
+                    self.builder.build_store(out_alloca, new_map).unwrap();
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "mc_i_upd")
+                            .unwrap().into_float_value();
+                        let next = self.builder.build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_next").unwrap();
+                        self.builder.build_store(counter_alloca, next).unwrap();
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+
+                    self.builder.position_at_end(mc_skip);
+                    let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "mc_skip_upd")
+                        .unwrap().into_float_value();
+                    let next = self.builder.build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_skip_next").unwrap();
+                    self.builder.build_store(counter_alloca, next).unwrap();
+                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                } else {
+                    let key_val = self.emit_expression(ctx, key)?;
+                    let val_val = self.emit_expression(ctx, value)?;
+                    let cur_map = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "mc_cur_map")
+                        .unwrap().into_int_value();
+                    let new_map = self.call_bridged(self.runtime.map_set, &[cur_map, key_val, val_val], "mc_set_res");
+                    self.builder.build_store(out_alloca, new_map).unwrap();
+                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "mc_i_upd")
+                            .unwrap().into_float_value();
+                        let next = self.builder.build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_next").unwrap();
+                        self.builder.build_store(counter_alloca, next).unwrap();
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    }
+                }
+
+                self.builder.position_at_end(loop_exit);
+                let final_map = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "mc_result")
+                    .unwrap().into_int_value();
+                Ok(final_map)
+            }
             Expression::ErrorPropagate { expr, span: _ } => {
                 // Error propagation: `expr ! return err`
                 // 1. Evaluate the expression
@@ -2026,6 +2290,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         elements: &[Expression],
         hint: Option<i8>,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let has_spread = elements.iter().any(|e| matches!(e, Expression::Spread(..)));
+        if has_spread {
+            return self.emit_list_literal_with_spread(ctx, elements, hint);
+        }
         let mut values = Vec::new();
         for element in elements {
             values.push(self.emit_expression(ctx, element)?);
@@ -2069,6 +2337,36 @@ impl<'ctx> CodeGenerator<'ctx> {
         let args = &[ptr.into(), len_value.into()];
         let list_ptr = self.call_list_with_hint(args, hint);
         Ok(list_ptr)
+    }
+
+    /// Emit a list literal that contains at least one spread element.
+    /// Uses incremental push/concat instead of a stack array.
+    fn emit_list_literal_with_spread(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        elements: &[Expression],
+        hint: Option<i8>,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let handles_ptr_type = self
+            .runtime
+            .value_ptr_type
+            .ptr_type(AddressSpace::default());
+        // Start with an empty list
+        let null_ptr = handles_ptr_type.const_null();
+        let len_zero = self.usize_type.const_zero();
+        let mut list = self.call_list_with_hint(&[null_ptr.into(), len_zero.into()], hint);
+        for element in elements {
+            if let Expression::Spread(inner, _) = element {
+                // Emit the spread operand (should be a list) and concat
+                let spread_val = self.emit_expression(ctx, inner)?;
+                list = self.call_bridged(self.runtime.list_concat, &[list, spread_val], "spread_concat");
+            } else {
+                // Normal element: push onto the list
+                let val = self.emit_expression(ctx, element)?;
+                list = self.call_bridged(self.runtime.list_push, &[list, val], "spread_push");
+            }
+        }
+        Ok(list)
     }
 
     fn emit_map_literal(
@@ -2823,6 +3121,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Index { target, index, .. } => {
                 self.contains_placeholder(target) || self.contains_placeholder(index)
             }
+            Expression::Slice { target, start, end, .. } => {
+                self.contains_placeholder(target) || self.contains_placeholder(start) || self.contains_placeholder(end)
+            }
             Expression::Ternary { condition, then_branch, else_branch, .. } => {
                 self.contains_placeholder(condition)
                     || self.contains_placeholder(then_branch)
@@ -2885,6 +3186,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     Statement::Break(_) | Statement::Continue(_) => false,
                     Statement::FieldAssign { value, .. } => self.contains_placeholder(value),
+                    Statement::PatternBinding { value, .. } => self.contains_placeholder(value),
                 }) || body.value.as_ref().map_or(false, |v| self.contains_placeholder(v))
             }
             _ => false,
@@ -2929,6 +3231,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Index { target, index, span } => Expression::Index {
                 target: Box::new(self.replace_placeholder_with(target, replacement)),
                 index: Box::new(self.replace_placeholder_with(index, replacement)),
+                span: *span,
+            },
+            Expression::Slice { target, start, end, span } => Expression::Slice {
+                target: Box::new(self.replace_placeholder_with(target, replacement)),
+                start: Box::new(self.replace_placeholder_with(start, replacement)),
+                end: Box::new(self.replace_placeholder_with(end, replacement)),
                 span: *span,
             },
             Expression::Ternary { condition, then_branch, else_branch, span } => Expression::Ternary {

@@ -445,8 +445,9 @@ impl Parser {
     }
 
     /// Parse optional type parameters on a type/enum definition.
-    /// Syntax: `[A, B, C]` — returns empty Vec if no `[` follows.
-    fn parse_type_params(&mut self) -> ParseResult<Vec<String>> {
+    /// Syntax: `[A, B, C]` or `[T with Comparable, U with Display]`
+    /// T2.4: Supports trait bounds via `with TraitName`.
+    fn parse_type_params(&mut self) -> ParseResult<Vec<crate::ast::TypeParam>> {
         if !self.matches(TokenKind::LBracket) {
             return Ok(Vec::new());
         }
@@ -457,7 +458,30 @@ impl Parser {
                 break;
             }
             let (param_name, _) = self.consume_identifier()?;
-            params.push(param_name);
+            // T2.4: Check for trait bounds: `T with Comparable`
+            let mut bounds = Vec::new();
+            if self.matches(TokenKind::KeywordWith) {
+                // Parse one or more trait names separated by commas
+                // But commas also separate type params, so we parse trait names
+                // as long as the next token is an uppercase identifier (trait name)
+                // and not followed by `with` (which would mean next type param).
+                loop {
+                    let (trait_name, _) = self.consume_identifier()?;
+                    bounds.push(trait_name);
+                    // If next is comma, peek ahead: if followed by uppercase + `with` or `]`,
+                    // it's the next type param. If followed by uppercase without `with`, it could
+                    // be another bound or next param. Simplification: after `with`, commas always
+                    // mean "next type param boundary". Multiple bounds use `with T1 and T2` style.
+                    // Actually, let's just use: `T with Comparable` (single bound each for now)
+                    // or `T with Comparable with Hashable` for multiple bounds.
+                    if self.check(TokenKind::KeywordWith) {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            params.push(crate::ast::TypeParam::new(param_name, bounds));
             if !self.matches(TokenKind::Comma) {
                 self.expect(TokenKind::RBracket, "expected `]` after type parameters")?;
                 break;
@@ -858,6 +882,14 @@ impl Parser {
             TokenKind::Identifier(_) if self.peek_is_binding() => {
                 Statement::Binding(self.parse_binding()?)
             }
+            // S2.4: List destructuring — [a, b, c] is expr
+            TokenKind::LBracket if self.peek_is_pattern_binding() => {
+                return self.parse_pattern_binding();
+            }
+            // S2.4: Constructor destructuring — Some(v) is expr
+            TokenKind::Identifier(_) if self.peek_is_constructor_pattern_binding() => {
+                return self.parse_pattern_binding();
+            }
             TokenKind::KeywordReturn => {
                 let span = self.current_span();
                 self.advance(); // consume 'return'
@@ -920,6 +952,7 @@ impl Parser {
                     Statement::If { span, .. } | Statement::While { span, .. } | Statement::For { span, .. } | Statement::ForKV { span, .. } | Statement::ForRange { span, .. } => *span,
                     Statement::Binding(b) => b.span,
                     Statement::FieldAssign { span, .. } => *span,
+                    Statement::PatternBinding { span, .. } => *span,
                 };
                 Block {
                     statements: vec![body_stmt],
@@ -1454,15 +1487,29 @@ impl Parser {
                     span,
                 };
             } else if self.matches(TokenKind::LBracket) {
-                let index = self.parse_expression()?;
-                let end_span = self.current_span();
-                self.expect(TokenKind::RBracket, "expected `]` to close subscript")?;
-                let span = expr.span().join(end_span);
-                expr = Expression::Index {
-                    target: Box::new(expr),
-                    index: Box::new(index),
-                    span,
-                };
+                let start_expr = self.parse_expression()?;
+                // S2.5: Check for `to` keyword → slice syntax
+                if self.matches(TokenKind::KeywordTo) {
+                    let end_expr = self.parse_expression()?;
+                    let end_span = self.current_span();
+                    self.expect(TokenKind::RBracket, "expected `]` to close slice")?;
+                    let span = expr.span().join(end_span);
+                    expr = Expression::Slice {
+                        target: Box::new(expr),
+                        start: Box::new(start_expr),
+                        end: Box::new(end_expr),
+                        span,
+                    };
+                } else {
+                    let end_span = self.current_span();
+                    self.expect(TokenKind::RBracket, "expected `]` to close subscript")?;
+                    let span = expr.span().join(end_span);
+                    expr = Expression::Index {
+                        target: Box::new(expr),
+                        index: Box::new(start_expr),
+                        span,
+                    };
+                }
             } else {
                 break;
             }
@@ -1638,14 +1685,35 @@ impl Parser {
             TokenKind::KeywordAsm => self.parse_inline_asm(),
             TokenKind::KeywordErr => self.parse_error_value(),
             TokenKind::LParen => {
-                self.advance();
+                let start = self.advance().span;
                 self.skip_newlines();
                 if self.matches(TokenKind::RParen) {
                     return Ok(Expression::Unit);
                 }
-                let expr = self.parse_expression()?;
+                let first = self.parse_expression()?;
+                // S2.7: Tuple syntax — (a, b, c) parsed as list literal
+                if self.matches(TokenKind::Comma) {
+                    let mut items = vec![first];
+                    self.skip_newlines();
+                    // Handle trailing comma: (a,) is single-element tuple
+                    if !self.check(TokenKind::RParen) {
+                        loop {
+                            items.push(self.parse_expression()?);
+                            self.skip_newlines();
+                            if !self.matches(TokenKind::Comma) {
+                                break;
+                            }
+                            self.skip_newlines();
+                            if self.check(TokenKind::RParen) {
+                                break;
+                            }
+                        }
+                    }
+                    let end = self.expect(TokenKind::RParen, "expected closing )")?.span;
+                    return Ok(Expression::List(items, start.join(end)));
+                }
                 self.expect(TokenKind::RParen, "expected closing )")?;
-                Ok(expr)
+                Ok(first)
             }
             TokenKind::LBracket => self.parse_list_literal(),
             TokenKind::At => self.parse_ptr_load(),
@@ -1735,6 +1803,30 @@ impl Parser {
             }
             self.skip_newlines();
             let value = self.parse_expression()?;
+            
+            // S2.3: Map comprehension — map(key: value for var in iterable if cond)
+            if entries.is_empty() && self.check(TokenKind::KeywordFor) {
+                self.advance(); // consume `for`
+                let (var, _) = self.consume_identifier()?;
+                self.expect(TokenKind::KeywordIn, "expected `in` after comprehension variable")?;
+                let iterable = self.parse_expression()?;
+                let condition = if self.check(TokenKind::KeywordIf) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                let end = self.expect(TokenKind::RParen, "expected `)` to close map comprehension")?.span;
+                return Ok(Expression::MapComprehension {
+                    key: Box::new(key),
+                    value: Box::new(value),
+                    var,
+                    iterable: Box::new(iterable),
+                    condition,
+                    span: start.join(end),
+                });
+            }
+            
             entries.push((key, value));
             
             self.skip_newlines();
@@ -1872,7 +1964,37 @@ impl Parser {
                 self.skip_newlines();
             }
             
-            items.push(self.parse_expression()?);
+            // S2.6: Spread operator — ...expr
+            if self.check(TokenKind::Ellipsis) {
+                let spread_span = self.advance().span;
+                let inner = self.parse_expression()?;
+                let span = spread_span.join(inner.span());
+                items.push(Expression::Spread(Box::new(inner), span));
+            } else {
+                items.push(self.parse_expression()?);
+            }
+
+            // S2.2: List comprehension — [body for var in iterable if cond]
+            if items.len() == 1 && self.check(TokenKind::KeywordFor) {
+                self.advance(); // consume `for`
+                let (var, _) = self.consume_identifier()?;
+                self.expect(TokenKind::KeywordIn, "expected `in` after comprehension variable")?;
+                let iterable = self.parse_expression()?;
+                let condition = if self.check(TokenKind::KeywordIf) {
+                    self.advance(); // consume `if`
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                let end = self.expect(TokenKind::RBracket, "expected `]` to close list comprehension")?.span;
+                return Ok(Expression::ListComprehension {
+                    body: Box::new(items.pop().unwrap()),
+                    var,
+                    iterable: Box::new(iterable),
+                    condition,
+                    span: start.join(end),
+                });
+            }
             
             self.skip_newlines();
             if self.matches(TokenKind::Comma) {
@@ -2011,6 +2133,21 @@ impl Parser {
             TokenKind::Integer(_) => {
                 let token = self.advance();
                 if let TokenKind::Integer(value) = token.kind {
+                    // S3.5: Check for range pattern `start to end`
+                    if self.check(TokenKind::KeywordTo) {
+                        let start_span = token.span;
+                        self.advance(); // consume `to`
+                        let end_token = self.advance();
+                        if let TokenKind::Integer(end_value) = end_token.kind {
+                            return Ok(MatchPattern::Range {
+                                start: value,
+                                end: end_value,
+                                span: start_span.join(end_token.span),
+                            });
+                        } else {
+                            return Err(Diagnostic::new("expected integer after `to` in range pattern", end_token.span));
+                        }
+                    }
                     Ok(MatchPattern::Integer(value))
                 } else {
                     unreachable!()
@@ -2036,6 +2173,17 @@ impl Parser {
                 self.advance(); // consume `[`
                 let mut patterns = Vec::new();
                 while !self.check(TokenKind::RBracket) && !self.check(TokenKind::Eof) {
+                    // S3.4: Check for rest/spread pattern `...name`
+                    if self.check(TokenKind::Ellipsis) {
+                        let ellipsis_span = self.advance().span;
+                        let (rest_name, rest_span) = self.consume_identifier()?;
+                        patterns.push(MatchPattern::Rest(rest_name, ellipsis_span.join(rest_span)));
+                        // Rest must be last in the list pattern
+                        if !self.check(TokenKind::RBracket) {
+                            self.matches(TokenKind::Comma); // consume optional trailing comma
+                        }
+                        break;
+                    }
                     patterns.push(self.parse_match_pattern()?);
                     if !self.matches(TokenKind::Comma) {
                         break;
@@ -2263,6 +2411,80 @@ impl Parser {
             }
         }
         false
+    }
+
+    /// S2.4: Check if current `[` starts a destructuring pattern binding `[a, b] is expr`
+    fn peek_is_pattern_binding(&self) -> bool {
+        // Scan forward from [ to find matching ], then check for `is`
+        let mut offset = 1usize;
+        let mut depth = 1i32;
+        while let Some(token) = self.tokens.get(self.index + offset) {
+            match &token.kind {
+                TokenKind::LBracket => { depth += 1; offset += 1; }
+                TokenKind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // Check if next non-newline token is `is`
+                        offset += 1;
+                        while let Some(t) = self.tokens.get(self.index + offset) {
+                            if matches!(t.kind, TokenKind::Newline) { offset += 1; continue; }
+                            return matches!(t.kind, TokenKind::KeywordIs);
+                        }
+                        return false;
+                    }
+                    offset += 1;
+                }
+                TokenKind::Newline | TokenKind::Eof => return false,
+                _ => { offset += 1; }
+            }
+        }
+        false
+    }
+
+    /// S2.4: Check if current identifier is a constructor destructuring `Some(x) is expr`
+    fn peek_is_constructor_pattern_binding(&self) -> bool {
+        // Must be an uppercase identifier followed by `(`
+        if let Some(TokenKind::Identifier(name)) = self.tokens.get(self.index).map(|t| &t.kind) {
+            if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                // Look for ( after identifier, skip to matching ), then check for `is`
+                if let Some(t) = self.tokens.get(self.index + 1) {
+                    if matches!(t.kind, TokenKind::LParen) {
+                        let mut offset = 2usize;
+                        let mut depth = 1i32;
+                        while let Some(token) = self.tokens.get(self.index + offset) {
+                            match &token.kind {
+                                TokenKind::LParen => { depth += 1; offset += 1; }
+                                TokenKind::RParen => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        offset += 1;
+                                        while let Some(t) = self.tokens.get(self.index + offset) {
+                                            if matches!(t.kind, TokenKind::Newline) { offset += 1; continue; }
+                                            return matches!(t.kind, TokenKind::KeywordIs);
+                                        }
+                                        return false;
+                                    }
+                                    offset += 1;
+                                }
+                                TokenKind::Newline | TokenKind::Eof => return false,
+                                _ => { offset += 1; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// S2.4: Parse a destructuring pattern binding
+    fn parse_pattern_binding(&mut self) -> ParseResult<Statement> {
+        let span = self.current_span();
+        let pattern = self.parse_match_pattern()?;
+        self.expect(TokenKind::KeywordIs, "expected `is` after destructuring pattern")?;
+        self.skip_newlines();
+        let value = self.parse_expression()?;
+        Ok(Statement::PatternBinding { pattern, value, span })
     }
 
     fn parse_extern_function(&mut self) -> ParseResult<ExternFunction> {

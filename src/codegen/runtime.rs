@@ -76,6 +76,7 @@ pub struct RuntimeBindings<'ctx> {
     pub value_iter: FunctionValue<'ctx>,
     pub list_push: FunctionValue<'ctx>,
     pub list_get: FunctionValue<'ctx>,
+    pub list_length: FunctionValue<'ctx>,
     pub list_pop: FunctionValue<'ctx>,
     pub list_iter: FunctionValue<'ctx>,
     pub list_iter_next: FunctionValue<'ctx>,
@@ -557,6 +558,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let list_get = module.add_function(
             "coral_list_get",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let list_length = module.add_function(
+            "coral_list_length",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
         let list_pop = module.add_function(
@@ -1697,6 +1703,7 @@ impl<'ctx> RuntimeBindings<'ctx> {
             value_iter,
             list_push,
             list_get,
+            list_length,
             list_pop,
             list_iter,
             list_iter_next,

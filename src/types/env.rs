@@ -82,6 +82,10 @@ pub struct TypeEnv {
     /// Generic type definitions: maps type name to its type parameter names
     /// e.g., "List" -> ["T"], "Map" -> ["K", "V"]
     generic_types: HashMap<String, Vec<String>>,
+    /// T2.4: Trait bounds on generic type parameters.
+    /// Maps (type_name, param_name) → list of required trait names.
+    /// e.g., ("SortedList", "T") → ["Comparable"]
+    generic_type_bounds: HashMap<(String, String), Vec<String>>,
     /// T2.2: Generic ADT constructor info: constructor_name → (enum_name, type_params, field_count)
     /// Used for let-polymorphism: each call site gets fresh type variables.
     generic_constructors: HashMap<String, (String, Vec<String>, usize)>,
@@ -95,6 +99,7 @@ impl Default for TypeEnv {
             type_params: HashMap::new(),
             type_param_stack: Vec::new(),
             generic_types: HashMap::new(),
+            generic_type_bounds: HashMap::new(),
             generic_constructors: HashMap::new(),
         }
     }
@@ -108,6 +113,7 @@ impl TypeEnv {
             type_params: HashMap::new(),
             type_param_stack: Vec::new(),
             generic_types: HashMap::new(),
+            generic_type_bounds: HashMap::new(),
             generic_constructors: HashMap::new(),
         };
         // Register built-in generic types
@@ -125,6 +131,21 @@ impl TypeEnv {
             name.into(),
             params.into_iter().map(String::from).collect(),
         );
+    }
+
+    /// T2.4: Register trait bounds for a generic type parameter.
+    pub fn register_type_param_bounds(&mut self, type_name: &str, param_name: &str, bounds: Vec<String>) {
+        if !bounds.is_empty() {
+            self.generic_type_bounds.insert(
+                (type_name.to_string(), param_name.to_string()),
+                bounds,
+            );
+        }
+    }
+
+    /// T2.4: Get the trait bounds for a specific type parameter of a generic type.
+    pub fn get_type_param_bounds(&self, type_name: &str, param_name: &str) -> Option<&Vec<String>> {
+        self.generic_type_bounds.get(&(type_name.to_string(), param_name.to_string()))
     }
 
     /// Get the type parameter names for a generic type.

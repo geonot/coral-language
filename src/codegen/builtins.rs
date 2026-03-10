@@ -180,6 +180,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list.map expects a single function", span));
                 }
+                // C3.2: Inline lambda body directly into a map loop when the
+                // argument is a lambda expression, avoiding closure allocation
+                // and indirect calls through the runtime.
+                if let Expression::Lambda { params, body, .. } = &args[0] {
+                    if params.len() == 1 {
+                        return self.emit_inline_map(ctx, target, &params[0].name, body, span);
+                    }
+                }
                 let list_value = self.emit_expression(ctx, target)?;
                 let func_value = self.emit_expression(ctx, &args[0])?;
                 Ok(self.call_bridged(self.runtime.list_map, &[list_value, func_value], "list_map"))
@@ -187,6 +195,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             "filter" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list.filter expects a predicate", span));
+                }
+                // C3.2: Inline lambda body for filter as well
+                if let Expression::Lambda { params, body, .. } = &args[0] {
+                    if params.len() == 1 {
+                        return self.emit_inline_filter(ctx, target, &params[0].name, body, span);
+                    }
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let func_value = self.emit_expression(ctx, &args[0])?;
@@ -1418,5 +1432,190 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
+    }
+
+    /// C3.2: Emit an inline map loop, directly embedding the lambda body
+    /// instead of creating a closure and calling the runtime `coral_list_map`.
+    fn emit_inline_map(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        param_name: &str,
+        body: &Block,
+        _span: Span,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let function = ctx.function;
+        let list_value = self.emit_expression(ctx, target)?;
+
+        // Get list length as f64
+        let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "map_len");
+        let len_f64 = self.value_to_number(len_nb);
+
+        // Create empty output list: coral_make_list(null, 0)
+        let null_ptr = self.runtime.value_ptr_type
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null();
+        let zero_usize = self.usize_type.const_int(0, false);
+        let out_list_ptr = self.call_runtime_ptr(
+            self.runtime.make_list,
+            &[null_ptr.into(), zero_usize.into()],
+            "map_out_list",
+        );
+        let out_list_nb = self.ptr_to_nb(out_list_ptr);
+
+        // Alloca for output list (mutated by push)
+        let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "map_out_alloca").unwrap();
+        self.builder.build_store(out_alloca, out_list_nb).unwrap();
+
+        // Counter alloca
+        let counter_alloca = self.builder.build_alloca(self.f64_type, "map_counter").unwrap();
+        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+        let loop_header = self.context.append_basic_block(function, "map_cond");
+        let loop_body = self.context.append_basic_block(function, "map_body");
+        let loop_exit = self.context.append_basic_block(function, "map_exit");
+
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        // Header: check counter < length
+        self.builder.position_at_end(loop_header);
+        let current = self.builder.build_load(self.f64_type, counter_alloca, "map_i")
+            .unwrap().into_float_value();
+        let is_done = self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE, current, len_f64, "map_done",
+        ).unwrap();
+        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+        // Body: get element, emit lambda body, push result
+        self.builder.position_at_end(loop_body);
+        ctx.cse_cache.clear();
+        let idx_nb = self.wrap_number(current);
+        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "map_elem");
+        self.store_variable(ctx, param_name, elem_nb);
+
+        let result = self.emit_block(ctx, body)?;
+
+        // Push result to output list
+        let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "cur_out")
+            .unwrap().into_int_value();
+        let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, result], "map_push");
+        self.builder.build_store(out_alloca, new_out).unwrap();
+
+        // Increment counter
+        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "map_cur_upd")
+                .unwrap().into_float_value();
+            let next = self.builder.build_float_add(
+                cur_f64, self.f64_type.const_float(1.0), "map_next",
+            ).unwrap();
+            self.builder.build_store(counter_alloca, next).unwrap();
+            self.builder.build_unconditional_branch(loop_header).unwrap();
+        }
+
+        // Return the output list
+        self.builder.position_at_end(loop_exit);
+        let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "map_result")
+            .unwrap().into_int_value();
+        Ok(final_out)
+    }
+
+    /// C3.2: Emit an inline filter loop, directly embedding the predicate body
+    /// instead of creating a closure and calling the runtime `coral_list_filter`.
+    fn emit_inline_filter(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        param_name: &str,
+        body: &Block,
+        _span: Span,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let function = ctx.function;
+        let list_value = self.emit_expression(ctx, target)?;
+
+        // Get list length as f64
+        let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "filter_len");
+        let len_f64 = self.value_to_number(len_nb);
+
+        // Create empty output list
+        let null_ptr = self.runtime.value_ptr_type
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null();
+        let zero_usize = self.usize_type.const_int(0, false);
+        let out_list_ptr = self.call_runtime_ptr(
+            self.runtime.make_list,
+            &[null_ptr.into(), zero_usize.into()],
+            "filter_out_list",
+        );
+        let out_list_nb = self.ptr_to_nb(out_list_ptr);
+
+        let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "filter_out_alloca").unwrap();
+        self.builder.build_store(out_alloca, out_list_nb).unwrap();
+
+        let counter_alloca = self.builder.build_alloca(self.f64_type, "filter_counter").unwrap();
+        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+        // Alloca to hold current element across block boundaries
+        let elem_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "filter_elem_alloca").unwrap();
+
+        let loop_header = self.context.append_basic_block(function, "filter_cond");
+        let loop_body = self.context.append_basic_block(function, "filter_body");
+        let loop_push = self.context.append_basic_block(function, "filter_push");
+        let loop_skip = self.context.append_basic_block(function, "filter_skip");
+        let loop_exit = self.context.append_basic_block(function, "filter_exit");
+
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        // Header: check counter < length
+        self.builder.position_at_end(loop_header);
+        let current = self.builder.build_load(self.f64_type, counter_alloca, "filter_i")
+            .unwrap().into_float_value();
+        let is_done = self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE, current, len_f64, "filter_done",
+        ).unwrap();
+        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+        // Body: get element, eval predicate
+        self.builder.position_at_end(loop_body);
+        ctx.cse_cache.clear();
+        let idx_nb = self.wrap_number(current);
+        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "filter_elem");
+        self.builder.build_store(elem_alloca, elem_nb).unwrap();
+        self.store_variable(ctx, param_name, elem_nb);
+
+        let predicate_result = self.emit_block(ctx, body)?;
+
+        // Check truthiness: nb_is_truthy returns i8
+        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "filter_truthy");
+        let truthy_bool = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            is_truthy,
+            self.i8_type.const_int(0, false),
+            "filter_bool",
+        ).unwrap();
+        self.builder.build_conditional_branch(truthy_bool, loop_push, loop_skip).unwrap();
+
+        // Push: add element to output list (reload from alloca for SSA safety)
+        self.builder.position_at_end(loop_push);
+        let saved_elem = self.builder.build_load(self.runtime.value_i64_type, elem_alloca, "saved_elem")
+            .unwrap().into_int_value();
+        let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "cur_out_f")
+            .unwrap().into_int_value();
+        let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, saved_elem], "filter_push");
+        self.builder.build_store(out_alloca, new_out).unwrap();
+        self.builder.build_unconditional_branch(loop_skip).unwrap();
+
+        // Skip / continue: increment counter
+        self.builder.position_at_end(loop_skip);
+        let next = self.builder.build_float_add(
+            current, self.f64_type.const_float(1.0), "filter_next",
+        ).unwrap();
+        self.builder.build_store(counter_alloca, next).unwrap();
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        // Return the output list
+        self.builder.position_at_end(loop_exit);
+        let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "filter_result")
+            .unwrap().into_int_value();
+        Ok(final_out)
     }
 }

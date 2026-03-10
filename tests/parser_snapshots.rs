@@ -192,6 +192,12 @@ fn statement_snapshot(statement: &Statement) -> Value {
                 "value": expression_snapshot(value),
             }
         }),
+        Statement::PatternBinding { pattern, value, .. } => json!({
+            "pattern_binding": {
+                "pattern": format!("{:?}", pattern),
+                "value": expression_snapshot(value),
+            }
+        }),
     }
 }
 
@@ -388,10 +394,37 @@ fn expression_snapshot(expr: &Expression) -> Value {
         Expression::ErrorPropagate { expr, .. } => json!({
             "error_propagate": expression_snapshot(expr)
         }),
+        Expression::Spread(inner, _) => json!({
+            "spread": expression_snapshot(inner)
+        }),
         Expression::Index { target, index, .. } => json!({
             "index": {
                 "target": expression_snapshot(target),
                 "index": expression_snapshot(index)
+            }
+        }),
+        Expression::Slice { target, start, end, .. } => json!({
+            "slice": {
+                "target": expression_snapshot(target),
+                "start": expression_snapshot(start),
+                "end": expression_snapshot(end)
+            }
+        }),
+        Expression::ListComprehension { body, var, iterable, condition, .. } => json!({
+            "list_comprehension": {
+                "body": expression_snapshot(body),
+                "var": var,
+                "iterable": expression_snapshot(iterable),
+                "condition": condition.as_ref().map(|c| expression_snapshot(c))
+            }
+        }),
+        Expression::MapComprehension { key, value, var, iterable, condition, .. } => json!({
+            "map_comprehension": {
+                "key": expression_snapshot(key),
+                "value": expression_snapshot(value),
+                "var": var,
+                "iterable": expression_snapshot(iterable),
+                "condition": condition.as_ref().map(|c| expression_snapshot(c))
             }
         }),
     }
@@ -416,6 +449,10 @@ fn pattern_snapshot(pattern: &MatchPattern) -> Value {
         MatchPattern::Or(alternatives) => json!({
             "or": alternatives.iter().map(pattern_snapshot).collect::<Vec<_>>()
         }),
+        MatchPattern::Range { start, end, .. } => json!({
+            "range": { "start": start, "end": end }
+        }),
+        MatchPattern::Rest(name, _) => json!({ "rest": name }),
     }
 }
 

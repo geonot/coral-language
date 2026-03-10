@@ -208,6 +208,9 @@ impl Compiler {
                 crate::ast::Statement::FieldAssign { value, .. } => {
                     *value = Self::fold_expr(value.clone());
                 }
+                crate::ast::Statement::PatternBinding { value, .. } => {
+                    *value = Self::fold_expr(value.clone());
+                }
             }
         }
         
