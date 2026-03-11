@@ -19,6 +19,7 @@ pub mod bytes_ops;
 pub mod closure_ops;
 pub mod encoding_ops;
 pub mod error_ffi;
+pub mod http_ops;
 pub mod io_ops;
 pub mod json_ops;
 pub mod list_ops;
@@ -39,6 +40,7 @@ pub use bytes_ops::*;
 pub use closure_ops::*;
 pub use encoding_ops::*;
 pub use error_ffi::*;
+pub use http_ops::*;
 pub use io_ops::*;
 pub use json_ops::*;
 pub use list_ops::*;
@@ -326,11 +328,20 @@ impl Default for Payload {
     }
 }
 
+/// Flag: this value has (or had) weak references. When set, the value's
+/// memory is always recycled to the pool on release (never freed) so that
+/// epoch-based weak ref validity checks remain safe.
+pub const FLAG_HAS_WEAK_REFS: u8 = 0x01;
+
 #[repr(C)]
 pub struct Value {
     pub tag: u8,
     pub flags: u8,
-    pub reserved: u16,
+    /// Epoch counter for weak reference validity checking (M3.5).
+    /// Incremented on deallocation; weak refs compare stored epoch against
+    /// the current value to detect staleness. Wraps on overflow (u16 gives
+    /// 65 535 generations per address which is sufficient in practice).
+    pub epoch: u16,
     /// Thread that owns this value. Non-zero means thread-local (non-atomic RC).
     /// Zero means shared/atomic mode (promoted at freeze or cross-thread access).
     /// Fills alignment padding before AtomicU64, so adds 0 bytes to struct size.
@@ -354,7 +365,7 @@ impl Clone for Value {
         Self {
             tag: self.tag,
             flags: self.flags,
-            reserved: self.reserved,
+            epoch: self.epoch,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(self.refcount.load(Ordering::Relaxed)),
             #[cfg(feature = "metrics")]
@@ -371,7 +382,7 @@ impl Value {
         Self {
             tag: ValueTag::Unit as u8,
             flags: 0,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -386,7 +397,7 @@ impl Value {
         Self {
             tag: ValueTag::Number as u8,
             flags: 0,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -404,7 +415,7 @@ impl Value {
         Self {
             tag: ValueTag::Bool as u8,
             flags: 0,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -419,7 +430,7 @@ impl Value {
         Self {
             tag: tag as u8,
             flags: 0,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -434,7 +445,7 @@ impl Value {
         Self {
             tag: tag as u8,
             flags,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -452,7 +463,7 @@ impl Value {
         Self {
             tag: ValueTag::String as u8,
             flags: FLAG_INLINE_STRING | ((bytes.len() as u8) << 1),
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -497,7 +508,7 @@ impl Value {
         Self {
             tag: ValueTag::Unit as u8,  // Error values have unit as base type
             flags: FLAG_ERR,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -513,7 +524,7 @@ impl Value {
         Self {
             tag: ValueTag::Unit as u8,
             flags: FLAG_ABSENT,
-            reserved: 0,
+            epoch: 0,
             owner_thread: current_thread_id(),
             refcount: AtomicU64::new(1),
             #[cfg(feature = "metrics")]
@@ -566,6 +577,7 @@ fn value_pool() -> &'static Mutex<ValuePool> {
 }
 
 fn recycle_value_box(handle: ValueHandle) -> bool {
+    let has_weak = unsafe { (*handle).flags & FLAG_HAS_WEAK_REFS != 0 };
     // Fast path: thread-local pool (no locking, no duplicate scan needed
     // since refcounting guarantees each handle is freed exactly once)
     let recycled = LOCAL_VALUE_POOL.with(|pool| {
@@ -589,7 +601,10 @@ fn recycle_value_box(handle: ValueHandle) -> bool {
     // Overflow to global pool
     let pool = value_pool();
     if let Ok(mut slots) = pool.lock() {
-        if slots.0.len() < VALUE_POOL_LIMIT {
+        if slots.0.len() < VALUE_POOL_LIMIT || has_weak {
+            // M3.5: Values with FLAG_HAS_WEAK_REFS are always pooled (never
+            // freed) so epoch-based validity checks on stale WeakRefs remain
+            // safe — the memory backing the epoch field stays accessible.
             unsafe {
                 (*handle).refcount.store(0, Ordering::Relaxed);
                 (*handle).owner_thread = 0;
@@ -601,6 +616,11 @@ fn recycle_value_box(handle: ValueHandle) -> bool {
             slots.0.push(handle);
             return true;
         }
+    }
+    // If this value has weak refs, we MUST NOT free it — force into global pool
+    // even if the mutex failed above (shouldn't happen in practice).
+    if has_weak {
+        return true; // leak rather than free — epoch checks must stay safe
     }
     false
 }
@@ -1163,7 +1183,7 @@ fn handle_to_i64(handle: ValueHandle) -> i64 {
     number_to_i64(value)
 }
 
-fn list_from_value(value: &Value) -> Option<&ListObject> {
+pub(crate) fn list_from_value(value: &Value) -> Option<&ListObject> {
     if value.tag != ValueTag::List as u8 {
         return None;
     }
@@ -1797,7 +1817,7 @@ pub extern "C" fn coral_make_tagged(
     let value = Value {
         tag: ValueTag::Tagged as u8,
         flags: 0,
-        reserved: 0,
+        epoch: 0,
         owner_thread: current_thread_id(),
         refcount: AtomicU64::new(1),
         #[cfg(feature = "metrics")]
@@ -1936,6 +1956,87 @@ pub extern "C" fn coral_type_of(value: ValueHandle) -> ValueHandle {
         _ => "unknown",
     };
     coral_make_string(name.as_ptr(), name.len())
+}
+
+// ===== Debug introspection (L4.1: std.debug) =====
+
+/// Return a detailed inspection string: "Type(value)" or "Type[details]".
+/// For example: "Number(42)", "String(hello)[len=5]", "List[3 items]", "Map[2 entries]".
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_debug_inspect(value: ValueHandle) -> ValueHandle {
+    if value.is_null() {
+        let s = "None";
+        return coral_make_string(s.as_ptr(), s.len());
+    }
+    let v = unsafe { &*value };
+    let desc = match ValueTag::try_from(v.tag) {
+        Ok(ValueTag::Number) => {
+            let n = unsafe { v.payload.number };
+            if n == (n as i64) as f64 {
+                format!("Number({})", n as i64)
+            } else {
+                format!("Number({n})")
+            }
+        }
+        Ok(ValueTag::Bool) => {
+            let b = unsafe { v.payload.inline[0] } & 1;
+            format!("Bool({})", if b != 0 { "true" } else { "false" })
+        }
+        Ok(ValueTag::String) => {
+            let bytes = string_to_bytes(v);
+            let text = String::from_utf8_lossy(&bytes);
+            format!("String({text})[len={}]", bytes.len())
+        }
+        Ok(ValueTag::Bytes) => {
+            let bytes = string_to_bytes(v);
+            format!("Bytes[{} bytes]", bytes.len())
+        }
+        Ok(ValueTag::List) => {
+            let ptr = v.heap_ptr();
+            let len = if !ptr.is_null() {
+                unsafe { (*(ptr as *const ListObject)).items.len() }
+            } else { 0 };
+            format!("List[{len} items]")
+        }
+        Ok(ValueTag::Map) => {
+            let ptr = v.heap_ptr();
+            let entries = if !ptr.is_null() {
+                unsafe { (*(ptr as *const MapObject)).len }
+            } else { 0 };
+            format!("Map[{entries} entries]")
+        }
+        Ok(ValueTag::Closure) => "Function".to_string(),
+        Ok(ValueTag::Unit) => "Unit".to_string(),
+        Ok(ValueTag::Actor) => "Actor".to_string(),
+        Ok(ValueTag::Tagged) => {
+            let ptr = v.heap_ptr();
+            if !ptr.is_null() {
+                let tagged = unsafe { &*(ptr as *const TaggedValue) };
+                let tag_name = unsafe {
+                    let slice = std::slice::from_raw_parts(tagged.tag_name, tagged.tag_name_len);
+                    String::from_utf8_lossy(slice).to_string()
+                };
+                format!("Tagged({tag_name})[{} fields]", tagged.field_count)
+            } else {
+                "Tagged(null)".to_string()
+            }
+        }
+        Ok(ValueTag::Store) => "Store".to_string(),
+        _ => format!("Unknown(tag={})", v.tag),
+    };
+    coral_make_string(desc.as_ptr(), desc.len())
+}
+
+/// Return monotonic nanosecond timestamp as a number value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_debug_time_ns() -> ValueHandle {
+    use std::time::Instant;
+    // Use a thread-local base instant so values are relative and fit in f64
+    thread_local! {
+        static BASE: Instant = Instant::now();
+    }
+    let ns = BASE.with(|base| base.elapsed().as_nanos() as f64);
+    coral_make_number(ns)
 }
 
 // ===== Character operations =====

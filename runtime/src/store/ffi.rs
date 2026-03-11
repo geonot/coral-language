@@ -670,6 +670,29 @@ pub extern "C" fn coral_store_all_indices(handle: ValueHandle) -> ValueHandle {
     }
 }
 
+/// R3.2: Compact the WAL, merging entries and removing superseded writes.
+/// Returns a map `{"old_size": N, "new_size": M}` on success, or an error.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_store_compact(handle: ValueHandle) -> ValueHandle {
+    match with_engine(handle, |engine| {
+        engine.compact_wal()
+            .map_err(|e| e.to_string())
+    }) {
+        Ok((old_size, new_size)) => unsafe {
+            let k1 = coral_make_string(b"old_size".as_ptr(), 8);
+            let v1 = coral_make_number(old_size as f64);
+            let k2 = coral_make_string(b"new_size".as_ptr(), 8);
+            let v2 = coral_make_number(new_size as f64);
+            let entries = [
+                MapEntry { key: k1, value: v1 },
+                MapEntry { key: k2, value: v2 },
+            ];
+            coral_make_map(entries.as_ptr(), entries.len())
+        },
+        Err(e) => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -299,6 +299,8 @@ pub struct StoreDefinition {
     pub methods: Vec<Function>,
     pub is_actor: bool,
     pub is_persistent: bool,  // `persist store` vs `store`
+    /// R2.7: `@messages(TypeName)` annotation restricting accepted message types.
+    pub message_type: Option<String>,
     pub span: Span,
 }
 

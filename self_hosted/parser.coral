@@ -14,8 +14,8 @@ use lexer
 
 # ─── AST Node Constructors ─────────────────────────────────────────
 
-*make_span(start, end)
-	return map("start" is start, "end" is end)
+*make_span(start, end_pos)
+	return map("start" is start, "end" is end_pos)
 
 *make_program(items, span)
 	return map("kind" is "program", "items" is items, "span" is span)

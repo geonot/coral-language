@@ -59,12 +59,12 @@
 	a_span is a.get("span")
 	b_span is b.get("span")
 	start is a_span.get("start")
-	end is b_span.get("end")
+	end_pos is b_span.get("end")
 	if b_span.get("start") < start
 		start is b_span.get("start")
-	if a_span.get("end") > end
-		end is a_span.get("end")
-	merged_span is map("start" is start, "end" is end)
+	if a_span.get("end") > end_pos
+		end_pos is a_span.get("end")
+	merged_span is map("start" is start, "end" is end_pos)
 	return map("indexes" is merged_indexes, "occurrences" is merged_occ, "span" is merged_span)
 
 *placeholder_param_count(info)

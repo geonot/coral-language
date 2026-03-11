@@ -8,6 +8,7 @@ use crate::ast::{
     FunctionKind,
     Item,
     MatchExpression,
+    MatchPattern,
     Parameter,
     Program,
     Statement,
@@ -53,6 +54,10 @@ pub struct SemanticModel {
     pub store_field_names: HashMap<String, Vec<String>>,
     /// CC3.2: Maps short module name (e.g., "math") to list of exported function names
     pub module_exports: HashMap<String, Vec<String>>,
+    /// R2.7: Maps actor name → message type annotation (if any).
+    pub actor_message_types: HashMap<String, String>,
+    /// R2.7: Maps actor name → set of handler names for typed send validation.
+    pub actor_handler_names: HashMap<String, Vec<String>>,
 }
 
 /// Register error definitions recursively, building paths like "Database:Connection:Timeout"
@@ -102,6 +107,9 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // Track (TypeName, FieldName) → field index for member access type inference (TS-4)
     let mut field_types: HashMap<(String, String), usize> = HashMap::new();
     let mut store_field_names: HashMap<String, Vec<String>> = HashMap::new();
+    // R2.7: Track actor message types and handler names
+    let mut actor_message_types: HashMap<String, String> = HashMap::new();
+    let mut actor_handler_names: HashMap<String, Vec<String>> = HashMap::new();
 
     // First pass: collect all top-level names (functions, externs, store constructors, types)
     // This allows undefined name detection to know about forward references
@@ -301,6 +309,16 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                             ));
                         }
                     }
+                    // R2.7: Store handler names for typed message validation
+                    let handlers: Vec<String> = store.methods.iter()
+                        .filter(|m| m.kind == crate::ast::FunctionKind::ActorMessage)
+                        .map(|m| m.name.clone())
+                        .collect();
+                    actor_handler_names.insert(store.name.clone(), handlers);
+                    // R2.7: Store message type annotation if present
+                    if let Some(ref msg_type) = store.message_type {
+                        actor_message_types.insert(store.name.clone(), msg_type.clone());
+                    }
                 } else {
                     // Non-actor store: register constructor make_StoreName() -> Store(name)
                     let ctor_name = format!("make_{}", store.name);
@@ -405,6 +423,7 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                             methods,
                             is_actor: false,
                             is_persistent: false,
+                            message_type: None,
                             span: ext.span,
                         };
                         stores.push(synthetic);
@@ -493,6 +512,8 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // Check match exhaustiveness after type definitions are collected (TS-9: warnings, not errors)
     check_all_match_exhaustiveness(&globals, &functions, &type_defs, &mut warnings);
     check_unhandled_errors(&globals, &functions, &mut warnings);
+    // T3.4: Error type exhaustiveness — warn when error types may not be fully handled
+    check_error_type_exhaustiveness(&functions, &mut warnings);
     // T3.5: Dead code detection — warn on statements after return/break/continue
     check_dead_code(&functions, &mut warnings);
     // T3.2: Definite assignment analysis — warn on variables that may be uninitialized
@@ -512,6 +533,9 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // Validate trait implementations
     validate_trait_implementations(&type_defs, &stores, &trait_defs, &mut warnings)?;
 
+    // R2.7: Validate typed actor_send calls — warn when handler name doesn't match known handlers
+    validate_typed_actor_sends(&functions, &globals, &actor_handler_names, &actor_message_types, &mut warnings);
+
     Ok(SemanticModel {
         globals,
         functions,
@@ -529,6 +553,8 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         field_types,
         store_field_names,
         module_exports,
+        actor_message_types,
+        actor_handler_names,
     })
 }
 
@@ -1503,10 +1529,10 @@ fn collect_constraints_expr(
                 }
             }
         }
-        Expression::ErrorValue { .. } => {
-            // Error values are a special type - for now treat as Any since
-            // they can be returned from any function
-            TypeId::Primitive(Primitive::Any)
+        Expression::ErrorValue { path, .. } => {
+            // T3.4: Error values carry their taxonomy type.
+            // `err Foo:Bar:Baz` → Error(["Foo", "Bar", "Baz"])
+            TypeId::Error(path.clone())
         }
         Expression::ErrorPropagate { expr, .. } => {
             // The type of error propagation is the type of the inner expression
@@ -1957,6 +1983,8 @@ fn is_builtin_name(name: &str) -> bool {
         // TCP networking
         "tcp_listen" | "tcp_accept" | "tcp_connect" |
         "tcp_read" | "tcp_write" | "tcp_close" |
+        // HTTP client (L3.1)
+        "http_get" | "http_post" | "http_request" |
         // Memory operations (runtime FFI)
         "value_retain" | "value_release" | "heap_alloc" | "heap_free" |
         // Range helper
@@ -1987,7 +2015,9 @@ fn is_builtin_name(name: &str) -> bool {
         "path_stem" | "stem" |
         // Regex operations (L2.2)
         "regex_match" | "regex_find" | "regex_find_all" |
-        "regex_replace" | "regex_split"
+        "regex_replace" | "regex_split" |
+        // Debug introspection (L4.1)
+        "inspect" | "debug_inspect" | "time_ns" | "debug_time_ns"
     )
 }
 
@@ -3316,6 +3346,222 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
     }
 }
 
+// ── T3.4: Error type exhaustiveness checking ───────────────────────────────
+
+/// Collect all error types that a function may return (from return statements
+/// and trailing expressions containing ErrorValue nodes).
+fn collect_error_types_from_block(block: &Block, error_types: &mut Vec<(Vec<String>, Span)>) {
+    for statement in &block.statements {
+        match statement {
+            Statement::Return(expr, _) => {
+                collect_error_types_from_expr(expr, error_types);
+            }
+            Statement::Expression(expr) => {
+                // Only look at tail expressions (last in block) or nested blocks
+                collect_error_types_from_expr_nested(expr, error_types);
+            }
+            Statement::Binding(binding) => {
+                // Check if the value is an error-producing expression that flows through
+                collect_error_types_from_expr_nested(&binding.value, error_types);
+            }
+            Statement::If { body, elif_branches, else_body, .. } => {
+                collect_error_types_from_block(body, error_types);
+                for (_, blk) in elif_branches {
+                    collect_error_types_from_block(blk, error_types);
+                }
+                if let Some(else_blk) = else_body {
+                    collect_error_types_from_block(else_blk, error_types);
+                }
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForKV { body, .. } => {
+                collect_error_types_from_block(body, error_types);
+            }
+            Statement::ForRange { body, .. } => {
+                collect_error_types_from_block(body, error_types);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect error types from an expression (direct ErrorValue or propagated).
+fn collect_error_types_from_expr(expr: &Expression, error_types: &mut Vec<(Vec<String>, Span)>) {
+    match expr {
+        Expression::ErrorValue { path, span } => {
+            if !path.is_empty() {
+                error_types.push((path.clone(), *span));
+            }
+        }
+        Expression::Ternary { then_branch, else_branch, .. } => {
+            collect_error_types_from_expr(then_branch, error_types);
+            collect_error_types_from_expr(else_branch, error_types);
+        }
+        _ => {}
+    }
+}
+
+/// Recurse into nested blocks looking for error returns.
+fn collect_error_types_from_expr_nested(expr: &Expression, error_types: &mut Vec<(Vec<String>, Span)>) {
+    match expr {
+        Expression::Lambda { body, .. } => {
+            collect_error_types_from_block(body, error_types);
+        }
+        Expression::Match(m) => {
+            for arm in &m.arms {
+                collect_error_types_from_block(&arm.body, error_types);
+            }
+            if let Some(default) = &m.default {
+                collect_error_types_from_block(default, error_types);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect error type patterns handled in match expressions within a function.
+fn collect_handled_error_types_from_block(block: &Block, handled: &mut Vec<Vec<String>>) {
+    for statement in &block.statements {
+        match statement {
+            Statement::Expression(expr) => {
+                collect_handled_error_types_from_expr(expr, handled);
+            }
+            Statement::Binding(binding) => {
+                collect_handled_error_types_from_expr(&binding.value, handled);
+            }
+            Statement::If { condition, body, elif_branches, else_body, .. } => {
+                collect_handled_error_types_from_expr(condition, handled);
+                collect_handled_error_types_from_block(body, handled);
+                for (cond, blk) in elif_branches {
+                    collect_handled_error_types_from_expr(cond, handled);
+                    collect_handled_error_types_from_block(blk, handled);
+                }
+                if let Some(else_blk) = else_body {
+                    collect_handled_error_types_from_block(else_blk, handled);
+                }
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForKV { body, .. } => {
+                collect_handled_error_types_from_block(body, handled);
+            }
+            Statement::ForRange { body, .. } => {
+                collect_handled_error_types_from_block(body, handled);
+            }
+            Statement::Return(expr, _) => {
+                collect_handled_error_types_from_expr(expr, handled);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Look for match arms that handle error patterns (Constructor patterns like Err(e)).
+fn collect_handled_error_types_from_expr(expr: &Expression, handled: &mut Vec<Vec<String>>) {
+    match expr {
+        Expression::Match(m) => {
+            for arm in &m.arms {
+                // Check if the pattern is a constructor that looks like an error handler
+                match &arm.pattern {
+                    MatchPattern::Constructor { name, .. } => {
+                        // Patterns like Err(e) or specific error names
+                        if name == "Err" || name.starts_with("Error") {
+                            handled.push(vec![name.clone()]);
+                        }
+                    }
+                    MatchPattern::Identifier(name) => {
+                        // A bare identifier pattern — could be matching an error value
+                        // We track it as a potential error handler
+                        handled.push(vec![name.clone()]);
+                    }
+                    MatchPattern::Wildcard(_) => {
+                        // Wildcard catches all — mark as handling all errors
+                        handled.push(vec!["*".to_string()]);
+                    }
+                    _ => {}
+                }
+                collect_handled_error_types_from_block(&arm.body, handled);
+            }
+            if m.default.is_some() {
+                // Default arm catches all unmatched patterns
+                handled.push(vec!["*".to_string()]);
+            }
+            if let Some(default) = &m.default {
+                collect_handled_error_types_from_block(default, handled);
+            }
+        }
+        Expression::Lambda { body, .. } => {
+            collect_handled_error_types_from_block(body, handled);
+        }
+        Expression::ErrorPropagate { .. } => {
+            // Error propagation counts as "handled" — it re-raises to caller
+        }
+        _ => {}
+    }
+}
+
+/// T3.4: Check that functions which can produce errors have those errors
+/// handled (or at least documented) at call sites.
+fn check_error_type_exhaustiveness(
+    functions: &[Function],
+    warnings: &mut Vec<Diagnostic>,
+) {
+    for function in functions {
+        // Collect error types this function can produce
+        let mut produced_errors: Vec<(Vec<String>, Span)> = Vec::new();
+        collect_error_types_from_block(&function.body, &mut produced_errors);
+
+        if produced_errors.is_empty() {
+            continue;
+        }
+
+        // Deduplicate error types
+        let mut seen = std::collections::HashSet::new();
+        produced_errors.retain(|(path, _)| seen.insert(path.clone()));
+
+        // Collect error types handled within this function
+        let mut handled_errors: Vec<Vec<String>> = Vec::new();
+        collect_handled_error_types_from_block(&function.body, &mut handled_errors);
+
+        // Check each produced error type against handled ones
+        for (error_path, span) in &produced_errors {
+            let is_handled = handled_errors.iter().any(|handled| {
+                // Exact match or prefix match (handling a parent category handles children)
+                error_path == handled || error_path.starts_with(handled.as_slice())
+            });
+
+            if !is_handled {
+                // Only warn if the error is produced in a non-return context
+                // (returning errors is the expected way to propagate them)
+                let in_return = function.body.statements.iter().any(|s| {
+                    if let Statement::Return(expr, _) = s {
+                        contains_error_path(expr, error_path)
+                    } else {
+                        false
+                    }
+                });
+                if !in_return {
+                    warnings.push(Diagnostic::new(
+                        format!(
+                            "error type `err {}` may not be exhaustively handled",
+                            error_path.join(":")
+                        ),
+                        *span,
+                    ).with_help("consider matching on error types or propagating with `!`"));
+                }
+            }
+        }
+    }
+}
+
+/// Check if an expression contains a specific error path.
+fn contains_error_path(expr: &Expression, target: &[String]) -> bool {
+    match expr {
+        Expression::ErrorValue { path, .. } => path == target,
+        Expression::Ternary { then_branch, else_branch, .. } => {
+            contains_error_path(then_branch, target) || contains_error_path(else_branch, target)
+        }
+        _ => false,
+    }
+}
+
 // ── T3.5: Dead code detection ──────────────────────────────────────────────
 
 /// Get the span of a statement (for warning locations).
@@ -3999,4 +4245,137 @@ fn check_member_access_in_expr(
         }
         _ => {}
     }
+}
+
+// ========== R2.7: Typed Actor Message Validation ==========
+
+/// Walk all function bodies looking for `actor_send(target, "handler_name", ...)` calls.
+/// If the target's actor has a `@messages(TypeName)` annotation, warn when the handler name
+/// is not one of the actor's defined `@handler` methods.
+fn validate_typed_actor_sends(
+    functions: &[Function],
+    globals: &[crate::ast::Binding],
+    actor_handler_names: &HashMap<String, Vec<String>>,
+    actor_message_types: &HashMap<String, String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    if actor_message_types.is_empty() {
+        return;
+    }
+    // Track variable→actor_type across global bindings
+    let mut var_types: HashMap<String, String> = HashMap::new();
+    for global in globals {
+        if let Some(atype) = trace_actor_type_from_expr(&global.value) {
+            var_types.insert(global.name.clone(), atype);
+        }
+        walk_typed_send_expr(&global.value, actor_handler_names, actor_message_types, &var_types, warnings);
+    }
+    for func in functions {
+        let mut local_vars = var_types.clone();
+        walk_typed_send_block(&func.body, actor_handler_names, actor_message_types, &mut local_vars, warnings);
+    }
+}
+
+fn walk_typed_send_block(
+    block: &crate::ast::Block,
+    h: &HashMap<String, Vec<String>>,
+    m: &HashMap<String, String>,
+    vars: &mut HashMap<String, String>,
+    w: &mut Vec<Diagnostic>,
+) {
+    for stmt in &block.statements {
+        match stmt {
+            crate::ast::Statement::Expression(e) => walk_typed_send_expr(e, h, m, vars, w),
+            crate::ast::Statement::Binding(b) => {
+                if let Some(atype) = trace_actor_type_from_expr(&b.value) {
+                    vars.insert(b.name.clone(), atype);
+                }
+                walk_typed_send_expr(&b.value, h, m, vars, w);
+            }
+            crate::ast::Statement::If { condition, body, else_body, .. } => {
+                walk_typed_send_expr(condition, h, m, vars, w);
+                walk_typed_send_block(body, h, m, vars, w);
+                if let Some(eb) = else_body { walk_typed_send_block(eb, h, m, vars, w); }
+            }
+            crate::ast::Statement::While { condition, body, .. } => {
+                walk_typed_send_expr(condition, h, m, vars, w);
+                walk_typed_send_block(body, h, m, vars, w);
+            }
+            crate::ast::Statement::For { iterable, body, .. } => {
+                walk_typed_send_expr(iterable, h, m, vars, w);
+                walk_typed_send_block(body, h, m, vars, w);
+            }
+            _ => {}
+        }
+    }
+    if let Some(ref v) = block.value {
+        walk_typed_send_expr(v, h, m, vars, w);
+    }
+}
+
+fn walk_typed_send_expr(
+    expr: &Expression,
+    h: &HashMap<String, Vec<String>>,
+    m: &HashMap<String, String>,
+    vars: &HashMap<String, String>,
+    w: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        Expression::Call { callee, args, span, .. } => {
+            if let Expression::Identifier(name, _) = callee.as_ref() {
+                if name == "actor_send" && args.len() >= 2 {
+                    if let Expression::String(handler, _) = &args[1] {
+                        let actor_name = trace_actor_type_from_expr(&args[0])
+                            .or_else(|| {
+                                if let Expression::Identifier(var, _) = &args[0] {
+                                    vars.get(var).cloned()
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some(actor_name) = actor_name {
+                            if m.contains_key(&actor_name) {
+                                if let Some(known) = h.get(&actor_name) {
+                                    if !known.contains(handler) {
+                                        w.push(Diagnostic::new(
+                                            format!(
+                                                "actor `{}` has @messages annotation but no handler `@{}`. Known handlers: {}",
+                                                actor_name, handler,
+                                                if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
+                                            ),
+                                            *span,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            walk_typed_send_expr(callee, h, m, vars, w);
+            for arg in args { walk_typed_send_expr(arg, h, m, vars, w); }
+        }
+        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+            walk_typed_send_expr(condition, h, m, vars, w);
+            walk_typed_send_expr(then_branch, h, m, vars, w);
+            walk_typed_send_expr(else_branch, h, m, vars, w);
+        }
+        Expression::Lambda { body, .. } => {
+            let mut inner_vars = vars.clone();
+            walk_typed_send_block(body, h, m, &mut inner_vars, w);
+        }
+        _ => {}
+    }
+}
+
+/// Try to infer actor type name from an expression (e.g. `make_Counter()` → `"Counter"`).
+fn trace_actor_type_from_expr(expr: &Expression) -> Option<String> {
+    if let Expression::Call { callee, .. } = expr {
+        if let Expression::Identifier(name, _) = callee.as_ref() {
+            if name.starts_with("make_") {
+                return Some(name[5..].to_string());
+            }
+        }
+    }
+    None
 }

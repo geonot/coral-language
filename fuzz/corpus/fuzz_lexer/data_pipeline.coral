@@ -1,0 +1,119 @@
+# Data Pipeline - Basic data processing demonstration
+
+# Sample data
+ages is [28, 35, 42, 29, 31, 45, 26, 38]
+names is ['Alice', 'Bob', 'Carol', 'David', 'Eve', 'Frank', 'Grace', 'Henry']
+
+# Helper functions
+*is_senior(age)
+    age >= 30
+
+*get_user_info(index)
+    name is names.get(index)
+    age is ages.get(index)
+    '{name} is {age} years old'
+
+*double_value(x)
+    x * 2
+
+# Basic data operations
+*show_data()
+    log('=== Sample Data ===')
+    log('Ages: {ages}')
+    log('Names: {names}')
+    log('Total records: {ages.length}')
+    log('')
+
+# Individual user analysis
+*analyze_users()
+    log('=== User Analysis ===')
+    
+    # Show individual users
+    log(get_user_info(0))
+    log(get_user_info(1))
+    log(get_user_info(2))
+    log(get_user_info(3))
+    log('')
+    
+    # Check senior status
+    age0 is ages.get(0)
+    senior0 is is_senior(age0)
+    log('Alice is senior: {senior0}')
+    
+    age1 is ages.get(1)
+    senior1 is is_senior(age1)
+    log('Bob is senior: {senior1}')
+    
+    age2 is ages.get(2)
+    senior2 is is_senior(age2)
+    log('Carol is senior: {senior2}')
+    log('')
+
+# Simple transformations
+*transform_data()
+    log('=== Data Transformations ===')
+    
+    # Double some ages
+    original1 is ages.get(0)
+    original2 is ages.get(1) 
+    original3 is ages.get(2)
+    
+    doubled1 is double_value(original1)
+    doubled2 is double_value(original2)
+    doubled3 is double_value(original3)
+    
+    log('Original: {original1}, {original2}, {original3}')
+    log('Doubled:  {doubled1}, {doubled2}, {doubled3}')
+    log('')
+
+# Basic calculations
+*calculate_stats()
+    log('=== Basic Statistics ===')
+    
+    # Simple sum of first few ages
+    age0 is ages.get(0)
+    age1 is ages.get(1)
+    age2 is ages.get(2)
+    age3 is ages.get(3)
+    
+    sum is age0 + age1 + age2 + age3
+    avg is sum / 4
+    
+    log('First 4 ages: {age0}, {age1}, {age2}, {age3}')
+    log('Sum: {sum}')
+    log('Average: {avg}')
+    log('')
+
+# Map operations
+*create_profiles()
+    log('=== User Profiles ===')
+    
+    # Create individual user profiles
+    profile1 is map(
+        'name' is names.get(0),
+        'age' is ages.get(0),
+        'id' is 1
+    )
+    
+    profile2 is map(
+        'name' is names.get(1),
+        'age' is ages.get(1),
+        'id' is 2
+    )
+    
+    log('Profile 1: {profile1.get("name")} (Age: {profile1.get("age")}, ID: {profile1.get("id")})')
+    log('Profile 2: {profile2.get("name")} (Age: {profile2.get("age")}, ID: {profile2.get("id")})')
+    log('')
+
+*main()
+    log('Data Pipeline Demo')
+    log('==================')
+    log('')
+    
+    show_data()
+    analyze_users()
+    transform_data()
+    calculate_stats()
+    create_profiles()
+    
+    log('Demo complete!')

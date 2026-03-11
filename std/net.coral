@@ -81,3 +81,43 @@ err NetworkError
     Timeout
     ReadError
     WriteError
+
+# ─── HTTP Client (L3.1) ─────────────────────────────────
+
+# Perform an HTTP GET request.
+# Returns a map: {"status": <int>, "body": <string>, "headers": <map>}
+# On failure, returns an error value (Http:DnsError, Http:ConnectionFailed, etc.)
+#
+# Example:
+#   resp is http_get("https://api.example.com/data")
+#   print(resp.status)
+#   print(resp.body)
+*get(url)
+    http_get(url)
+
+# Perform an HTTP POST request with a body string.
+# Returns a response map or an error value.
+#
+# Example:
+#   resp is http_post("https://api.example.com/data", '{"key": "value"}')
+*post(url, body)
+    http_post(url, body)
+
+# Perform a generic HTTP request.
+# method: HTTP method string ("GET", "POST", "PUT", "DELETE", etc.)
+# url: the URL string
+# headers: a map of header-name -> header-value (or () for no custom headers)
+# body: a string body (or () for no body)
+#
+# Example:
+#   headers is {"Authorization": "Bearer token123", "Accept": "application/json"}
+#   resp is http_request("PUT", "https://api.example.com/item/1", headers, '{"updated": true}')
+*request(method, url, headers, body)
+    http_request(method, url, headers, body)
+
+err HttpError
+    ConnectionFailed
+    DnsError
+    InvalidUrl
+    Timeout
+    TooManyRedirects

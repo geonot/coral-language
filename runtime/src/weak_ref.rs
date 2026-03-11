@@ -1,222 +1,126 @@
-//! Weak reference implementation for Coral runtime.
+//! Epoch-based weak reference implementation for Coral runtime (M3.5).
 //!
-//! Weak references allow breaking reference cycles in the reference-counted
-//! memory management system. A weak reference does not keep the referent alive,
-//! but can be upgraded to a strong reference if the referent is still alive.
+//! Instead of maintaining a global `Mutex<HashMap>` registry, each `Value` now
+//! carries a 16-bit *epoch* counter.  A `WeakRef` stores `(ptr, epoch_snapshot)`.
+//! Validity is checked by comparing the stored epoch against the current value
+//! of `(*ptr).epoch` — a single memory load + compare, with **no locking**.
+//!
+//! Values that have (or ever had) a weak reference get `FLAG_HAS_WEAK_REFS` set
+//! on their `flags` field.  The runtime guarantees such values are always pooled
+//! rather than freed, so the epoch memory remains accessible for stale WeakRefs.
 
-use std::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 use std::ptr;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
-use crate::ValueHandle;
-
-/// Global registry of weak reference targets.
-/// Maps object addresses to their weak reference metadata.
-static WEAK_REF_REGISTRY: std::sync::OnceLock<Mutex<WeakRefRegistry>> = std::sync::OnceLock::new();
-
-/// Metadata for weak reference tracking.
-struct WeakRefRegistry {
-    /// Maps object address to weak ref count
-    targets: HashMap<usize, WeakTarget>,
-    /// Next unique ID for weak references
-    next_id: u64,
-}
-
-/// Information about a weakly-referenced target.
-struct WeakTarget {
-    /// Number of weak references to this target
-    weak_count: u64,
-    /// Whether the target is still alive
-    alive: bool,
-}
-
-impl Default for WeakRefRegistry {
-    fn default() -> Self {
-        Self {
-            targets: HashMap::new(),
-            next_id: 1,
-        }
-    }
-}
-
-fn registry() -> &'static Mutex<WeakRefRegistry> {
-    WEAK_REF_REGISTRY.get_or_init(|| Mutex::new(WeakRefRegistry::default()))
-}
+use crate::{ValueHandle, FLAG_HAS_WEAK_REFS};
 
 /// A weak reference handle.
-/// 
-/// This can be upgraded to a strong reference if the target is still alive.
-/// The weak reference does not prevent the target from being deallocated.
+///
+/// The weak reference stores a raw pointer and the epoch of the target at
+/// creation time.  Upgrading succeeds only when the target has not been
+/// deallocated (i.e. its epoch has not been incremented).
 #[repr(C)]
 pub struct WeakRef {
-    /// The address of the target value (stored as usize for FFI safety)
-    target_addr: AtomicU64,
-    /// Unique ID for this weak reference
-    id: u64,
+    /// Raw pointer to the target `Value`.
+    target: ValueHandle,
+    /// Epoch snapshot taken when the weak reference was created.
+    epoch: u16,
 }
 
 impl WeakRef {
     /// Create a new weak reference to the given value.
-    /// Returns None if the value is null.
+    /// Returns `None` if the value is null.
     pub fn new(target: ValueHandle) -> Option<Self> {
         if target.is_null() {
             return None;
         }
-        
-        let addr = target as usize;
-        let mut reg = registry().lock().ok()?;
-        
-        // Update or create weak target entry
-        let entry = reg.targets.entry(addr).or_insert(WeakTarget {
-            weak_count: 0,
-            alive: true,
-        });
-        entry.weak_count += 1;
-        
-        let id = reg.next_id;
-        reg.next_id += 1;
-        
-        Some(Self {
-            target_addr: AtomicU64::new(addr as u64),
-            id,
-        })
-    }
-    
-    /// Try to upgrade this weak reference to a strong reference.
-    /// Returns None if the target has been deallocated.
-    pub fn upgrade(&self) -> Option<ValueHandle> {
-        let addr = self.target_addr.load(Ordering::Acquire);
-        if addr == 0 {
-            return None;
-        }
-        
-        let reg = registry().lock().ok()?;
-        let target = reg.targets.get(&(addr as usize))?;
-        
-        if !target.alive {
-            return None;
-        }
-        
-        let handle = addr as ValueHandle;
-        
-        // Retain the value to create a strong reference
+
         unsafe {
-            crate::coral_value_retain(handle);
+            // Mark the value so it will never be freed (always pooled).
+            (*target).flags |= FLAG_HAS_WEAK_REFS;
+            let epoch = (*target).epoch;
+            Some(Self { target, epoch })
         }
-        
-        Some(handle)
     }
-    
+
+    /// Try to upgrade this weak reference to a strong reference.
+    /// Returns `None` if the target has been deallocated.
+    pub fn upgrade(&self) -> Option<ValueHandle> {
+        if self.target.is_null() {
+            return None;
+        }
+
+        // Safety: FLAG_HAS_WEAK_REFS guarantees the memory is still accessible.
+        let current_epoch = unsafe { (*self.target).epoch };
+        if current_epoch != self.epoch {
+            return None;
+        }
+
+        // Still alive — create a strong reference via retain.
+        unsafe {
+            crate::coral_value_retain(self.target);
+        }
+        Some(self.target)
+    }
+
     /// Check if the target is still alive without upgrading.
     pub fn is_alive(&self) -> bool {
-        let addr = self.target_addr.load(Ordering::Acquire);
-        if addr == 0 {
+        if self.target.is_null() {
             return false;
         }
-        
-        if let Ok(reg) = registry().lock() {
-            reg.targets.get(&(addr as usize))
-                .map(|t| t.alive)
-                .unwrap_or(false)
-        } else {
-            false
-        }
+        // Safety: FLAG_HAS_WEAK_REFS guarantees the memory is still accessible.
+        let current_epoch = unsafe { (*self.target).epoch };
+        current_epoch == self.epoch
     }
-    
-    /// Get the unique ID of this weak reference.
-    pub fn id(&self) -> u64 {
-        self.id
+
+    /// Get the stored epoch snapshot.
+    pub fn epoch(&self) -> u16 {
+        self.epoch
     }
 }
 
 impl Clone for WeakRef {
     fn clone(&self) -> Self {
-        let addr = self.target_addr.load(Ordering::Acquire);
-        
-        // Each clone gets its own unique ID and increments weak_count
-        let new_id = if addr != 0 {
-            if let Ok(mut reg) = registry().lock() {
-                if let Some(target) = reg.targets.get_mut(&(addr as usize)) {
-                    target.weak_count += 1;
-                }
-                let id = reg.next_id;
-                reg.next_id += 1;
-                id
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-        
         Self {
-            target_addr: AtomicU64::new(addr),
-            id: new_id,
+            target: self.target,
+            epoch: self.epoch,
         }
     }
 }
 
+// Drop is a no-op — no registry to update.
 impl Drop for WeakRef {
     fn drop(&mut self) {
-        let addr = self.target_addr.load(Ordering::Acquire);
-        if addr == 0 {
-            return;
-        }
-        
-        if let Ok(mut reg) = registry().lock() {
-            if let Some(target) = reg.targets.get_mut(&(addr as usize)) {
-                target.weak_count = target.weak_count.saturating_sub(1);
-                
-                // Clean up entry if no more weak refs and target is dead
-                if target.weak_count == 0 && !target.alive {
-                    reg.targets.remove(&(addr as usize));
-                }
-            }
-        }
+        // Nothing to do. The epoch-based scheme requires no bookkeeping on drop.
     }
 }
 
 /// Notify the weak reference system that a value is being deallocated.
-/// This should be called before actually freeing the memory.
+/// Bumps the epoch counter so that all existing weak references become stale.
+///
+/// Called from the release path **before** the value's payload is torn down.
 pub fn notify_value_deallocated(handle: ValueHandle) {
     if handle.is_null() {
         return;
     }
-    
-    let addr = handle as usize;
-    
-    if let Ok(mut reg) = registry().lock() {
-        if let Some(target) = reg.targets.get_mut(&addr) {
-            target.alive = false;
-            
-            // If no weak refs, remove the entry entirely
-            if target.weak_count == 0 {
-                reg.targets.remove(&addr);
-            }
-        }
+    unsafe {
+        // Wrapping increment — u16 overflow is fine (see module doc).
+        (*handle).epoch = (*handle).epoch.wrapping_add(1);
     }
 }
 
 /// Get the number of weak references to a value.
-pub fn weak_ref_count(handle: ValueHandle) -> u64 {
-    if handle.is_null() {
-        return 0;
-    }
-    
-    let addr = handle as usize;
-    
-    if let Ok(reg) = registry().lock() {
-        reg.targets.get(&addr).map(|t| t.weak_count).unwrap_or(0)
-    } else {
-        0
-    }
+///
+/// With the epoch-based scheme there is no central registry to query, so this
+/// always returns 0.  Kept for API compatibility.
+pub fn weak_ref_count(_handle: ValueHandle) -> u64 {
+    0
 }
 
-// FFI exports for the Coral language
+// ── FFI exports ──────────────────────────────────────────────────────────────
 
 /// Create a weak reference to a value.
-/// Returns a pointer to the WeakRef, or null if creation failed.
+/// Returns a pointer to the `WeakRef`, or null if creation failed.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_make_weak_ref(target: ValueHandle) -> *mut WeakRef {
     match WeakRef::new(target) {
@@ -232,7 +136,6 @@ pub extern "C" fn coral_weak_ref_upgrade(weak: *mut WeakRef) -> ValueHandle {
     if weak.is_null() {
         return ptr::null_mut();
     }
-    
     let weak_ref = unsafe { &*weak };
     weak_ref.upgrade().unwrap_or(ptr::null_mut())
 }
@@ -244,7 +147,6 @@ pub extern "C" fn coral_weak_ref_is_alive(weak: *mut WeakRef) -> u8 {
     if weak.is_null() {
         return 0;
     }
-    
     let weak_ref = unsafe { &*weak };
     if weak_ref.is_alive() { 1 } else { 0 }
 }
@@ -255,7 +157,6 @@ pub extern "C" fn coral_weak_ref_release(weak: *mut WeakRef) {
     if weak.is_null() {
         return;
     }
-    
     unsafe {
         drop(Box::from_raw(weak));
     }
@@ -268,7 +169,6 @@ pub extern "C" fn coral_weak_ref_clone(weak: *mut WeakRef) -> *mut WeakRef {
     if weak.is_null() {
         return ptr::null_mut();
     }
-    
     let weak_ref = unsafe { &*weak };
     Box::into_raw(Box::new(weak_ref.clone()))
 }
@@ -277,28 +177,28 @@ pub extern "C" fn coral_weak_ref_clone(weak: *mut WeakRef) -> *mut WeakRef {
 mod tests {
     use super::*;
     use crate::{coral_make_number, coral_value_release};
-    
+
     #[test]
     fn test_weak_ref_creation() {
         let value = coral_make_number(42.0);
         let weak = WeakRef::new(value);
-        
+
         assert!(weak.is_some());
         let weak = weak.unwrap();
         assert!(weak.is_alive());
-        
+
         // Clean up
         unsafe { coral_value_release(value); }
     }
-    
+
     #[test]
     fn test_weak_ref_upgrade_alive() {
         let value = coral_make_number(42.0);
         let weak = WeakRef::new(value).unwrap();
-        
+
         let upgraded = weak.upgrade();
         assert!(upgraded.is_some());
-        
+
         // Clean up both the original and upgraded references
         unsafe {
             if let Some(up) = upgraded {
@@ -307,7 +207,7 @@ mod tests {
             coral_value_release(value);
         }
     }
-    
+
     #[test]
     fn test_weak_ref_null_input() {
         let weak = WeakRef::new(ptr::null_mut());
@@ -315,82 +215,80 @@ mod tests {
     }
 
     #[test]
-    fn test_weak_ref_clone_gets_unique_id() {
+    fn test_weak_ref_invalidated_after_deallocation() {
         let value = coral_make_number(99.0);
         let weak = WeakRef::new(value).unwrap();
-        let cloned = weak.clone();
-
-        // Each WeakRef should have a distinct ID
-        assert_ne!(weak.id(), cloned.id(), "clone must get a unique ID");
-        // Both should be alive
         assert!(weak.is_alive());
+
+        // Simulate deallocation — bumps epoch
+        notify_value_deallocated(value);
+
+        assert!(!weak.is_alive(), "weak ref must be stale after epoch bump");
+        assert!(weak.upgrade().is_none(), "upgrade must fail after deallocation");
+
+        // Memory is still pooled (FLAG_HAS_WEAK_REFS), so we can safely
+        // release the value.
+        unsafe { coral_value_release(value); }
+    }
+
+    #[test]
+    fn test_weak_ref_clone_both_invalidated() {
+        let value = coral_make_number(7.0);
+        let original = WeakRef::new(value).unwrap();
+        let cloned = original.clone();
+
+        assert!(original.is_alive());
         assert!(cloned.is_alive());
 
-        drop(weak);
+        // Bump epoch — invalidates both
+        notify_value_deallocated(value);
+
+        assert!(!original.is_alive());
+        assert!(!cloned.is_alive());
+
+        drop(original);
         drop(cloned);
         unsafe { coral_value_release(value); }
     }
 
     #[test]
-    fn test_weak_ref_clone_survives_original_drop() {
-        let value = coral_make_number(7.0);
-        let original = WeakRef::new(value).unwrap();
-        let cloned = original.clone();
-
-        // Drop the original — clone should still be alive
-        drop(original);
-        assert!(cloned.is_alive(), "clone must survive after original is dropped");
-
-        // Upgrade should still succeed since the target value is alive
-        let upgraded = cloned.upgrade();
-        assert!(upgraded.is_some(), "upgrade should succeed on live clone");
-
-        drop(cloned);
-        unsafe {
-            if let Some(up) = upgraded {
-                coral_value_release(up);
-            }
-            coral_value_release(value);
-        }
-    }
-
-    #[test]
-    fn test_weak_ref_registry_cleanup_after_all_clones_dropped() {
+    fn test_weak_ref_epoch_no_lock_required() {
+        // Epoch-based: creating, checking, and dropping weak refs requires no
+        // mutex and no HashMap.  This test just exercises the path to confirm
+        // no deadlock or panic happens.
         let value = coral_make_number(3.14);
-        let addr = value as usize;
         let w1 = WeakRef::new(value).unwrap();
         let w2 = w1.clone();
         let w3 = w2.clone();
 
-        // All three point to the same target
         assert!(w1.is_alive());
         assert!(w2.is_alive());
         assert!(w3.is_alive());
 
-        // Invalidate the target
-        super::notify_value_deallocated(value);
+        notify_value_deallocated(value);
 
-        // All should report not alive
         assert!(!w1.is_alive());
         assert!(!w2.is_alive());
         assert!(!w3.is_alive());
 
-        // Drop two — registry entry should NOT be removed yet (one remaining)
         drop(w1);
         drop(w2);
-        {
-            let reg = registry().lock().unwrap();
-            assert!(reg.targets.contains_key(&addr),
-                "entry should still exist with one weak ref remaining");
-        }
-
-        // Drop last — entry should be cleaned up
         drop(w3);
-        {
-            let reg = registry().lock().unwrap();
-            assert!(!reg.targets.contains_key(&addr),
-                "entry should be removed after all weak refs dropped");
-        }
+        unsafe { coral_value_release(value); }
+    }
+
+    #[test]
+    fn test_flag_has_weak_refs_set() {
+        let value = coral_make_number(1.0);
+        // Before creating a weak ref, flag should be 0
+        let flags_before = unsafe { (*value).flags };
+        assert_eq!(flags_before & FLAG_HAS_WEAK_REFS, 0);
+
+        let _weak = WeakRef::new(value).unwrap();
+
+        let flags_after = unsafe { (*value).flags };
+        assert_ne!(flags_after & FLAG_HAS_WEAK_REFS, 0,
+            "FLAG_HAS_WEAK_REFS must be set after creating a weak ref");
 
         unsafe { coral_value_release(value); }
     }

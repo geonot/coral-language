@@ -70,6 +70,16 @@ struct Args {
     /// C4.4: Enable link-time optimization (runs LLVM optimization passes on the IR)
     #[arg(long = "lto")]
     lto: bool,
+
+    /// C4.5: Instrument the output for profile collection (PGO generation).
+    /// The resulting binary writes a `default.profraw` file on exit.
+    #[arg(long = "pgo-gen")]
+    pgo_gen: bool,
+
+    /// C4.5: Apply profile-guided optimization using the given .profdata file.
+    /// Use `llvm-profdata merge default.profraw -o default.profdata` to create it.
+    #[arg(long = "pgo-use", value_name = "PROFDATA")]
+    pgo_use: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -91,6 +101,26 @@ fn main() -> anyhow::Result<()> {
                 };
                 coralc::compiler::optimize_module(&ir, opt_level)
                     .map_err(|e| anyhow::anyhow!("LTO optimization failed: {}", e))?
+            } else {
+                ir
+            };
+
+            // C4.5: Apply PGO instrumentation or profile-guided optimization.
+            let ir = if args.pgo_gen {
+                coralc::compiler::instrument_for_pgo(&ir)
+                    .map_err(|e| anyhow::anyhow!("PGO instrumentation failed: {}", e))?
+            } else if let Some(ref profdata) = args.pgo_use {
+                let opt_level = match args.opt_level.unwrap_or(2) {
+                    0 | 1 => coralc::compiler::LtoOptLevel::O1,
+                    2 => coralc::compiler::LtoOptLevel::O2,
+                    _ => coralc::compiler::LtoOptLevel::O3,
+                };
+                coralc::compiler::optimize_with_profile(
+                    &ir,
+                    &profdata.to_string_lossy(),
+                    opt_level,
+                )
+                .map_err(|e| anyhow::anyhow!("PGO optimization failed: {}", e))?
             } else {
                 ir
             };

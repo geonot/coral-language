@@ -146,6 +146,109 @@ pub fn optimize_module(ir: &str, opt_level: LtoOptLevel) -> Result<String, Strin
     Ok(module.print_to_string().to_string())
 }
 
+/// C4.5: Instrument an LLVM IR module for profile collection (PGO generation).
+///
+/// Inserts profiling counters into the IR so that running the resulting binary
+/// produces a `default.profraw` file.  The raw profile can be merged with
+/// `llvm-profdata merge` into a `.profdata` file for use with
+/// [`optimize_with_profile`].
+///
+/// The pass pipeline is `"pgo-instr-gen,instrprof"`.
+pub fn instrument_for_pgo(ir: &str) -> Result<String, String> {
+    use inkwell::targets::{InitializationConfig, Target, TargetMachine};
+    use inkwell::OptimizationLevel;
+    use inkwell::passes::PassBuilderOptions;
+
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| format!("failed to initialize native target: {}", e))?;
+
+    let context = Context::create();
+    let memory_buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        ir.as_bytes(),
+        "input_ir",
+    );
+    let module = context.create_module_from_ir(memory_buffer)
+        .map_err(|e| format!("failed to parse IR: {}", e))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple)
+        .map_err(|e| format!("failed to create target from triple: {}", e))?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            inkwell::targets::RelocMode::Default,
+            inkwell::targets::CodeModel::Default,
+        )
+        .ok_or_else(|| "failed to create target machine".to_string())?;
+
+    let pass_options = PassBuilderOptions::create();
+    pass_options.set_verify_each(false);
+
+    module
+        .run_passes("pgo-instr-gen,instrprof", &machine, pass_options)
+        .map_err(|e| format!("PGO instrumentation pass failed: {}", e))?;
+
+    Ok(module.print_to_string().to_string())
+}
+
+/// C4.5: Optimize an LLVM IR module using collected profile data (PGO use).
+///
+/// Reads a `.profdata` file (produced by `llvm-profdata merge`) and applies
+/// profile-guided optimizations: hot paths get aggressive inlining and
+/// vectorization while cold paths are optimized for size.
+pub fn optimize_with_profile(ir: &str, profdata_path: &str, opt_level: LtoOptLevel) -> Result<String, String> {
+    use inkwell::targets::{InitializationConfig, Target, TargetMachine};
+    use inkwell::OptimizationLevel;
+    use inkwell::passes::PassBuilderOptions;
+
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| format!("failed to initialize native target: {}", e))?;
+
+    let context = Context::create();
+    let memory_buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+        ir.as_bytes(),
+        "input_ir",
+    );
+    let module = context.create_module_from_ir(memory_buffer)
+        .map_err(|e| format!("failed to parse IR: {}", e))?;
+
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple)
+        .map_err(|e| format!("failed to create target from triple: {}", e))?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Aggressive,
+            inkwell::targets::RelocMode::Default,
+            inkwell::targets::CodeModel::Default,
+        )
+        .ok_or_else(|| "failed to create target machine".to_string())?;
+
+    let pass_options = PassBuilderOptions::create();
+    pass_options.set_verify_each(false);
+    pass_options.set_loop_vectorization(true);
+    pass_options.set_loop_unrolling(true);
+    pass_options.set_merge_functions(true);
+
+    // Pipeline: apply PGO instrumentation-use pass, then default optimization
+    let pipeline = format!(
+        "pgo-instr-use<profile-file={}>,{}",
+        profdata_path,
+        opt_level.pipeline_string()
+    );
+
+    module
+        .run_passes(&pipeline, &machine, pass_options)
+        .map_err(|e| format!("PGO optimization pass failed: {}", e))?;
+
+    Ok(module.print_to_string().to_string())
+}
+
 /// Known pure builtin functions and their constant-evaluation rules.
 fn is_pure_builtin(name: &str) -> Option<Purity> {
     match name {

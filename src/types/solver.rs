@@ -448,6 +448,8 @@ fn enforce_numeric(ty: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
     match resolved {
         TypeId::Primitive(Primitive::Int) | TypeId::Primitive(Primitive::Float) => Ok(()),
         TypeId::Primitive(Primitive::Any) | TypeId::Unknown => Ok(()),
+        // Error types pass through numeric checks — error values flow through any expression path.
+        TypeId::Error(_) => Ok(()),
         TypeId::TypeVar(var) => {
             // Default unresolved numeric to Float.
             graph.bind(var, TypeId::Primitive(Primitive::Float));
@@ -462,6 +464,8 @@ fn enforce_boolean(ty: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
     match resolved {
         TypeId::Primitive(Primitive::Bool) => Ok(()),
         TypeId::Primitive(Primitive::Any) | TypeId::Unknown => Ok(()),
+        // Error types pass through boolean checks.
+        TypeId::Error(_) => Ok(()),
         TypeId::TypeVar(var) => {
             graph.bind(var, TypeId::Primitive(Primitive::Bool));
             Ok(())
@@ -540,6 +544,14 @@ fn unify(a: TypeId, b: TypeId, graph: &mut TypeGraph, span: Span) -> Result<(), 
                 Err(TypeError::mismatch(&ra, &rb, span))
             }
         }
+
+        // Error type unification: all error types are compatible with each other.
+        // Different error taxonomy paths coexist (discriminated at runtime via NaN-boxing).
+        (TypeId::Error(_), TypeId::Error(_)) => Ok(()),
+
+        // Error types unify with any other type (errors are values in the NaN-box channel).
+        // This allows functions to return errors from any code path.
+        (TypeId::Error(_), _) | (_, TypeId::Error(_)) => Ok(()),
 
         // List unification.
         (TypeId::List(ae), TypeId::List(be)) => unify(*ae.clone(), *be.clone(), graph, span),
@@ -637,6 +649,7 @@ pub fn resolve(ty: TypeId, graph: &mut TypeGraph) -> TypeId {
             let args_r: Vec<TypeId> = args.into_iter().map(|a| resolve(a, graph)).collect();
             TypeId::Adt(name, args_r)
         }
+        // Error types are concrete, no inner types to resolve.
         other => other,
     }
 }

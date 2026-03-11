@@ -569,6 +569,130 @@ impl StoreEngine {
     pub fn close(mut self) -> io::Result<()> {
         self.save()
     }
+
+    /// R3.2: Compact the WAL by merging entries and keeping only the latest
+    /// version of each object.  Removes superseded Insert/Update entries and
+    /// entries for objects that have been deleted (since those are already
+    /// persisted by `save()`).
+    ///
+    /// Returns `(old_size, new_size)` in bytes.
+    pub fn compact_wal(&mut self) -> io::Result<(u64, u64)> {
+        // Ensure all in-memory state is persisted first
+        self.save()?;
+
+        let wal_dir = self.config.wal_path();
+        if !wal_dir.exists() {
+            return Ok((0, 0));
+        }
+        let wal_writer = match self.wal_writer {
+            Some(ref w) => w,
+            None => return Ok((0, 0)),
+        };
+
+        // Measure old WAL size
+        let old_size = Self::total_wal_size(&wal_dir)?;
+        if old_size == 0 {
+            return Ok((0, 0));
+        }
+
+        // Read all WAL entries
+        let reader = match WalReader::open(&wal_dir) {
+            Ok(r) => r,
+            Err(_) => return Ok((old_size, old_size)),
+        };
+        let entries_iter = reader.entries_from(0)?;
+
+        // Keep only the latest entry per object index.
+        // Commit/Checkpoint entries are dropped (they will be re-emitted).
+        use std::collections::BTreeMap;
+        let mut latest: BTreeMap<u64, WalEntry> = BTreeMap::new();
+        for result in entries_iter {
+            let entry = match result {
+                Ok(e) => e,
+                Err(_) => continue, // skip corrupt entries
+            };
+            match entry.op_type {
+                super::WalOpType::Commit | super::WalOpType::Checkpoint => continue,
+                super::WalOpType::Delete => {
+                    // For deletes, keep them so recovery knows the object is gone
+                    latest.insert(entry.index, entry);
+                }
+                _ => {
+                    // Insert/Update: keep the latest by LSN
+                    let replace = match latest.get(&entry.index) {
+                        Some(existing) => entry.lsn > existing.lsn,
+                        None => true,
+                    };
+                    if replace {
+                        latest.insert(entry.index, entry);
+                    }
+                }
+            }
+        }
+
+        // Remove entries for objects whose latest op is Delete AND are already
+        // persisted (the save() call above ensures this).
+        // We keep Delete entries only if the object might need recovery info.
+        // Since we just saved, deletions are in the index — we can drop them.
+        latest.retain(|_idx, entry| entry.op_type != super::WalOpType::Delete);
+
+        // Write compacted WAL: remove all old segments and create a fresh one
+        // First close the current WAL writer
+        drop(self.wal_writer.take());
+
+        // Remove all existing WAL files
+        for dir_entry in fs::read_dir(&wal_dir)? {
+            let dir_entry = dir_entry?;
+            let name = dir_entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("wal-") && name.ends_with(".log") {
+                fs::remove_file(dir_entry.path())?;
+            }
+        }
+
+        // Create a new WAL writer (starts at segment 0, LSN 1)
+        let mut new_wal = WalWriter::open(&wal_dir, &self.store_type)?;
+
+        // Replay compacted entries with fresh LSNs
+        for (_idx, entry) in &latest {
+            let new_lsn = new_wal.next_lsn();
+            let new_entry = WalEntry {
+                lsn: new_lsn,
+                op_type: entry.op_type,
+                timestamp_ms: entry.timestamp_ms,
+                index: entry.index,
+                uuid: entry.uuid.clone(),
+                payload: entry.payload.clone(),
+            };
+            new_wal.write_entry(&new_entry)?;
+        }
+
+        // Commit the compacted WAL
+        new_wal.commit()?;
+
+        self.wal_writer = Some(new_wal);
+
+        let new_size = Self::total_wal_size(&wal_dir)?;
+
+        Ok((old_size, new_size))
+    }
+
+    /// Calculate total WAL size across all segment files.
+    fn total_wal_size(wal_dir: &std::path::Path) -> io::Result<u64> {
+        let mut total = 0u64;
+        if !wal_dir.exists() {
+            return Ok(0);
+        }
+        for entry in fs::read_dir(wal_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("wal-") && name.ends_with(".log") {
+                total += entry.metadata()?.len();
+            }
+        }
+        Ok(total)
+    }
 }
 
 /// Store statistics
@@ -648,6 +772,11 @@ impl SharedStoreEngine {
     
     pub fn stats(&self) -> StoreStats {
         self.inner.read().unwrap().stats()
+    }
+
+    /// R3.2: Compact the WAL (thread-safe wrapper).
+    pub fn compact_wal(&self) -> io::Result<(u64, u64)> {
+        self.inner.write().unwrap().compact_wal()
     }
 }
 
@@ -862,6 +991,152 @@ mod tests {
             assert!(engine.count() >= 1);
         }
         
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_compact_wal_reduces_size() {
+        let path = unique_test_path("compact_size");
+        let _ = fs::remove_dir_all(&path);
+
+        let config = StoreConfig::minimal("CompactSize", &path);
+        let mut engine = StoreEngine::open("CompactSize", "default", config).unwrap();
+
+        // Create an object, then update it many times to bloat the WAL
+        let idx = engine.create(vec![
+            ("counter".to_string(), StoredValue::Int(0)),
+        ]).unwrap();
+
+        for i in 1..=50 {
+            engine.update_field(idx, "counter", StoredValue::Int(i)).unwrap();
+        }
+
+        // Compact — should keep only the latest update
+        let (old_size, new_size) = engine.compact_wal().unwrap();
+        assert!(old_size > 0, "WAL should have had data before compaction");
+        assert!(new_size < old_size, "Compacted WAL ({new_size}) should be smaller than original ({old_size})");
+
+        // Verify latest value is intact
+        let obj = engine.get(idx).unwrap().unwrap();
+        let counter = obj.fields.iter().find(|(n, _)| n == "counter").unwrap();
+        assert_eq!(counter.1, StoredValue::Int(50));
+
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_compact_wal_preserves_data_integrity() {
+        let path = unique_test_path("compact_integrity");
+        let _ = fs::remove_dir_all(&path);
+
+        let config = StoreConfig::minimal("CompactInteg", &path);
+        let mut engine = StoreEngine::open("CompactInteg", "default", config.clone()).unwrap();
+
+        // Create several objects
+        let idx1 = engine.create(vec![
+            ("name".to_string(), StoredValue::String("Alice".to_string())),
+            ("score".to_string(), StoredValue::Int(100)),
+        ]).unwrap();
+
+        let idx2 = engine.create(vec![
+            ("name".to_string(), StoredValue::String("Bob".to_string())),
+            ("score".to_string(), StoredValue::Int(200)),
+        ]).unwrap();
+
+        let idx3 = engine.create(vec![
+            ("name".to_string(), StoredValue::String("Charlie".to_string())),
+            ("score".to_string(), StoredValue::Int(300)),
+        ]).unwrap();
+
+        // Update some of them
+        engine.update_field(idx1, "score", StoredValue::Int(150)).unwrap();
+        engine.update_field(idx2, "score", StoredValue::Int(250)).unwrap();
+
+        // Delete one
+        engine.delete(idx3).unwrap();
+
+        // Compact
+        engine.compact_wal().unwrap();
+
+        // Verify all data is correct after compaction
+        let a = engine.get(idx1).unwrap().unwrap();
+        let a_score = a.fields.iter().find(|(n, _)| n == "score").unwrap();
+        assert_eq!(a_score.1, StoredValue::Int(150));
+
+        let b = engine.get(idx2).unwrap().unwrap();
+        let b_score = b.fields.iter().find(|(n, _)| n == "score").unwrap();
+        assert_eq!(b_score.1, StoredValue::Int(250));
+
+        let c = engine.get(idx3).unwrap().unwrap();
+        assert!(c.is_deleted());
+
+        // Engine should still work for new operations after compaction
+        let idx4 = engine.create(vec![
+            ("name".to_string(), StoredValue::String("Diana".to_string())),
+        ]).unwrap();
+        assert!(idx4 > idx3);
+        let d = engine.get(idx4).unwrap().unwrap();
+        let d_name = d.fields.iter().find(|(n, _)| n == "name").unwrap();
+        assert_eq!(d_name.1, StoredValue::String("Diana".to_string()));
+
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_compact_wal_concurrent_read() {
+        let path = unique_test_path("compact_concurrent");
+        let _ = fs::remove_dir_all(&path);
+
+        let config = StoreConfig::minimal("CompactConc", &path);
+        let engine = StoreEngine::open("CompactConc", "default", config).unwrap();
+        let shared = SharedStoreEngine::new(engine);
+
+        // Create objects and update them to build WAL entries
+        for i in 0..10 {
+            let idx = shared.create(vec![
+                ("val".to_string(), StoredValue::Int(i)),
+            ]).unwrap();
+            // Update each a few times
+            for j in 1..=5 {
+                shared.update_field(idx, "val", StoredValue::Int(i * 100 + j)).unwrap();
+            }
+        }
+
+        // Spawn a reader thread that continuously reads while we compact
+        let reader = shared.clone();
+        let read_handle = std::thread::spawn(move || {
+            let mut reads = 0u32;
+            for _ in 0..100 {
+                for idx in 1..=10 {
+                    if let Ok(Some(obj)) = reader.get(idx) {
+                        // Just verify we got a valid object back
+                        assert_eq!(obj.index, idx);
+                        reads += 1;
+                    }
+                }
+            }
+            reads
+        });
+
+        // Compact in the main thread
+        let result = shared.compact_wal();
+        assert!(result.is_ok(), "Compaction should succeed: {:?}", result.err());
+
+        // Wait for reader
+        let reads = read_handle.join().expect("Reader thread should not panic");
+        assert!(reads > 0, "Reader should have completed some reads");
+
+        // Verify data is still intact after concurrent access
+        for idx in 1..=10u64 {
+            let obj = shared.get(idx).unwrap().unwrap();
+            let val = obj.fields.iter().find(|(n, _)| n == "val").unwrap();
+            if let StoredValue::Int(v) = &val.1 {
+                assert_eq!(*v, (idx as i64 - 1) * 100 + 5, "Object {idx} should have final update value");
+            } else {
+                panic!("Expected Int value for object {idx}");
+            }
+        }
+
         let _ = fs::remove_dir_all(&path);
     }
 }

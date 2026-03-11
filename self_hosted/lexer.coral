@@ -19,8 +19,8 @@ use std.char
 
 # ─── Token Constructor ─────────────────────────────────────────────
 
-*make_token(kind, value, start, end)
-	return map("kind" is kind, "value" is value, "start" is start, "end" is end)
+*make_token(kind, value, start, end_pos)
+	return map("kind" is kind, "value" is value, "start" is start, "end" is end_pos)
 
 # ─── Lexer State ────────────────────────────────────────────────────
 # The lexer is implemented as a set of functions that operate on

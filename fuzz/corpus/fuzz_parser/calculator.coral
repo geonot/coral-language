@@ -1,0 +1,76 @@
+# Calculator - Demonstrating arithmetic operations and conditional logic
+
+# Basic arithmetic operations
+*add(a, b)
+    a + b
+
+*subtract(a, b)
+    a - b
+
+*multiply(a, b)
+    a * b
+
+*divide(a, b)
+    b.equals(0) ? 0 ! a / b
+
+*modulo(a, b)
+    b.equals(0) ? 0 ! a % b
+
+# Calculate result based on operator character
+*calculate(left, op, right)
+    match op
+        '+' ? add(left, right)
+        '-' ? subtract(left, right)
+        '*' ? multiply(left, right)
+        '/' ? divide(left, right)
+        '%' ? modulo(left, right)
+        _ ? 0
+
+# Demo with different operations
+*demo()
+    log('Calculator Demo')
+    log('==============')
+    log('')
+    
+    # Test basic operations
+    a is 20
+    b is 8
+    
+    log('Numbers: a = {a}, b = {b}')
+    log('')
+    log('Addition: a + b = {add(a, b)}')
+    log('Subtraction: a - b = {subtract(a, b)}')
+    log('Multiplication: a * b = {multiply(a, b)}')
+    log('Division: a / b = {divide(a, b)}')
+    log('Modulo: a % b = {modulo(a, b)}')
+    log('')
+    
+    # Test with operators
+    log('Using calculate function:')
+    log('calculate(10, "+", 5) = {calculate(10, "+", 5)}')
+    log('calculate(10, "-", 3) = {calculate(10, "-", 3)}')
+    log('calculate(6, "*", 7) = {calculate(6, "*", 7)}')
+    log('calculate(15, "/", 3) = {calculate(15, "/", 3)}')
+    log('calculate(17, "%", 5) = {calculate(17, "%", 5)}')
+    log('')
+    
+    # Test division by zero safety
+    log('Safety tests:')
+    log('divide(10, 0) = {divide(10, 0)}')
+    log('modulo(10, 0) = {modulo(10, 0)}')
+    log('')
+    
+    # Test conditional logic
+    x is 42
+    y is 40
+    bigger is x > y ? x ! y
+    log('The bigger of {x} and {y} is: {bigger}')
+    
+    result is x > 50 ? 'large' ! 'small or medium'
+    log('{x} is {result}')
+    
+    log('')
+    log('Calculator demo complete!')
+
+*main()
+    demo()

@@ -65,7 +65,13 @@ pub extern "C" fn coral_actor_spawn(handler: ValueHandle) -> ValueHandle {
                     });
                     break;
                 }
-                Some(actor::Message::ActorDown { .. }) => { /* ignored */ }
+                Some(actor::Message::ActorDown { actor_id, reason }) => {
+                    let down_msg = make_actor_down_value(actor_id, &reason);
+                    let args = [self_value, down_msg];
+                    let result = coral_closure_invoke(handler, args.as_ptr(), args.len());
+                    unsafe { coral_value_release(result); }
+                    unsafe { coral_value_release(down_msg); }
+                }
             }
         }
         unsafe { coral_value_release(self_value); }
@@ -220,7 +226,13 @@ pub extern "C" fn coral_actor_spawn_named(name_value: ValueHandle, handler: Valu
                     });
                     break;
                 }
-                Some(actor::Message::ActorDown { .. }) => { /* ignored */ }
+                Some(actor::Message::ActorDown { actor_id, reason }) => {
+                    let down_msg = make_actor_down_value(actor_id, &reason);
+                    let args = [self_value, down_msg];
+                    let result = coral_closure_invoke(handler, args.as_ptr(), args.len());
+                    unsafe { coral_value_release(result); }
+                    unsafe { coral_value_release(down_msg); }
+                }
             }
         }
         unsafe { coral_value_release(self_value); }
@@ -534,5 +546,87 @@ pub extern "C" fn coral_main_wait() -> ValueHandle {
         done = cvar.wait(done).unwrap();
     }
     coral_make_unit()
+}
+
+// ── R2.4 Cooperative Yielding ─────────────────────────────────────────────────
+
+// ========== Actor Monitoring (R2.8) ==========
+
+/// Register `watcher` to be notified when `target` dies.
+/// Both arguments are actor values.  Returns true on success, false on bad input.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_monitor(watcher_value: ValueHandle, target_value: ValueHandle) -> ValueHandle {
+    if watcher_value.is_null() || target_value.is_null() {
+        return coral_make_bool(0);
+    }
+    let Some(watcher_obj) = actor_from_value(unsafe { &*watcher_value }) else {
+        return coral_make_bool(0);
+    };
+    let Some(target_obj) = actor_from_value(unsafe { &*target_value }) else {
+        return coral_make_bool(0);
+    };
+    watcher_obj.system.monitor(watcher_obj.handle.id, target_obj.handle.id);
+    coral_make_bool(1)
+}
+
+/// Unregister `watcher` from death notifications of `target`.
+/// Both arguments are actor values.  Returns true on success, false on bad input.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_demonitor(watcher_value: ValueHandle, target_value: ValueHandle) -> ValueHandle {
+    if watcher_value.is_null() || target_value.is_null() {
+        return coral_make_bool(0);
+    }
+    let Some(watcher_obj) = actor_from_value(unsafe { &*watcher_value }) else {
+        return coral_make_bool(0);
+    };
+    let Some(target_obj) = actor_from_value(unsafe { &*target_value }) else {
+        return coral_make_bool(0);
+    };
+    watcher_obj.system.demonitor(watcher_obj.handle.id, target_obj.handle.id);
+    coral_make_bool(1)
+}
+
+/// Build an `ActorDown` map value: `{"type": "actor_down", "actor_id": <id>, "reason": <reason>}`
+pub(crate) fn make_actor_down_value(actor_id: actor::ActorId, reason: &str) -> ValueHandle {
+    let type_key = coral_make_string_from_rust("type");
+    let type_val = coral_make_string_from_rust("actor_down");
+    let id_key = coral_make_string_from_rust("actor_id");
+    let id_val = coral_make_number(actor_id.0 as f64);
+    let reason_key = coral_make_string_from_rust("reason");
+    let reason_val = coral_make_string_from_rust(reason);
+    let entries = [
+        MapEntry { key: type_key, value: type_val },
+        MapEntry { key: id_key, value: id_val },
+        MapEntry { key: reason_key, value: reason_val },
+    ];
+    coral_make_map(entries.as_ptr(), entries.len())
+}
+
+// ========== Cooperative Yielding (R2.4) ==========
+
+/// Yield‐check counter.  Incremented at every loop back-edge inside actor
+/// handlers.  When the counter exceeds the threshold the current thread yields
+/// to the OS scheduler, allowing other actors on the same worker to run.
+///
+/// The counter is thread-local so there is **no contention** between workers.
+const YIELD_THRESHOLD: u32 = 1000;
+
+thread_local! {
+    static YIELD_COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Called by codegen at loop back-edges inside actor handler functions.
+/// Increments a per-thread counter and yields after `YIELD_THRESHOLD` iterations.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_actor_yield_check() {
+    YIELD_COUNTER.with(|c| {
+        let val = c.get().wrapping_add(1);
+        if val >= YIELD_THRESHOLD {
+            c.set(0);
+            std::thread::yield_now();
+        } else {
+            c.set(val);
+        }
+    });
 }
 

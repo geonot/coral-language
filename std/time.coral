@@ -43,8 +43,8 @@
 *measure(f)
 	start is now()
 	f()
-	end is now()
-	end - start
+	finish is now()
+	finish - start
 
 # Sleep for a given number of milliseconds (blocking)
 # Note: For non-blocking delays in actors, use timer_send_after

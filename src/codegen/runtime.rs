@@ -231,6 +231,11 @@ pub struct RuntimeBindings<'ctx> {
     pub bytes_slice_val: FunctionValue<'ctx>,
     // Type reflection
     pub type_of: FunctionValue<'ctx>,
+    // Debug introspection (L4.1)
+    pub debug_inspect: FunctionValue<'ctx>,
+    pub debug_time_ns: FunctionValue<'ctx>,
+    // Cooperative yielding (R2.4)
+    pub actor_yield_check: FunctionValue<'ctx>,
     // Character operations
     pub string_ord: FunctionValue<'ctx>,
     pub string_chr: FunctionValue<'ctx>,
@@ -289,6 +294,10 @@ pub struct RuntimeBindings<'ctx> {
     pub tcp_read: FunctionValue<'ctx>,
     pub tcp_write: FunctionValue<'ctx>,
     pub tcp_close: FunctionValue<'ctx>,
+    // HTTP client (L3.1)
+    pub http_get: FunctionValue<'ctx>,
+    pub http_post: FunctionValue<'ctx>,
+    pub http_request: FunctionValue<'ctx>,
     // Actor monitoring (AC-2)
     pub actor_monitor: FunctionValue<'ctx>,
     pub actor_demonitor: FunctionValue<'ctx>,
@@ -1517,6 +1526,26 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Debug introspection (L4.1)
+        let debug_inspect = module.add_function(
+            "coral_debug_inspect",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let debug_time_ns = module.add_function(
+            "coral_debug_time_ns",
+            value_ptr_type.fn_type(&[], false),
+            None,
+        );
+
+        // Cooperative yielding (R2.4) — void function, no args
+        let void_type = context.void_type();
+        let actor_yield_check = module.add_function(
+            "coral_actor_yield_check",
+            void_type.fn_type(&[], false),
+            None,
+        );
+
         // Character operations
         let string_ord = module.add_function(
             "coral_string_ord",
@@ -1800,6 +1829,23 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // HTTP client (L3.1)
+        let http_get = module.add_function(
+            "coral_http_get",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let http_post = module.add_function(
+            "coral_http_post",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let http_request = module.add_function(
+            "coral_http_request",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+
         // Actor monitoring (AC-2)
         let actor_monitor = module.add_function(
             "coral_actor_monitor",
@@ -2011,6 +2057,9 @@ impl<'ctx> RuntimeBindings<'ctx> {
             bytes_to_string,
             bytes_slice_val,
             type_of,
+            debug_inspect,
+            debug_time_ns,
+            actor_yield_check,
             string_ord,
             string_chr,
             string_compare,
@@ -2058,6 +2107,9 @@ impl<'ctx> RuntimeBindings<'ctx> {
             tcp_read,
             tcp_write,
             tcp_close,
+            http_get,
+            http_post,
+            http_request,
             actor_monitor,
             actor_demonitor,
             actor_graceful_stop,

@@ -61,6 +61,9 @@ pub enum TypeId {
     Adt(String, Vec<TypeId>),
     /// Store instance type (typed store/type instances).
     Store(String),
+    /// Error type with taxonomy segments: `err Foo:Bar:Baz` → `Error(["Foo", "Bar", "Baz"])`.
+    /// Empty segments means "any error" (unconstrained error type).
+    Error(Vec<String>),
     /// Unknown type (for permissive parsing — persisting after solving emits a warning).
     #[default]
     Unknown,
@@ -80,7 +83,7 @@ impl TypeId {
     /// Check if this type contains no unresolved type variables.
     pub fn is_concrete(&self) -> bool {
         match self {
-            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) | TypeId::Store(_) => true,
+            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) | TypeId::Store(_) | TypeId::Error(_) => true,
             TypeId::Adt(_, args) => args.iter().all(|a| a.is_concrete()),
             TypeId::TypeVar(_) => false,
             TypeId::List(elem) => elem.is_concrete(),
@@ -179,6 +182,13 @@ pub fn format_type(ty: &TypeId) -> String {
             }
         }
         TypeId::Store(name) => name.clone(),
+        TypeId::Error(segments) => {
+            if segments.is_empty() {
+                "Error".into()
+            } else {
+                format!("Error[{}]", segments.join("."))
+            }
+        }
         TypeId::Unknown => "_".into(),
     }
 }

@@ -330,6 +330,25 @@ impl Parser {
 
     fn parse_store_body(&mut self, start: Span, is_persistent: bool, is_actor: bool) -> ParseResult<StoreDefinition> {
         let (name, name_span) = self.consume_identifier()?;
+
+        // R2.7: Parse optional @messages(TypeName) annotation for actors
+        let message_type = if is_actor && self.check(TokenKind::At) {
+            self.advance(); // consume '@'
+            let (ident, _) = self.consume_identifier()?;
+            if ident != "messages" {
+                return Err(self.error_here(&format!(
+                    "expected 'messages' after '@' in actor definition, got '{}'",
+                    ident
+                )));
+            }
+            self.expect(TokenKind::LParen, "expected '(' after '@messages'")?;
+            let (type_name, _) = self.consume_identifier()?;
+            self.expect(TokenKind::RParen, "expected ')' after message type name")?;
+            Some(type_name)
+        } else {
+            None
+        };
+
         let (with_traits, fields, methods, end_span) = self.parse_composite_body_with_traits()?;
         let span = start.join(name_span).join(end_span);
         Ok(StoreDefinition {
@@ -339,6 +358,7 @@ impl Parser {
             methods,
             is_actor,
             is_persistent,
+            message_type,
             span,
         })
     }
@@ -1754,6 +1774,9 @@ impl Parser {
             if self.matches(TokenKind::LParen) {
                 let (mut args, mut arg_names) = self.parse_arguments()?;
                 // S5.5: Check for trailing `do..end` block after call arguments
+                // Save position so we don't consume statement-terminating newlines
+                // when no `do` keyword follows.
+                let saved_index = self.index;
                 self.skip_newlines();
                 if self.matches(TokenKind::KeywordDo) {
                     let do_block = self.parse_do_end_block()?;
@@ -1761,6 +1784,8 @@ impl Parser {
                     if !arg_names.is_empty() {
                         arg_names.push(None);
                     }
+                } else {
+                    self.index = saved_index;
                 }
                 let span = expr.span().join(self.previous_span());
                 expr = Expression::Call {

@@ -10,8 +10,8 @@
 | Metric | Value | Date |
 |--------|-------|------|
 | Initial tests passing | 203 | 2026-03-08 |
-| Current tests passing | 310 compiler + 162 runtime = 472 | 2026-03-10 |
-| Pre-existing failures | 2 (e2e_cc53_fizzbuzz, map_iterator_snapshot) |
+| Current tests passing | 893 compiler + 180 runtime = 1073 | 2026-03-10 |
+| Pre-existing failures | 0 |
 | Runtime build | debug + release |
 
 ---
@@ -137,6 +137,25 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **CC3.2 — Namespacing / Qualified Access**: Complete. `module.func()` resolved in codegen via `module_exports` map in `emit_member_call`.
 - **CC3.3 — Selective Imports**: Complete. `use std.math.{sin, cos}` syntax via `ImportDirective` struct with module_path + selections.
 - **CC2.5 — LSP MVP (Diagnostics)**: Complete. `coral-lsp` workspace crate using tower-lsp + tokio. Diagnostics on open/change/save with span→position via `LineIndex`.
+
+---
+
+## Completed Work Stream: Sprint 5 (Actor Hardening, HTTP, PGO, WAL Compaction)
+
+| ID | Task | Status | Notes |
+|----|------|--------|-------|
+| T3.4 | Error type tracking | **DONE** | `TypeId::Error(Vec<String>)`, solver unification, exhaustiveness warnings. 5 tests |
+| CC5.1 | Fuzz testing | **DONE** | cargo-fuzz infrastructure, lexer + parser fuzz targets. 0 counted tests |
+| L4.1 | `std.debug` module | **DONE** | `inspect`, `type_of`, `time_ns`, `trace`, `time_it`. 4 tests |
+| M3.5 | Weak ref optimization | **DONE** | Epoch-based validity (no mutex/hashmap). 7 runtime tests |
+| R2.1 | Work-stealing scheduler | **DONE** | crossbeam-deque per-worker deques + stealing. 4 runtime tests |
+| R2.2 | Lock-free actor registry | **DONE** | DashMap for named actors. 3 runtime tests |
+| R2.4 | Cooperative yielding | **DONE** | Yield checks at loop back-edges in actor handlers. 3 tests |
+| R2.8 | Actor monitoring | **DONE** | `monitor`/`demonitor` + ActorDown messages. 4 runtime tests |
+| R2.7 | Typed messages | **DONE** | `@messages(Type)` annotation + send-site validation. 4 tests |
+| L3.1 | `std.http` client | **DONE** | `get`/`post`/`request` via ureq crate. 5 runtime tests |
+| C4.5 | Profile-guided optimization | **DONE** | `--pgo-gen`/`--pgo-use` CLI flags. 3 tests |
+| R3.2 | WAL compaction | **DONE** | Merge+dedup WAL entries, `coral_store_compact` FFI. 3 runtime tests |
 
 ---
 
@@ -544,4 +563,19 @@ All Coral values become a single `u64` (`i64` in LLVM IR). Heap-allocated contai
 - **CC3.5 COMPLETE** (Incremental compilation): Added `ModuleCache` struct to `compiler.rs` with `fingerprint()` (DefaultHasher on module names+sources), `get()`, `put()`, `invalidate_all()`. Added `compile_modules_to_ir_cached()` method with cache_hit bool return. Disk cache in `.coral-cache/` directory. 3 tests.
 - **C4.4 COMPLETE** (LTO): Added `LtoOptLevel` enum (O1/O2/O3) and `optimize_module()` function using LLVM new pass manager (`Module::run_passes`). Uses `create_from_memory_range_copy` (not `create_from_memory_range` — the latter caused SIGSEGV). Added `--lto` CLI flag to `main.rs`. `PassBuilderOptions` with loop vectorization/unrolling/merge functions. 3 tests.
 - **M3.3 SKIPPED** (Incremental GC): Design decision — Coral stays GC-free for native performance and real-time suitability.
-- **Results**: 310 compiler tests (1 pre-existing fail: e2e_cc53_fizzbuzz_example), 162 runtime tests (1 pre-existing fail: map_iterator_is_snapshot_after_mutation)
+- **Results**: 472 tests (310 compiler + 162 runtime), 2 pre-existing failures
+
+### Sprint 5 Sessions — SPRINT_NEXT_PLAN_5.md Implementation
+- **T3.4 COMPLETE** (Error type tracking): Added `TypeId::Error(Vec<String>)` variant to `src/types/core.rs`. Error literals `err Foo:Bar` produce `Error(["Foo", "Bar"])`. Unification in solver: same-segment errors unify, different segments produce type error. `check_error_exhaustiveness()` semantic pass warns on unhandled error types at match/catch sites. 5 tests.
+- **CC5.1 COMPLETE** (Fuzz testing): Created `fuzz/` directory with `Cargo.toml`, `fuzz_targets/fuzz_lexer.rs`, `fuzz_targets/fuzz_parser.rs`. Both targets use cargo-fuzz/libfuzzer. Seed corpus from existing test files. Lexer fuzzer validates no panics on arbitrary bytes. Parser fuzzer validates no panics on arbitrary token streams. 0 counted tests (infrastructure).
+- **L4.1 COMPLETE** (`std.debug` module): New `std/debug.coral` with `inspect(value)`, `type_of(value)`, `time_ns()`, `trace(label, value)`, `time_it(label, fn)`. Runtime FFI: `coral_debug_inspect`, `coral_debug_type_of`, `coral_debug_time_ns`. Codegen builtins + runtime bindings + semantic registration. 4 tests.
+- **M3.5 COMPLETE** (Weak ref optimization): Replaced global `Mutex<HashMap<usize, bool>>` registry with epoch-based scheme. Added `epoch: u16` to Value struct (fits in alignment padding). `WeakRef` stores `(ptr, epoch)`. Validity check is single memory load + compare — no mutex, no hashmap. `coral_weak_ref_new/deref/is_valid` updated. Old registry removed. 7 runtime tests.
+- **R2.1 COMPLETE** (Work-stealing scheduler): Added `crossbeam-deque` and `crossbeam-utils` dependencies. New `WorkStealingScheduler` with per-worker `Worker<ActorTask>` deques and `Stealer` handles. Workers: pop local → steal from random peer → park. Round-robin task distribution. Preserves existing actor API. 4 runtime tests.
+- **R2.2 COMPLETE** (Lock-free actor registry): Added `dashmap 6` dependency. Replaced `Mutex<HashMap<String, ActorRef>>` with `DashMap<String, ActorRef>` for named actor registry. Read path (lookup) is lock-free. Write path uses fine-grained sharding. Updated `register/lookup/unregister` FFI. 3 runtime tests.
+- **R2.4 COMPLETE** (Cooperative yielding): Added `yield_counter: u32` and `YIELD_THRESHOLD: u32 = 1000` to actor context. `coral_actor_yield_check()` FFI increments counter, yields via `thread::yield_now()` when threshold exceeded. Codegen inserts yield checks at loop back-edges in actor handlers. 3 tests.
+- **R2.8 COMPLETE** (Actor monitoring): Added `monitors: Vec<ActorRef>` to actor state. `coral_actor_monitor/demonitor` FFI functions. On actor termination, iterates monitors and sends `ActorDown { actor, reason }` message. Codegen builtins + runtime bindings + semantic registration. 4 runtime tests.
+- **R2.7 COMPLETE** (Typed messages): Added `message_type: Option<String>` to actor AST node. Parser recognizes `@messages(TypeName)` annotation. Semantic `validate_typed_actor_sends()` pass with variable-tracking walker resolves `actor_send()` targets through bindings. Warns on type mismatch at send sites. 4 tests.
+- **L3.1 COMPLETE** (`std.http` client): New `runtime/src/http_ops.rs` backed by `ureq` crate. `coral_http_get(url)`, `coral_http_post(url, body)`, `coral_http_request(method, url, headers, body)`. Returns map `{status, body, headers}` or error. Codegen builtins + runtime bindings + semantic registration. `std/net.coral` updated with `get/post/request` wrappers + `err HttpError` type. 5 runtime tests.
+- **C4.5 COMPLETE** (Profile-guided optimization): Added `--pgo-gen` and `--pgo-use <PROFDATA>` CLI flags. `instrument_for_pgo()` applies `"pgo-instr-gen,instrprof"` pass. `optimize_with_profile()` applies `"pgo-instr-use<profile-file=PATH>,default<OX>"` pipeline. Wired into main.rs after LTO. 3 tests.
+- **R3.2 COMPLETE** (WAL compaction): Added `compact_wal()` method to `StoreEngine` — saves state, reads all WAL entries, keeps latest per index, drops deletes (already persisted), rewrites compacted WAL with fresh LSNs. Returns `(old_size, new_size)`. `coral_store_compact()` FFI in `ffi.rs` returns `{"old_size": N, "new_size": M}` map. `SharedStoreEngine` wrapper added. 3 runtime tests.
+- **Results**: 893 compiler tests + 180 runtime tests = 1073 total, 0 failures

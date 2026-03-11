@@ -1,0 +1,165 @@
+# Traits Demo - Simulating trait-like behavior with functions and types
+
+# Type definitions using ADTs (since traits aren't implemented yet)
+enum Shape
+    Circle(radius)
+    Rectangle(width, height)
+    Triangle(base, height)
+
+# "Trait-like" behavior through functions that work with different types
+*area(shape)
+    match shape
+        Circle(r) ? 3.14159 * r * r
+        Rectangle(w, h) ? w * h
+        Triangle(b, h) ? 0.5 * b * h
+        _ ? 0
+
+*perimeter(shape)
+    match shape
+        Circle(r) ? 2 * 3.14159 * r
+        Rectangle(w, h) ? 2 * (w + h)
+        Triangle(b, h) ? b + 2 * 5  # Simplified for demo
+        _ ? 0
+
+*describe(shape)
+    match shape
+        Circle(r) ? 'Circle with radius {r}'
+        Rectangle(w, h) ? 'Rectangle {w}x{h}'
+        Triangle(b, h) ? 'Triangle base {b}, height {h}'
+        _ ? 'Unknown shape'
+
+# Point type for coordinate operations
+enum Point
+    Point2D(x, y)
+    Point3D(x, y, z)
+
+*distance_from_origin(point)
+    match point
+        Point2D(x, y) ? x*x + y*y
+        Point3D(x, y, z) ? x*x + y*y + z*z
+        _ ? 0
+
+*point_to_string(point)
+    match point
+        Point2D(x, y) ? '({x}, {y})'
+        Point3D(x, y, z) ? '({x}, {y}, {z})'
+        _ ? '(unknown)'
+
+# Comparable-like behavior
+*compare_shapes(shape1, shape2)
+    area1 is area(shape1)
+    area2 is area(shape2)
+    area1 > area2 ? 1 ! area1 < area2 ? -1 ! 0
+
+*is_larger(shape1, shape2)
+    compare_shapes(shape1, shape2) > 0
+
+# Demo functions
+*shape_demo()
+    log('=== Shape Demo ===')
+    
+    # Create different shapes
+    circle is Circle(5)
+    rect is Rectangle(4, 6)
+    triangle is Triangle(3, 4)
+    
+    # Show descriptions
+    log('Shapes:')
+    log('  - {describe(circle)}')
+    log('  - {describe(rect)}')
+    log('  - {describe(triangle)}')
+    log('')
+    
+    # Calculate areas
+    log('Areas:')
+    log('  Circle area: {area(circle)}')
+    log('  Rectangle area: {area(rect)}')
+    log('  Triangle area: {area(triangle)}')
+    log('')
+    
+    # Calculate perimeters
+    log('Perimeters:')
+    log('  Circle perimeter: {perimeter(circle)}')
+    log('  Rectangle perimeter: {perimeter(rect)}')
+    log('  Triangle perimeter: {perimeter(triangle)}')
+    log('')
+
+*point_demo()
+    log('=== Point Demo ===')
+    
+    # Create points
+    p2d is Point2D(3, 4)
+    p3d is Point3D(1, 2, 3)
+    
+    # Show points
+    log('Points:')
+    log('  2D Point: {point_to_string(p2d)}')
+    log('  3D Point: {point_to_string(p3d)}')
+    log('')
+    
+    # Calculate distances
+    log('Distances from origin (squared):')
+    log('  2D distance: {distance_from_origin(p2d)}')
+    log('  3D distance: {distance_from_origin(p3d)}')
+    log('')
+
+*comparison_demo()
+    log('=== Comparison Demo ===')
+    
+    # Create shapes for comparison
+    small_circle is Circle(2)
+    large_circle is Circle(5)
+    square is Rectangle(3, 3)
+    
+    log('Comparing shapes:')
+    log('  Small circle area: {area(small_circle)}')
+    log('  Large circle area: {area(large_circle)}')
+    log('  Square area: {area(square)}')
+    log('')
+    
+    # Compare shapes
+    larger1 is is_larger(large_circle, small_circle)
+    larger2 is is_larger(square, small_circle)
+    larger3 is is_larger(large_circle, square)
+    
+    log('Comparisons (is first larger than second?):')
+    log('  Large circle vs Small circle: {larger1}')
+    log('  Square vs Small circle: {larger2}')
+    log('  Large circle vs Square: {larger3}')
+    log('')
+
+# Collection-like behavior
+*shape_collection_demo()
+    log('=== Shape Collection Demo ===')
+    
+    # Create a list of shapes
+    shapes is [
+        Circle(3),
+        Rectangle(2, 5),
+        Triangle(4, 6),
+        Circle(1)
+    ]
+    
+    log('Shape collection:')
+    log('Shape 0: {describe(shapes.get(0))} - Area: {area(shapes.get(0))}')
+    log('Shape 1: {describe(shapes.get(1))} - Area: {area(shapes.get(1))}')
+    log('Shape 2: {describe(shapes.get(2))} - Area: {area(shapes.get(2))}')
+    log('Shape 3: {describe(shapes.get(3))} - Area: {area(shapes.get(3))}')
+    log('')
+    
+    # Find total area
+    total_area is area(shapes.get(0)) + area(shapes.get(1)) + area(shapes.get(2)) + area(shapes.get(3))
+    log('Total area of all shapes: {total_area}')
+    log('')
+
+*main()
+    log('Coral Traits Demo (Simulated)')
+    log('=============================')
+    log('')
+    
+    shape_demo()
+    point_demo()
+    comparison_demo()
+    shape_collection_demo()
+    
+    log('Demo complete!')

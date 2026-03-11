@@ -1258,6 +1258,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let v = self.emit_expression(ctx, &args[0])?;
                 Ok(Some(self.call_bridged(self.runtime.type_of, &[v], "type_of_call")))
             }
+            // Debug introspection (L4.1)
+            "inspect" | "debug_inspect" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("inspect expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.debug_inspect, &[v], "inspect_call")))
+            }
+            "time_ns" | "debug_time_ns" => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("time_ns takes no arguments", span));
+                }
+                let result = self.call_runtime_ptr(
+                    self.runtime.debug_time_ns,
+                    &[],
+                    "time_ns_call",
+                );
+                Ok(Some(self.ptr_to_nb(result)))
+            }
             // Character operations
             "ord" | "string_ord" => {
                 if args.len() != 1 {
@@ -1593,6 +1612,32 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
                 Ok(Some(self.call_bridged(self.runtime.tcp_close, &[v], "tcp_close_call")))
+            }
+            // HTTP client (L3.1)
+            "http_get" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("http_get expects one argument (url)", span));
+                }
+                let u = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.http_get, &[u], "http_get_call")))
+            }
+            "http_post" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("http_post expects two arguments (url, body)", span));
+                }
+                let u = self.emit_expression(ctx, &args[0])?;
+                let b = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.http_post, &[u, b], "http_post_call")))
+            }
+            "http_request" => {
+                if args.len() != 4 {
+                    return Err(Diagnostic::new("http_request expects four arguments (method, url, headers, body)", span));
+                }
+                let m = self.emit_expression(ctx, &args[0])?;
+                let u = self.emit_expression(ctx, &args[1])?;
+                let h = self.emit_expression(ctx, &args[2])?;
+                let b = self.emit_expression(ctx, &args[3])?;
+                Ok(Some(self.call_bridged(self.runtime.http_request, &[m, u, h, b], "http_request_call")))
             }
             // Actor monitoring (AC-2)
             "monitor" | "actor_monitor" => {

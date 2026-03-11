@@ -1561,6 +1561,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     // Body
                     self.builder.position_at_end(loop_body);
+                    // R2.4: cooperative yield check at loop back-edge
+                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
                     ctx.cse_cache.clear(); // C3.4
                     ctx.loop_stack.push((loop_header, loop_exit));
                     self.emit_block(ctx, body)?;
@@ -1611,6 +1613,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     // Body: bind loop variable (convert element pointer to NaN-boxed)
                     self.builder.position_at_end(loop_body);
+                    // R2.4: cooperative yield check at loop back-edge
+                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
                     ctx.cse_cache.clear(); // C3.4
                     let elem_nb = self.ptr_to_nb(elem_ptr);
                     self.store_variable(ctx, variable, elem_nb);
@@ -1666,6 +1670,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     // Body: extract key and value from the [key, value] pair
                     self.builder.position_at_end(loop_body);
+                    // R2.4: cooperative yield check at loop back-edge
+                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
                     ctx.cse_cache.clear(); // C3.4
                     let pair_nb = self.ptr_to_nb(elem_ptr);
                     let index_zero = self.wrap_number(self.f64_type.const_float(0.0));
@@ -1724,6 +1730,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     // Body: wrap counter as NaN-boxed number, bind to variable
                     self.builder.position_at_end(loop_body);
+                    // R2.4: cooperative yield check at loop back-edge
+                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
                     ctx.cse_cache.clear(); // C3.4
                     let counter_nb = self.wrap_number(current);
                     self.store_variable(ctx, variable, counter_nb);

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::thread::available_parallelism;
@@ -464,8 +464,8 @@ impl TimerWheel {
 #[derive(Clone)]
 pub struct ActorSystem {
     pub(crate) registry: Arc<Mutex<HashMap<ActorId, ActorEntry>>>,
-    /// Named actor registry: maps string names to actor handles.
-    named_registry: Arc<Mutex<HashMap<String, ActorHandle>>>,
+    /// Named actor registry: lock-free concurrent map (R2.2).
+    named_registry: Arc<dashmap::DashMap<String, ActorHandle>>,
     /// Monitor registry: maps monitored actor → set of watcher actors.
     monitors: Arc<Mutex<HashMap<ActorId, HashSet<ActorId>>>>,
     scheduler: Scheduler,
@@ -484,7 +484,7 @@ impl ActorSystem {
         let timer_wheel = TimerWheel::new();
         let system = Self { 
             registry: Arc::new(Mutex::new(HashMap::new())), 
-            named_registry: Arc::new(Mutex::new(HashMap::new())),
+            named_registry: Arc::new(dashmap::DashMap::new()),
             monitors: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Scheduler::new(),
             timer_wheel: timer_wheel.clone(),
@@ -658,23 +658,25 @@ impl ActorSystem {
 
     /// Register an actor with a name. Returns true if successful, false if name already taken.
     pub fn register_named(&self, name: &str, handle: ActorHandle) -> bool {
-        let mut named = self.named_registry.lock().unwrap();
-        if named.contains_key(name) {
-            false
-        } else {
-            named.insert(name.to_string(), handle);
-            true
+        use dashmap::mapref::entry::Entry;
+        match self.named_registry.entry(name.to_string()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(handle);
+                true
+            }
         }
     }
 
     /// Lookup an actor by name. Returns None if not found.
+    /// Lock-free on the read path (R2.2).
     pub fn lookup_named(&self, name: &str) -> Option<ActorHandle> {
-        self.named_registry.lock().unwrap().get(name).cloned()
+        self.named_registry.get(name).map(|r| r.value().clone())
     }
 
     /// Unregister a named actor. Returns true if the name was found and removed.
     pub fn unregister_named(&self, name: &str) -> bool {
-        self.named_registry.lock().unwrap().remove(name).is_some()
+        self.named_registry.remove(name).is_some()
     }
 
     /// Spawn an actor and register it with a name. Returns None if name already taken.
@@ -682,16 +684,16 @@ impl ActorSystem {
     where
         F: FnOnce(ActorContext) + Send + 'static,
     {
-        // Hold the registry lock for the entire check-and-register to prevent
-        // the TOCTOU race between contains_key and insert.
-        let mut named = self.named_registry.lock().unwrap();
-        if named.contains_key(name) {
-            return None;
+        use dashmap::mapref::entry::Entry;
+        // entry() provides atomic check-and-insert — no TOCTOU race.
+        match self.named_registry.entry(name.to_string()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(v) => {
+                let handle = self.spawn(parent, f);
+                v.insert(handle.clone());
+                Some(handle)
+            }
         }
-        
-        let handle = self.spawn(parent, f);
-        named.insert(name.to_string(), handle.clone());
-        Some(handle)
     }
 
     /// Spawn a named actor with custom configuration.
@@ -705,24 +707,22 @@ impl ActorSystem {
     where
         F: FnOnce(ActorContext) + Send + 'static,
     {
-        // Hold the registry lock for the entire check-and-register.
-        let mut named = self.named_registry.lock().unwrap();
-        if named.contains_key(name) {
-            return None;
+        use dashmap::mapref::entry::Entry;
+        match self.named_registry.entry(name.to_string()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(v) => {
+                let handle = self.spawn_with_config(parent, config, f);
+                v.insert(handle.clone());
+                Some(handle)
+            }
         }
-        
-        let handle = self.spawn_with_config(parent, config, f);
-        named.insert(name.to_string(), handle.clone());
-        Some(handle)
     }
 
     /// List all registered named actors.
     pub fn list_named(&self) -> Vec<(String, ActorHandle)> {
         self.named_registry
-            .lock()
-            .unwrap()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|r| (r.key().clone(), r.value().clone()))
             .collect()
     }
 
@@ -1094,85 +1094,222 @@ impl ActorContext {
     }
 }
 
-/// Global scheduler for actors (M:N). Currently uses a simple work queue
-/// and a fixed worker pool sized to available_parallelism().
-#[derive(Clone, Default)]
+/// Work-stealing scheduler for actors (M:N, R2.1).
+///
+/// Each worker thread owns a local `crossbeam_deque::Worker` deque.  New tasks
+/// are pushed to workers in round-robin order.  Workers pop from their local
+/// deque first; idle workers steal from a random non-empty peer via
+/// `crossbeam_deque::Stealer`.  This eliminates the central `Mutex<Receiver>`
+/// contention of the previous single-channel design.
+#[derive(Clone)]
 struct Scheduler {
-    work: Arc<WorkQueue>,
+    work: Arc<WorkStealingQueue>,
 }
 
-#[derive(Default)]
-struct WorkQueue {
-    sender: OnceLock<Sender<Runnable>>,
+struct WorkStealingQueue {
+    /// One injector per worker, indexed by worker ordinal.
+    /// `submit()` round-robins across these via `next_worker`.
+    injectors: Vec<crossbeam_deque::Injector<Runnable>>,
+    /// Stealers corresponding to each worker's local deque.
+    stealers: Vec<crossbeam_deque::Stealer<Runnable>>,
+    /// Round-robin counter for external `submit()` calls.
+    next_worker: AtomicU64,
     next_id: AtomicU64,
     workers_started: AtomicBool,
     shutdown: AtomicBool,
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
+    /// Number of worker threads.
+    worker_count: usize,
+    /// Condvar used to park/unpark idle workers.
+    notify: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
+
+// Safety: all interior mutability is via atomics / Mutex / crossbeam types.
+unsafe impl Send for WorkStealingQueue {}
+unsafe impl Sync for WorkStealingQueue {}
 
 type Runnable = Box<dyn FnOnce() + Send + 'static>;
 
 impl Scheduler {
     fn new() -> Self {
-        let sched = Self { work: Arc::new(WorkQueue::default()) };
-        sched.ensure_workers();
-        sched
-    }
-
-    fn ensure_workers(&self) {
-        if self.work.workers_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let (tx, rx) = mpsc::channel::<Runnable>();
-        let _ = self.work.sender.set(tx);
-        let rx = Arc::new(Mutex::new(rx));
         let worker_count = available_parallelism().map(|n| n.get()).unwrap_or(1).max(1);
-        let mut handles = self.work.worker_handles.lock().unwrap();
-        for idx in 0..worker_count {
-            let rx = rx.clone();
+
+        // Create per-worker deques.  We keep the Workers in a temporary Vec,
+        // extract Stealers (which are Send+Sync), and move Workers into the
+        // spawned threads below.
+        let mut local_workers: Vec<crossbeam_deque::Worker<Runnable>> = Vec::with_capacity(worker_count);
+        let mut stealers: Vec<crossbeam_deque::Stealer<Runnable>> = Vec::with_capacity(worker_count);
+        let mut injectors: Vec<crossbeam_deque::Injector<Runnable>> = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let w = crossbeam_deque::Worker::new_fifo();
+            stealers.push(w.stealer());
+            local_workers.push(w);
+            injectors.push(crossbeam_deque::Injector::new());
+        }
+
+        let notify = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+
+        let queue = Arc::new(WorkStealingQueue {
+            injectors,
+            stealers,
+            next_worker: AtomicU64::new(0),
+            next_id: AtomicU64::new(0),
+            workers_started: AtomicBool::new(true),
+            shutdown: AtomicBool::new(false),
+            worker_handles: Mutex::new(Vec::with_capacity(worker_count)),
+            worker_count,
+            notify: notify.clone(),
+        });
+
+        // Spawn worker threads.
+        let mut handles = Vec::with_capacity(worker_count);
+        for (idx, local) in local_workers.into_iter().enumerate() {
+            let queue_ref = queue.clone();
+            let notify_ref = notify.clone();
             let handle = thread::Builder::new()
                 .name(format!("actor-worker-{idx}"))
                 .spawn(move || {
-                    loop {
-                        let job = rx.lock().unwrap().recv();
-                        match job {
-                            Ok(job) => job(),
-                            Err(_) => break, // Channel closed
-                        }
-                    }
+                    worker_loop(idx, local, queue_ref, notify_ref);
                 })
                 .expect("failed to spawn actor worker");
             handles.push(handle);
         }
+        *queue.worker_handles.lock().unwrap() = handles;
+
+        Self { work: queue }
     }
 
-    /// Shut down the scheduler: drop the sender to close the channel,
-    /// then join all worker threads.
+    /// Shut down the scheduler.
     fn shutdown(&self) {
         self.work.shutdown.store(true, Ordering::SeqCst);
-        // Dropping the sender causes recv() to return Err, breaking worker loops.
-        // OnceLock doesn't support take(), but we can drop it by replacing the entire WorkQueue.
-        // Instead, we rely on the channel being closed when Sender is dropped — but it's in OnceLock.
-        // The cleanest approach: workers already break on Err from recv(), which happens when
-        // all Senders are dropped. Since sender is in OnceLock (never dropped), we signal
-        // workers by sending a special "poison pill" — but our Runnable type is FnOnce,
-        // so we can't easily signal. Instead, we just mark shutdown and let threads
-        // exit next time they try to recv after process exit.
-        // For now, store handles so they CAN be joined if the channel is somehow closed.
-        // In practice, worker threads exit when the process exits.
+        // Wake all parked workers so they observe the shutdown flag.
+        let (lock, cvar) = &*self.work.notify;
+        let mut flag = lock.lock().unwrap();
+        *flag = true;
+        cvar.notify_all();
+        drop(flag);
     }
 
     fn submit<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        if let Some(tx) = self.work.sender.get() {
-            let _ = tx.send(Box::new(f));
-        }
+        // Round-robin across workers' injectors.
+        let idx = self.work.next_worker.fetch_add(1, Ordering::Relaxed) as usize
+            % self.work.worker_count;
+        self.work.injectors[idx].push(Box::new(f));
+
+        // Wake a potentially parked worker.
+        let (lock, cvar) = &*self.work.notify;
+        let mut flag = lock.lock().unwrap();
+        *flag = true;
+        cvar.notify_one();
+        drop(flag);
     }
 
     fn next_id(&self) -> u64 {
         self.work.next_id.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+    }
+}
+
+/// Per-worker event loop.  Tries local deque → own injector → steal from peers → park.
+fn worker_loop(
+    idx: usize,
+    local: crossbeam_deque::Worker<Runnable>,
+    queue: Arc<WorkStealingQueue>,
+    notify: Arc<(Mutex<bool>, std::sync::Condvar)>,
+) {
+    use crossbeam_deque::Steal;
+
+    let mut rng_state: u64 = idx as u64 ^ 0xDEAD_BEEF;
+
+    loop {
+        if queue.shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // 1. Pop from local deque.
+        if let Some(task) = local.pop() {
+            task();
+            continue;
+        }
+
+        // 2. Drain own injector into local deque.
+        loop {
+            match queue.injectors[idx].steal_batch_and_pop(&local) {
+                Steal::Success(task) => {
+                    task();
+                    break;
+                }
+                Steal::Retry => continue,
+                Steal::Empty => break,
+            }
+        }
+        // Check if we got more work from the injector batch.
+        if let Some(task) = local.pop() {
+            task();
+            continue;
+        }
+
+        // 3. Steal from a random peer's deque.
+        let n = queue.worker_count;
+        if n > 1 {
+            // Simple xorshift for cheap random peer selection.
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            let start = rng_state as usize % n;
+            let mut stolen = false;
+            for offset in 0..n {
+                let peer = (start + offset) % n;
+                if peer == idx {
+                    continue;
+                }
+                match queue.stealers[peer].steal_batch_and_pop(&local) {
+                    Steal::Success(task) => {
+                        task();
+                        stolen = true;
+                        break;
+                    }
+                    Steal::Retry => {}
+                    Steal::Empty => {}
+                }
+            }
+            if stolen {
+                continue;
+            }
+            // Also try peer injectors.
+            for offset in 0..n {
+                let peer = (start + offset) % n;
+                if peer == idx {
+                    continue;
+                }
+                match queue.injectors[peer].steal_batch_and_pop(&local) {
+                    Steal::Success(task) => {
+                        task();
+                        stolen = true;
+                        break;
+                    }
+                    Steal::Retry => {}
+                    Steal::Empty => {}
+                }
+            }
+            if stolen {
+                continue;
+            }
+        }
+
+        // 4. No work found — park the thread briefly.
+        let (lock, cvar) = &*notify;
+        let mut flag = lock.lock().unwrap();
+        // Re-check shutdown before parking.
+        if queue.shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        // Wait with a timeout so workers periodically try stealing even
+        // without an explicit wake-up (avoids subtle starvation).
+        let _ = cvar.wait_timeout(flag, Duration::from_millis(1));
     }
 }
 
@@ -1444,5 +1581,377 @@ mod tests {
             "Exit should not drain all messages (got {})",
             count
         );
+    }
+
+    // ---- R2.1 Work-Stealing Scheduler Tests ----
+
+    #[test]
+    fn r21_work_stealing_distributes_across_workers() {
+        // Spawn many actors and verify they all complete — exercises the
+        // round-robin submission + work-stealing across multiple workers.
+        let system = ActorSystem::new();
+        let completed = Arc::new(AtomicU32::new(0));
+        let n = 32;
+
+        for _ in 0..n {
+            let c = completed.clone();
+            system.spawn(None, move |_ctx: ActorContext| {
+                // Tiny workload — just mark completion.
+                c.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            n,
+            "all {} actors should have completed via work-stealing scheduler",
+            n
+        );
+    }
+
+    #[test]
+    fn r21_work_stealing_fairness_under_load() {
+        // Submit actors in bursts — verify all complete even when some
+        // workers might be busy.
+        let system = ActorSystem::new();
+        let completed = Arc::new(AtomicU32::new(0));
+        let n = 64;
+
+        for i in 0..n {
+            let c = completed.clone();
+            system.spawn(None, move |_ctx: ActorContext| {
+                // Variable-length work to stress stealing.
+                if i % 4 == 0 {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                c.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        std::thread::sleep(Duration::from_millis(2000));
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            n,
+            "all {} actors should complete under load (fairness)",
+            n
+        );
+    }
+
+    #[test]
+    fn r21_work_stealing_preserves_message_ordering() {
+        // A single actor should see messages in the order they were sent,
+        // regardless of which worker thread runs it.
+        let system = ActorSystem::new();
+        let received_order = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let ro = received_order.clone();
+
+        let handle = system.spawn(None, move |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::User(val)) => {
+                        // Decode the sequence number from the pointer value.
+                        let seq = val as u32;
+                        ro.lock().unwrap().push(seq);
+                    }
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        // Send numbered messages.
+        for i in 1u32..=20 {
+            let _ = system.send(&handle, Message::User(i as *mut _));
+        }
+        let _ = system.send(&handle, Message::Exit);
+
+        std::thread::sleep(Duration::from_millis(500));
+        let order = received_order.lock().unwrap();
+        let expected: Vec<u32> = (1..=20).collect();
+        assert_eq!(*order, expected, "messages should arrive in send order");
+    }
+
+    #[test]
+    fn r21_work_stealing_starvation_free() {
+        // Spawn one long-running actor and many short ones.
+        // The short ones must still complete (work stealing prevents starvation).
+        let system = ActorSystem::new();
+        let short_completed = Arc::new(AtomicU32::new(0));
+        let n_short = 16;
+
+        // Long-running actor.
+        system.spawn(None, move |_ctx: ActorContext| {
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        // Short actors (after the long one is submitted).
+        for _ in 0..n_short {
+            let c = short_completed.clone();
+            system.spawn(None, move |_ctx: ActorContext| {
+                c.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            short_completed.load(Ordering::SeqCst),
+            n_short,
+            "short actors must complete even while a long actor is running (no starvation)",
+        );
+    }
+
+    // ---- R2.2 Lock-Free Actor Registry Tests ----
+
+    #[test]
+    fn r22_concurrent_register_lookup() {
+        // Multiple threads concurrently register and look up named actors.
+        let system = ActorSystem::new();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for t in 0..8u32 {
+            let sys = system.clone();
+            let b = barrier.clone();
+            handles.push(thread::spawn(move || {
+                let name = format!("actor-{}", t);
+                let actor = sys.spawn(None, |_ctx: ActorContext| {});
+                b.wait(); // synchronize registration
+                sys.register_named(&name, actor);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 8 should be registered.
+        let listed = system.list_named();
+        assert_eq!(listed.len(), 8, "all 8 named actors should be registered");
+        for t in 0..8u32 {
+            let name = format!("actor-{}", t);
+            assert!(
+                system.lookup_named(&name).is_some(),
+                "actor-{} should be found",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn r22_unregister_lookup_race() {
+        // Unregister while another thread looks up — no panic, correct result.
+        let system = ActorSystem::new();
+        let actor = system.spawn(None, |_ctx: ActorContext| {});
+        system.register_named("ephemeral", actor);
+
+        let sys2 = system.clone();
+        let lookup_thread = thread::spawn(move || {
+            let mut found = 0u32;
+            for _ in 0..1000 {
+                if sys2.lookup_named("ephemeral").is_some() {
+                    found += 1;
+                }
+            }
+            found
+        });
+
+        // Small delay then unregister.
+        std::thread::sleep(Duration::from_millis(1));
+        system.unregister_named("ephemeral");
+
+        let found = lookup_thread.join().unwrap();
+        // After unregister, lookup must return None.
+        assert!(
+            system.lookup_named("ephemeral").is_none(),
+            "should be gone after unregister"
+        );
+        // found can be anything from 0 to 1000 — just confirm no panic.
+        let _ = found;
+    }
+
+    #[test]
+    fn r22_many_named_actors_throughput() {
+        // Register and look up many named actors to exercise DashMap sharding.
+        let system = ActorSystem::new();
+        let n = 100;
+
+        for i in 0..n {
+            let name = format!("svc-{}", i);
+            let handle = system.spawn(None, |_ctx: ActorContext| {});
+            assert!(system.register_named(&name, handle), "register {} should succeed", i);
+        }
+
+        // All lookups should succeed.
+        for i in 0..n {
+            let name = format!("svc-{}", i);
+            assert!(
+                system.lookup_named(&name).is_some(),
+                "svc-{} should be found",
+                i
+            );
+        }
+
+        // Duplicate registration should fail.
+        let extra = system.spawn(None, |_ctx: ActorContext| {});
+        assert!(
+            !system.register_named("svc-0", extra),
+            "duplicate register must fail"
+        );
+
+        assert_eq!(system.list_named().len(), n);
+    }
+
+    // ========== R2.8 Actor Monitoring Tests ==========
+
+    #[test]
+    fn r28_monitor_receives_actor_down_on_exit() {
+        let system = ActorSystem::new();
+        let got_down = Arc::new(AtomicU32::new(0));
+        let got_clone = got_down.clone();
+
+        // Watcher actor that receives ActorDown messages
+        let watcher = system.spawn(None, move |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::ActorDown { actor_id: _, reason }) => {
+                        assert_eq!(reason, "normal");
+                        got_clone.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        // Target actor that will terminate immediately
+        let target = system.spawn(None, |_ctx: ActorContext| {
+            // Terminates immediately
+        });
+
+        // Register the monitor
+        system.monitor(watcher.id, target.id);
+
+        // Give time for target to die and notification to be delivered
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert!(
+            got_down.load(Ordering::SeqCst) >= 1,
+            "watcher should have received ActorDown, got {}",
+            got_down.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn r28_demonitor_stops_notifications() {
+        let system = ActorSystem::new();
+        let got_down = Arc::new(AtomicU32::new(0));
+        let got_clone = got_down.clone();
+
+        // Watcher that counts ActorDown messages
+        let watcher = system.spawn(None, move |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::ActorDown { .. }) => {
+                        got_clone.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        // Target that waits a bit before dying
+        let target = system.spawn(None, |_ctx: ActorContext| {
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        // Monitor then demonitor before target dies
+        system.monitor(watcher.id, target.id);
+        system.demonitor(watcher.id, target.id);
+
+        // Give time for target to die
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Stop the watcher
+        let _ = system.send(&watcher, Message::Exit);
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(
+            got_down.load(Ordering::SeqCst),
+            0,
+            "demonitored watcher should NOT have received ActorDown"
+        );
+    }
+
+    #[test]
+    fn r28_multiple_monitors() {
+        let system = ActorSystem::new();
+        let count = Arc::new(AtomicU32::new(0));
+
+        // Spawn 3 watchers
+        let mut watchers = Vec::new();
+        for _ in 0..3 {
+            let c = count.clone();
+            let w = system.spawn(None, move |ctx: ActorContext| {
+                loop {
+                    match ctx.recv() {
+                        Some(Message::ActorDown { .. }) => {
+                            c.fetch_add(1, Ordering::SeqCst);
+                            break;
+                        }
+                        Some(Message::Exit) | None => break,
+                        _ => {}
+                    }
+                }
+            });
+            watchers.push(w);
+        }
+
+        // Target
+        let target = system.spawn(None, |_ctx: ActorContext| {
+            // Terminates immediately
+        });
+
+        // Register all watchers as monitors
+        for w in &watchers {
+            system.monitor(w.id, target.id);
+        }
+
+        // Give time
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "all 3 watchers should receive ActorDown"
+        );
+    }
+
+    #[test]
+    fn r28_monitor_nonexistent_actor_no_crash() {
+        let system = ActorSystem::new();
+
+        // Create a watcher
+        let watcher = system.spawn(None, |ctx: ActorContext| {
+            loop {
+                match ctx.recv() {
+                    Some(Message::Exit) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        // Monitor a non-existent actor — should not crash
+        let fake_id = ActorId(999999);
+        system.monitor(watcher.id, fake_id);
+
+        // Demonitor also should not crash
+        system.demonitor(watcher.id, fake_id);
+
+        // Clean up
+        let _ = system.send(&watcher, Message::Exit);
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

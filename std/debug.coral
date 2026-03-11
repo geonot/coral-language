@@ -1,0 +1,29 @@
+# std.debug — Developer debugging utilities
+#
+# Provides introspection, tracing, and timing tools for
+# debugging Coral programs.
+
+# Return a detailed inspection string showing type and value info.
+# Examples: "Number(42)", "String(hello)[len=5]", "List[3 items]"
+# Returns the inspection string (passthrough-friendly for chaining).
+*inspect(value)
+	result is debug_inspect(value)
+	log(result)
+	return value
+
+# Print a labeled trace: "[label] type: value", returns value for chaining.
+*trace(label, value)
+	type_name is type_of(value)
+	detail is debug_inspect(value)
+	log(concat(concat(concat(concat("[", label), "] "), type_name), concat(": ", detail)))
+	return value
+
+# Measure the execution time of a function call.
+# Returns a map with "result" and "elapsed_ms" keys.
+*time_it(label, f)
+	start is time_ns()
+	result is f()
+	elapsed_ns is time_ns() - start
+	elapsed_ms is elapsed_ns / 1000000
+	log(concat(concat(concat("[", label), "] elapsed: "), to_string(elapsed_ms)))
+	return map("result" is result, "elapsed_ms" is elapsed_ms)

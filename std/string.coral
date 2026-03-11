@@ -37,8 +37,8 @@ use std.prelude
     split(s, delimiter)
 
 # Get substring from start to end (exclusive)
-*str_slice(s, start, end)
-    slice(s, start, end)
+*str_slice(s, start, end_idx)
+    slice(s, start, end_idx)
 
 # Get character at index
 *at(s, index)
@@ -111,5 +111,5 @@ use std.prelude
     split(s, delimiter)
 
 # Deprecated: use str_slice
-*part(s, start, end)
-    slice(s, start, end)
+*part(s, start, end_idx)
+    slice(s, start, end_idx)

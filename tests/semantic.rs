@@ -140,6 +140,7 @@ fn rejects_duplicate_store_fields() {
         methods: vec![],
         is_actor: false,
         is_persistent: false,
+        message_type: None,
         with_traits: vec![],
         span: span(),
     };
@@ -234,6 +235,7 @@ fn assigns_any_to_message_data_and_actor_primitive() {
         methods: vec![],
         is_actor: true,
         is_persistent: false,
+        message_type: None,
         with_traits: vec![],
         span: span(),
     };
@@ -284,6 +286,7 @@ fn rejects_actor_handler_with_too_many_params() {
         }],
         is_actor: true,
         is_persistent: false,
+        message_type: None,
         with_traits: vec![],
         span: span(),
     };
@@ -333,6 +336,7 @@ fn accepts_actor_handler_with_zero_or_one_param() {
         methods: vec![handler0, handler1],
         is_actor: true,
         is_persistent: false,
+        message_type: None,
         with_traits: vec![],
         span: span(),
     };

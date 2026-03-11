@@ -1741,9 +1741,9 @@
 		emit_indent(b, '{r} = call %CoralValue* @coral_range(%CoralValue* {zero}, %CoralValue* {n})')
 		return r
 	start is emit_expression(b, args[0])
-	end is emit_expression(b, args[1])
+	end_val is emit_expression(b, args[1])
 	r is fresh_reg(b)
-	emit_indent(b, '{r} = call %CoralValue* @coral_range(%CoralValue* {start}, %CoralValue* {end})')
+	emit_indent(b, '{r} = call %CoralValue* @coral_range(%CoralValue* {start}, %CoralValue* {end_val})')
 	return r
 
 # ─── Method Calls ──────────────────────────────────────────────────
