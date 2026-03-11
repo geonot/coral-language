@@ -83,6 +83,9 @@ pub struct RuntimeBindings<'ctx> {
     pub list_map: FunctionValue<'ctx>,
     pub list_filter: FunctionValue<'ctx>,
     pub list_reduce: FunctionValue<'ctx>,
+    pub list_find: FunctionValue<'ctx>,
+    pub list_any: FunctionValue<'ctx>,
+    pub list_all: FunctionValue<'ctx>,
     pub map_get: FunctionValue<'ctx>,
     pub map_set: FunctionValue<'ctx>,
     pub map_length: FunctionValue<'ctx>,
@@ -636,6 +639,21 @@ impl<'ctx> RuntimeBindings<'ctx> {
                 &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
                 false,
             ),
+            None,
+        );
+        let list_find = module.add_function(
+            "coral_list_find",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let list_any = module.add_function(
+            "coral_list_any",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let list_all = module.add_function(
+            "coral_list_all",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
 
@@ -1925,6 +1943,9 @@ impl<'ctx> RuntimeBindings<'ctx> {
             list_map,
             list_filter,
             list_reduce,
+            list_find,
+            list_any,
+            list_all,
             map_get,
             map_set,
             map_length,

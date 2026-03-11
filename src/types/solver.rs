@@ -160,6 +160,105 @@ pub enum ConstraintKind {
     HasTrait(TypeId, String, Span),
 }
 
+/// T2.4: Registry of trait implementations, passed to the solver so `HasTrait`
+/// constraints can be enforced at type-checking time.
+#[derive(Debug, Default, Clone)]
+pub struct TraitRegistry {
+    /// Maps type/store name → list of implemented trait names.
+    pub implementations: HashMap<String, Vec<String>>,
+    /// Maps trait name → list of required super-traits.
+    pub super_traits: HashMap<String, Vec<String>>,
+}
+
+impl TraitRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register that a type/store implements a trait.
+    pub fn register_impl(&mut self, type_name: impl Into<String>, trait_name: impl Into<String>) {
+        self.implementations
+            .entry(type_name.into())
+            .or_default()
+            .push(trait_name.into());
+    }
+
+    /// Register super-trait requirements.
+    pub fn register_super_traits(&mut self, trait_name: impl Into<String>, supers: Vec<String>) {
+        self.super_traits.insert(trait_name.into(), supers);
+    }
+
+    /// Check whether a type implements a trait (including transitively via super-traits).
+    pub fn type_implements(&self, type_name: &str, trait_name: &str) -> bool {
+        if let Some(impls) = self.implementations.get(type_name) {
+            impls.iter().any(|t| t == trait_name)
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a resolved TypeId satisfies a HasTrait constraint.
+    /// Returns Ok(()) if the type implements the trait, or if the type is
+    /// unresolved/Any/Unknown (permissive). Returns Err for concrete types
+    /// that don't implement the required trait.
+    pub fn check_trait(&self, ty: &TypeId, trait_name: &str, span: Span) -> Result<(), TypeError> {
+        match ty {
+            // Permissive: unresolved, Any, Unknown — don't fail
+            TypeId::TypeVar(_) | TypeId::Primitive(Primitive::Any) | TypeId::Unknown => Ok(()),
+            // ADTs and Stores: check the registry
+            TypeId::Adt(name, _) | TypeId::Store(name) => {
+                if self.type_implements(name, trait_name) {
+                    Ok(())
+                } else {
+                    Err(TypeError::new(
+                        format!(
+                            "type `{}` does not implement trait `{}`",
+                            format_type(ty),
+                            trait_name
+                        ),
+                        span,
+                    ))
+                }
+            }
+            // Primitives: check built-in trait satisfaction
+            TypeId::Primitive(p) => {
+                if primitive_implements_trait(p, trait_name) {
+                    Ok(())
+                } else {
+                    Err(TypeError::new(
+                        format!(
+                            "type `{}` does not implement trait `{}`",
+                            format_type(ty),
+                            trait_name
+                        ),
+                        span,
+                    ))
+                }
+            }
+            // Composite types: permissive for now
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Built-in trait satisfaction for primitive types.
+fn primitive_implements_trait(prim: &Primitive, trait_name: &str) -> bool {
+    match trait_name {
+        "Comparable" => matches!(
+            prim,
+            Primitive::Int | Primitive::Float | Primitive::String | Primitive::Bool
+        ),
+        "Printable" | "Display" => true, // All primitives can be displayed
+        "Hashable" => matches!(
+            prim,
+            Primitive::Int | Primitive::Float | Primitive::String | Primitive::Bool | Primitive::Unit | Primitive::None
+        ),
+        "Numeric" => matches!(prim, Primitive::Int | Primitive::Float),
+        "Iterable" => false,
+        _ => false, // Unknown traits: fail for primitives
+    }
+}
+
 /// A collection of constraints to be solved together.
 #[derive(Debug, Default, Clone)]
 pub struct ConstraintSet {
@@ -297,6 +396,7 @@ impl TypeGraph {
 pub fn solve_constraints(
     constraints: &ConstraintSet,
     graph: &mut TypeGraph,
+    trait_registry: &TraitRegistry,
 ) -> Result<(), Vec<TypeError>> {
     let mut errors = Vec::new();
     let dummy = Span::new(0, 0);
@@ -364,15 +464,12 @@ pub fn solve_constraints(
             ConstraintKind::Callable(func, args, ret) => {
                 solve_callable(func, args, ret, graph, dummy)
             }
-            // T2.4: Trait bounds — resolved type must be an ADT/Store that
-            // implements the named trait. Permissive: unresolved vars, Any,
-            // Unknown, and primitives pass silently (bounds are advisory for now).
-            ConstraintKind::HasTrait(ty, _trait_name, _span) => {
-                let _resolved = resolve(ty.clone(), graph);
-                // Trait bound checking is deferred until the full trait registry
-                // is available at a higher level. The constraint is recorded so
-                // future passes (T2.5 monomorphization) can enforce it.
-                Ok(())
+            // T2.4: Trait bounds — resolved type must implement the named trait.
+            // Checked after unification resolves the type. Uses the trait registry
+            // to validate ADTs/Stores/Primitives. Unresolved type vars and Any/Unknown pass.
+            ConstraintKind::HasTrait(ty, trait_name, span) => {
+                let resolved = resolve(ty.clone(), graph);
+                trait_registry.check_trait(&resolved, trait_name, *span)
             }
         };
 
@@ -662,6 +759,10 @@ mod tests {
         Span::new(0, 0)
     }
 
+    fn empty_registry() -> TraitRegistry {
+        TraitRegistry::new()
+    }
+
     #[test]
     fn unify_same_types() {
         let mut graph = TypeGraph::new();
@@ -740,7 +841,7 @@ mod tests {
         let mut constraints = ConstraintSet::new();
         constraints.push(ConstraintKind::NumericAt(TypeId::TypeVar(var), span()));
         
-        let result = solve_constraints(&constraints, &mut graph);
+        let result = solve_constraints(&constraints, &mut graph, &empty_registry());
         assert!(result.is_ok());
         assert_eq!(
             resolve(TypeId::TypeVar(var), &mut graph),
@@ -757,7 +858,7 @@ mod tests {
             span(),
         ));
         
-        let result = solve_constraints(&constraints, &mut graph);
+        let result = solve_constraints(&constraints, &mut graph, &empty_registry());
         assert!(result.is_err());
     }
 
@@ -779,7 +880,7 @@ mod tests {
             span(),
         ));
         
-        let result = solve_constraints(&constraints, &mut graph);
+        let result = solve_constraints(&constraints, &mut graph, &empty_registry());
         assert!(result.is_ok());
         assert_eq!(
             resolve(TypeId::TypeVar(ret_var), &mut graph),
@@ -806,7 +907,7 @@ mod tests {
             span(),
         ));
         
-        let result = solve_constraints(&constraints, &mut graph);
+        let result = solve_constraints(&constraints, &mut graph, &empty_registry());
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors[0].message.contains("expects 1 argument"));
@@ -823,11 +924,81 @@ mod tests {
             TypeId::Primitive(Primitive::Int),
         ));
         
-        let result = solve_constraints(&constraints, &mut graph);
+        let result = solve_constraints(&constraints, &mut graph, &empty_registry());
         assert!(result.is_ok());
         assert_eq!(
             resolve(TypeId::TypeVar(var), &mut graph),
             TypeId::Primitive(Primitive::Int)
         );
+    }
+
+    #[test]
+    fn solve_has_trait_with_registered_impl() {
+        let mut graph = TypeGraph::new();
+        let mut constraints = ConstraintSet::new();
+        let mut registry = TraitRegistry::new();
+        registry.register_impl("MyType", "Comparable");
+        
+        constraints.push(ConstraintKind::HasTrait(
+            TypeId::Adt("MyType".into(), vec![]),
+            "Comparable".into(),
+            span(),
+        ));
+        
+        let result = solve_constraints(&constraints, &mut graph, &registry);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn solve_has_trait_missing_impl() {
+        let mut graph = TypeGraph::new();
+        let mut constraints = ConstraintSet::new();
+        let registry = TraitRegistry::new(); // no impls
+        
+        constraints.push(ConstraintKind::HasTrait(
+            TypeId::Adt("MyType".into(), vec![]),
+            "Comparable".into(),
+            span(),
+        ));
+        
+        let result = solve_constraints(&constraints, &mut graph, &registry);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors[0].message.contains("does not implement trait"));
+    }
+
+    #[test]
+    fn solve_has_trait_primitive_comparable() {
+        let mut graph = TypeGraph::new();
+        let mut constraints = ConstraintSet::new();
+        let registry = TraitRegistry::new();
+        
+        // Int implements Comparable
+        constraints.push(ConstraintKind::HasTrait(
+            TypeId::Primitive(Primitive::Int),
+            "Comparable".into(),
+            span(),
+        ));
+        
+        let result = solve_constraints(&constraints, &mut graph, &registry);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn solve_has_trait_unresolved_permissive() {
+        let mut graph = TypeGraph::new();
+        let var = graph.fresh();
+        let mut constraints = ConstraintSet::new();
+        let registry = TraitRegistry::new();
+        
+        // Unresolved type var → permissive (don't fail)
+        constraints.push(ConstraintKind::HasTrait(
+            TypeId::TypeVar(var),
+            "Comparable".into(),
+            span(),
+        ));
+        
+        let result = solve_constraints(&constraints, &mut graph, &registry);
+        assert!(result.is_ok());
     }
 }

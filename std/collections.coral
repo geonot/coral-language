@@ -1,0 +1,294 @@
+# std/collections.coral — Advanced data structures
+#
+# Provides Deque, PriorityQueue, OrderedMap, and DefaultMap built on
+# the core list/map primitives.
+
+use std.prelude
+
+# ───────────────────────────────────────────────────────────
+# Deque — double-ended queue backed by a list
+# ───────────────────────────────────────────────────────────
+
+# Create an empty deque (represented as a plain list)
+*deque()
+	[]
+
+# Push element to the back
+*deque_push_back(d, elem)
+	d.push(elem)
+
+# Push element to the front (O(n) — rebuilds the list)
+*deque_push_front(d, elem)
+	result is [elem]
+	*copy(i)
+		if i >= d.length
+			result
+		else
+			result.push(d.get(i))
+			copy(i + 1)
+	copy(0)
+
+# Pop element from the back
+*deque_pop_back(d)
+	d.pop()
+
+# Pop element from the front (returns [first_element, rest])
+*deque_pop_front(d)
+	if d.length is 0
+		[absent, d]
+	else
+		first is d.get(0)
+		rest is []
+		*build(i)
+			if i >= d.length
+				rest
+			else
+				rest.push(d.get(i))
+				build(i + 1)
+		[first, build(1)]
+
+# Peek at front element without removing
+*deque_front(d)
+	if d.length is 0
+		absent
+	else
+		d.get(0)
+
+# Peek at back element without removing
+*deque_back(d)
+	if d.length is 0
+		absent
+	else
+		d.get(d.length - 1)
+
+# Get deque size
+*deque_size(d)
+	d.length
+
+# Check if deque is empty
+*deque_empty(d)
+	d.length is 0
+
+# ───────────────────────────────────────────────────────────
+# PriorityQueue — min-heap backed by a list
+# ───────────────────────────────────────────────────────────
+
+# Create an empty priority queue (list used as binary heap)
+*pq()
+	[]
+
+# Internal: swap two indices in a list — returns new list
+*_pq_swap(heap, i, j)
+	result is []
+	*build(k)
+		if k >= heap.length
+			result
+		else
+			val is heap.get(k)
+			entry is val
+			if k is i
+				entry is heap.get(j)
+			if k is j
+				entry is heap.get(i)
+			result.push(entry)
+			build(k + 1)
+	build(0)
+
+# Internal: sift-up the element at index i
+*_pq_sift_up(heap, i)
+	if i is 0
+		heap
+	else
+		parent is (i - 1) / 2
+		parent is int(parent)
+		if heap.get(i) < heap.get(parent)
+			swapped is _pq_swap(heap, i, parent)
+			_pq_sift_up(swapped, parent)
+		else
+			heap
+
+# Internal: sift-down from index i
+*_pq_sift_down(heap, i)
+	size is heap.length
+	left is 2 * i + 1
+	right is 2 * i + 2
+	smallest is i
+	if left < size
+		if heap.get(left) < heap.get(smallest)
+			smallest is left
+	if right < size
+		if heap.get(right) < heap.get(smallest)
+			smallest is right
+	if smallest is i
+		heap
+	else
+		swapped is _pq_swap(heap, i, smallest)
+		_pq_sift_down(swapped, smallest)
+
+# Push a value onto the priority queue
+*pq_push(heap, value)
+	new_heap is heap.push(value)
+	_pq_sift_up(new_heap, new_heap.length - 1)
+
+# Peek at the minimum element (front of queue)
+*pq_peek(heap)
+	if heap.length is 0
+		absent
+	else
+		heap.get(0)
+
+# Pop the minimum element — returns [min_element, new_heap]
+*pq_pop(heap)
+	if heap.length is 0
+		[absent, heap]
+	else if heap.length is 1
+		[heap.get(0), []]
+	else
+		min_val is heap.get(0)
+		last is heap.get(heap.length - 1)
+		# Replace root with last, then remove last
+		rest is []
+		rest.push(last)
+		*build(i)
+			if i >= heap.length - 1
+				rest
+			else
+				rest.push(heap.get(i))
+				build(i + 1)
+		shrunk is build(1)
+		[min_val, _pq_sift_down(shrunk, 0)]
+
+# Get priority queue size
+*pq_size(heap)
+	heap.length
+
+# Check if priority queue is empty
+*pq_empty(heap)
+	heap.length is 0
+
+# ───────────────────────────────────────────────────────────
+# OrderedMap — insertion-ordered map (key-value pairs + key list)
+# ───────────────────────────────────────────────────────────
+
+# Create an empty ordered map: { data: map(), keys: [] }
+*ordered_map()
+	map().set("_data", map()).set("_keys", [])
+
+# Set a key-value pair, preserving insertion order
+*omap_set(om, key, value)
+	data is om.get("_data")
+	keys is om.get("_keys")
+	# Check if key already exists
+	existing is data.get(key)
+	new_data is data.set(key, value)
+	if existing is absent
+		new_keys is keys.push(key)
+		om.set("_data", new_data).set("_keys", new_keys)
+	else
+		om.set("_data", new_data)
+
+# Get a value by key
+*omap_get(om, key)
+	data is om.get("_data")
+	data.get(key)
+
+# Check if key exists
+*omap_has(om, key)
+	data is om.get("_data")
+	result is data.get(key)
+	result is_not absent
+
+# Get keys in insertion order
+*omap_keys(om)
+	om.get("_keys")
+
+# Get values in insertion order
+*omap_values(om)
+	keys is om.get("_keys")
+	data is om.get("_data")
+	result is []
+	*build(i)
+		if i >= keys.length
+			result
+		else
+			k is keys.get(i)
+			result.push(data.get(k))
+			build(i + 1)
+	build(0)
+
+# Get ordered map size
+*omap_size(om)
+	keys is om.get("_keys")
+	keys.length
+
+# Remove a key (preserves order of remaining keys)
+*omap_remove(om, key)
+	data is om.get("_data")
+	keys is om.get("_keys")
+	new_keys is []
+	*filter_keys(i)
+		if i >= keys.length
+			new_keys
+		else
+			k is keys.get(i)
+			if k is key
+				filter_keys(i + 1)
+			else
+				new_keys.push(k)
+				filter_keys(i + 1)
+	filtered is filter_keys(0)
+	# Remove from data map — set to absent to "delete"
+	new_data is data.set(key, absent)
+	om.set("_data", new_data).set("_keys", filtered)
+
+# ───────────────────────────────────────────────────────────
+# DefaultMap — map with a default factory function
+# ───────────────────────────────────────────────────────────
+
+# Create a default map: { data: map(), default_fn: fn }
+# The default_fn is called with the key when a missing key is accessed
+*default_map(default_fn)
+	map().set("_data", map()).set("_default", default_fn)
+
+# Get a value, using the default factory if key is missing
+*dmap_get(dm, key)
+	data is dm.get("_data")
+	result is data.get(key)
+	if result is absent
+		default_fn is dm.get("_default")
+		default_fn(key)
+	else
+		result
+
+# Get and store — if missing, stores the default value and returns it
+*dmap_get_or_set(dm, key)
+	data is dm.get("_data")
+	result is data.get(key)
+	if result is absent
+		default_fn is dm.get("_default")
+		val is default_fn(key)
+		new_data is data.set(key, val)
+		[val, dm.set("_data", new_data)]
+	else
+		[result, dm]
+
+# Set a value
+*dmap_set(dm, key, value)
+	data is dm.get("_data")
+	new_data is data.set(key, value)
+	dm.set("_data", new_data)
+
+# Check if key exists (without triggering default)
+*dmap_has(dm, key)
+	data is dm.get("_data")
+	result is data.get(key)
+	result is_not absent
+
+# Get underlying data map (without the default function)
+*dmap_data(dm)
+	dm.get("_data")
+
+# Get number of explicitly stored keys
+*dmap_size(dm)
+	data is dm.get("_data")
+	data.size

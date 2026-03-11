@@ -10,7 +10,7 @@ mod solver;
 pub mod env;
 
 pub use core::{TypeId, TypeVarId, Primitive, format_type};
-pub use solver::{ConstraintKind, ConstraintOrigin, ConstraintSet, TypeGraph, TypeError, solve_constraints, resolve};
+pub use solver::{ConstraintKind, ConstraintOrigin, ConstraintSet, TypeGraph, TypeError, TraitRegistry, solve_constraints, resolve};
 pub use env::{
     Binding, Scope, TypeEnv, FunctionSig, FunctionRegistry,
     Mutability, MutabilityEnv, AllocationStrategy, AllocationHints,

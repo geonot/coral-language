@@ -75,14 +75,16 @@ Items that improve generated code quality and enable advanced metaprogramming.
 | C2.5 | Store field specialization | Very High | Known-field stores → struct layout, direct offset loads |
 | C3.2 | Lambda inlining in HOFs | Very High | Inline lambda body into `map`/`filter` loop bodies |
 
-### Compile-Time Features
+### Compile-Time Features (Inferred Comptime)
+
+Coral's comptime is **not** an explicit keyword. The compiler intelligently detects expressions and bindings that can be fully evaluated at compile time — pure functions over literals and other comptime-known values are folded automatically. No annotation burden on the developer.
 
 | ID | Name | Complexity | Description |
 |----|------|:----------:|-------------|
-| C5.1 | Comptime code generation | Very High | `comptime` blocks producing AST/IR at compile time |
-| C5.2 | Comptime assertions | Medium | `comptime_assert(size_of(Point) <= 64)` |
+| C5.1 | Comptime code generation | Very High | Compiler-inferred AST/IR evaluation at compile time for pure expressions |
+| C5.2 | Inferred comptime evaluation | Medium | Constant folding, dead branch elimination, compile-time assertions via `assert_static()` |
 | C5.3 | Const generics | Very High | `type FixedArray[T, N]` with compile-time constant params |
-| C5.4 | Comptime string processing | High | Regex compilation, format validation at compile time |
+| C5.4 | Comptime string processing | High | Regex compilation, format validation detected and evaluated at compile time |
 
 ---
 
@@ -215,24 +217,23 @@ Focus: Round out syntax and stdlib for day-to-day usability.
 - R2.12 Actor integration tests
 - CC1.2 Shared test suite
 
-### Sprint 8 — Type Intelligence & Specialization
-- T2.4 Trait bounds on generics
-- T2.5 Monomorphization
-- C2.4 Unboxed list specialization
-- C2.5 Store field specialization
-- C3.2 Lambda inlining in HOFs
-- C5.2 Comptime assertions
-- L4.3 `std.collections`
+### Sprint 8 — Type Intelligence, Specialization & Performance Engineering
+Combined sprint: type system maturity, codegen specialization, inferred comptime, memory optimizations, and runtime data structure hardening. WASM target deferred to Sprint 9+.
 
-### Sprint 9 — Performance Engineering
-- M4.1 Escape analysis
-- M4.2 Stack-allocated values
-- M4.3 Copy-on-write
-- R1.1–R1.5 Runtime data structure optimizations
-- R4.4 Cache-line-aligned Value
-- CC4.1 WASM target
+- ✅ T2.4 Trait bounds on generics
+- ✅ T2.5 Monomorphization
+- ✅ C2.4 Unboxed list specialization
+- ✅ C2.5 Store field specialization
+- ✅ C3.2 Lambda inlining in HOFs (extend existing)
+- ✅ C5.2 Inferred comptime evaluation (compiler-detected, no explicit keyword)
+- ✅ L4.3 `std.collections`
+- ✅ M4.1 Escape analysis pass
+- ✅ M4.2 Stack-allocated values
+- ✅ M4.3 Copy-on-write semantics
+- ✅ R1.1–R1.5 Runtime data structure optimizations
+- ✅ R4.4 Cache-line-aligned Value
 
-### Sprint 10+ — Ecosystem & Bootstrap
+### Sprint 9+ — Ecosystem & Bootstrap
 - L4.4 Documentation generator
 - L4.5 Package manager
 - C5.1/C5.3/C5.4 Comptime features

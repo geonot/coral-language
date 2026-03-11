@@ -91,6 +91,11 @@ pub unsafe extern "C" fn coral_value_retain(value: ValueHandle) {
     }
     let value = unsafe { &*value };
 
+    // Stack-allocated values are immortal — skip refcounting entirely
+    if (value.flags & 0b1000_0000) != 0 {
+        return;
+    }
+
     // ── Non-atomic fast path (M2.2) ──────────────────────────────────────
     // When the value is still owned by the current thread, use plain
     // load+store instead of atomic fetch_add. On x86-64 this eliminates
@@ -127,6 +132,11 @@ pub unsafe extern "C" fn coral_value_release(value: ValueHandle) {
         return;
     }
     let value_ref = unsafe { &*value };
+
+    // Stack-allocated values are immortal — never freed
+    if (value_ref.flags & 0b1000_0000) != 0 {
+        return;
+    }
 
     // ── Non-atomic fast path (M2.2) ──────────────────────────────────────
     // When the value is still owned by the current thread, skip the CAS

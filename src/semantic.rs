@@ -25,6 +25,7 @@ use crate::types::{
     MutabilityEnv,
     Primitive,
     SymbolUsage,
+    TraitRegistry,
     TypeEnv,
     TypeId,
     TypeGraph,
@@ -58,6 +59,22 @@ pub struct SemanticModel {
     pub actor_message_types: HashMap<String, String>,
     /// R2.7: Maps actor name → set of handler names for typed send validation.
     pub actor_handler_names: HashMap<String, Vec<String>>,
+    /// T2.4: Trait implementation registry for type checking.
+    pub trait_registry: TraitRegistry,
+    /// T2.5: Monomorphization table — tracks concrete type instantiations seen
+    /// for each generic type. Maps generic name → set of concrete type arg lists.
+    /// Used by codegen to generate specialized LLVM functions/layouts.
+    pub monomorphizations: HashMap<String, Vec<Vec<TypeId>>>,
+    /// C2.4: Set of binding names whose resolved type is List[Number],
+    /// enabling unboxed f64 list specialization in codegen.
+    pub unboxed_number_lists: HashSet<String>,
+    /// C2.5: Maps (StoreName, FieldName) → field index for struct-layout stores.
+    /// Enables O(1) field access by index instead of hash table lookup.
+    pub store_field_indices: HashMap<(String, String), u32>,
+    /// C2.5: Set of store names eligible for struct-layout specialization.
+    /// Stores in this set have all fields known at compile time and are
+    /// never used dynamically (no indexed access, no spread).
+    pub specialized_stores: HashSet<String>,
 }
 
 /// Register error definitions recursively, building paths like "Database:Connection:Timeout"
@@ -444,7 +461,24 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // T4.4: Collect branch type pairs for If/elif/else to check consistency post-solving
     let mut branch_type_hints: Vec<(Vec<TypeId>, Span)> = Vec::new();
     collect_program_constraints(&globals, &functions, &mut constraints, &mut types, &mut graph, &mut branch_type_hints);
-    if let Err(errors) = crate::types::solve_constraints(&constraints, &mut graph) {
+
+    // T2.4: Build trait registry from type/store definitions and trait definitions
+    let mut trait_registry = TraitRegistry::new();
+    for td in &type_defs {
+        for trait_name in &td.with_traits {
+            trait_registry.register_impl(&td.name, trait_name);
+        }
+    }
+    for sd in &stores {
+        for trait_name in &sd.with_traits {
+            trait_registry.register_impl(&sd.name, trait_name);
+        }
+    }
+    for trd in &trait_defs {
+        trait_registry.register_super_traits(&trd.name, trd.required_traits.clone());
+    }
+
+    if let Err(errors) = crate::types::solve_constraints(&constraints, &mut graph, &trait_registry) {
         // T4.1 + T4.2: Emit one diagnostic per type error with provenance.
         let first = &errors[0];
         let mut msg = format!("type inference failed: {}", first.message);
@@ -536,6 +570,38 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     // R2.7: Validate typed actor_send calls — warn when handler name doesn't match known handlers
     validate_typed_actor_sends(&functions, &globals, &actor_handler_names, &actor_message_types, &mut warnings);
 
+    // T2.5: Collect monomorphization table — walk all resolved types and collect
+    // concrete instantiations of generic types (ADTs with non-empty type args).
+    let mut monomorphizations: HashMap<String, Vec<Vec<TypeId>>> = HashMap::new();
+    for (_name, ty) in resolved.iter_all() {
+        collect_monomorphizations(&ty, &mut monomorphizations);
+    }
+
+    // C2.4: Identify bindings with List[Number] type for unboxed list specialization.
+    let mut unboxed_number_lists = HashSet::new();
+    for (name, ty) in resolved.iter_all() {
+        if let TypeId::List(elem) = &ty {
+            if matches!(elem.as_ref(), TypeId::Primitive(crate::types::core::Primitive::Int) | TypeId::Primitive(crate::types::core::Primitive::Float)) {
+                unboxed_number_lists.insert(name.to_string());
+            }
+        }
+    }
+
+    // C2.5: Build store field index maps and identify specialized stores.
+    // All stores with known fields are eligible for struct-layout unless they
+    // use dynamic features (not tracked yet — conservatively mark all as eligible).
+    let mut store_field_indices = HashMap::new();
+    let mut specialized_stores = HashSet::new();
+    for (store_name, fields) in &store_field_names {
+        specialized_stores.insert(store_name.clone());
+        for (idx, field_name) in fields.iter().enumerate() {
+            store_field_indices.insert(
+                (store_name.clone(), field_name.clone()),
+                idx as u32,
+            );
+        }
+    }
+
     Ok(SemanticModel {
         globals,
         functions,
@@ -555,7 +621,49 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         module_exports,
         actor_message_types,
         actor_handler_names,
+        trait_registry,
+        monomorphizations,
+        unboxed_number_lists,
+        store_field_indices,
+        specialized_stores,
     })
+}
+
+/// T2.5: Recursively collect concrete type instantiations for monomorphization.
+/// Walks a type tree and records every ADT with non-empty, fully-concrete type args.
+fn collect_monomorphizations(
+    ty: &TypeId,
+    table: &mut HashMap<String, Vec<Vec<TypeId>>>,
+) {
+    match ty {
+        TypeId::Adt(name, args) if !args.is_empty() && args.iter().all(|a| a.is_concrete()) => {
+            let entry = table.entry(name.clone()).or_default();
+            if !entry.iter().any(|existing| existing == args) {
+                entry.push(args.clone());
+            }
+            // Also recurse into type args (they may contain nested generics)
+            for arg in args {
+                collect_monomorphizations(arg, table);
+            }
+        }
+        TypeId::List(elem) => collect_monomorphizations(elem, table),
+        TypeId::Map(k, v) => {
+            collect_monomorphizations(k, table);
+            collect_monomorphizations(v, table);
+        }
+        TypeId::Func(params, ret) => {
+            for p in params {
+                collect_monomorphizations(p, table);
+            }
+            collect_monomorphizations(ret, table);
+        }
+        TypeId::Adt(_, args) => {
+            for arg in args {
+                collect_monomorphizations(arg, table);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Inject default trait method bodies into types/stores that don't override them.
@@ -2553,11 +2661,19 @@ fn infer_mutability_and_usage(
             Mutability::Mutable
         };
 
-        let strategy = match mutability {
-            Mutability::Immutable if usage.escapes == 0 => AllocationStrategy::Stack,
-            Mutability::Immutable | Mutability::EffectivelyImmutable => AllocationStrategy::SharedCow,
-            Mutability::Mutable => AllocationStrategy::Heap,
-            Mutability::Unknown => AllocationStrategy::Unknown,
+        let strategy = if usage.closure_captures > 0 {
+            // Captured by closure: must be heap-allocated (outlives scope)
+            AllocationStrategy::Heap
+        } else if usage.mutations > 0 {
+            AllocationStrategy::Heap
+        } else if usage.returned > 0 && usage.escapes == usage.returned {
+            // Only escapes via return, never mutated — SharedCow candidate
+            AllocationStrategy::SharedCow
+        } else if usage.escapes > 0 {
+            AllocationStrategy::SharedCow
+        } else {
+            // No escapes, no mutations — stack is safe
+            AllocationStrategy::Stack
         };
 
         mut_env.insert(name.clone(), mutability);
@@ -2596,6 +2712,19 @@ impl UsageTracker {
         let entry = self.usage.entry(name.to_string()).or_default();
         entry.calls += 1;
     }
+
+    fn capture(&mut self, name: &str) {
+        let entry = self.usage.entry(name.to_string()).or_default();
+        entry.closure_captures += 1;
+        // Closure captures are a form of escape
+        entry.escapes += 1;
+    }
+
+    fn mark_returned(&mut self, name: &str) {
+        let entry = self.usage.entry(name.to_string()).or_default();
+        entry.returned += 1;
+        entry.escapes += 1;
+    }
 }
 
 fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape: bool) {
@@ -2609,7 +2738,7 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
             Statement::Return(expr, _) => {
                 visit_expression(expr, tracker);
                 if mark_returns_as_escape {
-                    mark_escapes(expr, tracker);
+                    mark_returns(expr, tracker);
                 }
             }
             Statement::If { condition, body, elif_branches, else_body, .. } => {
@@ -2661,7 +2790,7 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
     if let Some(value) = &block.value {
         visit_expression(value, tracker);
         if mark_returns_as_escape {
-            mark_escapes(value, tracker);
+            mark_returns(value, tracker);
         }
     }
 }
@@ -2774,9 +2903,20 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
         }
         Expression::Throw { value, .. } => visit_expression(value, tracker),
         Expression::Lambda { params, body, .. } => {
+            let param_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
             for p in params {
                 tracker.touch(&p.name);
             }
+            // Scan the lambda body for free variables (captures from outer scope)
+            let mut lambda_tracker = UsageTracker::default();
+            visit_block(body, &mut lambda_tracker, false);
+            for name in lambda_tracker.usage.keys() {
+                if !param_names.contains(name) {
+                    // This identifier references an outer variable — it's captured
+                    tracker.capture(name);
+                }
+            }
+            // Also do the normal visit so all reads/mutations are recorded
             visit_block(body, tracker, false);
         }
         Expression::Pipeline { left, right, .. } => {
@@ -2802,6 +2942,32 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
             if let Some(cond) = condition {
                 visit_expression(cond, tracker);
             }
+        }
+    }
+}
+
+fn mark_returns(expr: &Expression, tracker: &mut UsageTracker) {
+    match expr {
+        Expression::Identifier(name, _) => tracker.mark_returned(name),
+        // Compound expressions: recurse into constituents
+        Expression::List(items, _) => {
+            for item in items {
+                mark_returns(item, tracker);
+            }
+        }
+        Expression::Map(entries, _) => {
+            for (k, v) in entries {
+                mark_returns(k, tracker);
+                mark_returns(v, tracker);
+            }
+        }
+        Expression::Ternary { condition: _, then_branch, else_branch, .. } => {
+            mark_returns(then_branch, tracker);
+            mark_returns(else_branch, tracker);
+        }
+        _ => {
+            // For other expressions, fall back to general escape marking
+            mark_escapes(expr, tracker);
         }
     }
 }

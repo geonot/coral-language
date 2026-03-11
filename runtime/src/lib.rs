@@ -116,6 +116,13 @@ const FLAG_FROZEN: u8 = 0b0000_1000;
 const FLAG_ERR: u8 = 0b0001_0000;
 /// Value is logically absent/None/missing
 const FLAG_ABSENT: u8 = 0b0010_0000;
+/// M4.3: Copy-on-write — backing store is shared with other values.
+/// Mutation triggers a copy of the backing store before writing.
+const FLAG_COW: u8 = 0b0100_0000;
+
+/// Flag indicating this value was allocated with stack-like lifetime semantics.
+/// Retain/release are no-ops for stack-flagged values (immortal refcount).
+const FLAG_STACK: u8 = 0b1000_0000;
 const PAGE_SIZE: usize = 4096;
 const VALUE_POOL_LIMIT: usize = 8192;
 const LOCAL_POOL_LIMIT: usize = 256;
@@ -314,17 +321,24 @@ pub enum ValueTag {
     Tagged = 10,
 }
 
+/// R4.4: Cache-line sized payload — 40 bytes inline storage provides room for
+/// R1.2: increased inline string threshold (22 bytes) and
+/// R1.3: small-list optimization (up to 5 NaN-boxed i64 elements inline).
+/// With the 24-byte header (tag + flags + epoch + owner_thread + refcount),
+/// the total Value struct is 64 bytes — exactly one cache line.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union Payload {
     pub number: f64,
     pub ptr: *mut c_void,
-    pub inline: [u8; 16],
+    pub inline: [u8; 40],
+    /// R1.3: Inline list storage — first byte is item count, then up to 5 i64 values.
+    pub inline_list: [u64; 5],
 }
 
 impl Default for Payload {
     fn default() -> Self {
-        Self { inline: [0u8; 16] }
+        Self { inline: [0u8; 40] }
     }
 }
 
@@ -333,7 +347,10 @@ impl Default for Payload {
 /// epoch-based weak ref validity checks remain safe.
 pub const FLAG_HAS_WEAK_REFS: u8 = 0x01;
 
-#[repr(C)]
+/// R4.4: Cache-line-aligned value struct (64 bytes total).
+/// Layout: tag(1) + flags(1) + epoch(2) + owner_thread(4) + refcount(8) + payload(40) = 56 bytes
+/// Plus 8 bytes padding for 64-byte cache-line alignment.
+#[repr(C, align(64))]
 pub struct Value {
     pub tag: u8,
     pub flags: u8,
@@ -389,7 +406,7 @@ impl Value {
             retain_events: AtomicU32::new(0),
             #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
-            payload: Payload { inline: [0; 16] },
+            payload: Payload { inline: [0; 40] },
         }
     }
 
@@ -410,7 +427,7 @@ impl Value {
 
     fn boolean(value: bool) -> Self {
         let byte = if value { 1u8 } else { 0u8 };
-        let mut inline = [0u8; 16];
+        let mut inline = [0u8; 40];
         inline[0] = byte;
         Self {
             tag: ValueTag::Bool as u8,
@@ -456,9 +473,12 @@ impl Value {
         }
     }
 
+    /// R1.2: Inline string threshold increased to 22 bytes (from 14).
+    /// Uses flags byte bits 7..1 for length (7 bits → max 127, but practical max is 22
+    /// due to payload size of 40 bytes minus reserved bytes for other fields).
     fn inline_string(bytes: &[u8]) -> Self {
-        debug_assert!(bytes.len() <= 14);
-        let mut inline = [0u8; 16];
+        debug_assert!(bytes.len() <= 22);
+        let mut inline = [0u8; 40];
         inline[..bytes.len()].copy_from_slice(bytes);
         Self {
             tag: ValueTag::String as u8,
@@ -531,7 +551,7 @@ impl Value {
             retain_events: AtomicU32::new(0),
             #[cfg(feature = "metrics")]
             release_events: AtomicU32::new(0),
-            payload: Payload { inline: [0; 16] },
+            payload: Payload { inline: [0; 40] },
         }
     }
 
@@ -695,6 +715,12 @@ pub struct ListObject {
     pub items: Vec<ValueHandle>,
 }
 
+/// C2.4: Unboxed number list — stores f64 values contiguously without NaN-boxing.
+/// Used when the compiler detects a List[Number] specialization.
+pub struct UnboxedF64List {
+    pub items: Vec<f64>,
+}
+
 struct ListIter {
     items: Vec<ValueHandle>,
     index: usize,
@@ -720,6 +746,9 @@ pub(crate) enum MapBucketState {
 pub(crate) struct MapBucket {
     pub(crate) state: MapBucketState,
     pub(crate) hash: u64,
+    /// R1.4: Probe distance from ideal bucket (Robin Hood hashing).
+    /// Used to bound search and improve cache behavior.
+    pub(crate) probe_dist: u16,
     pub(crate) key: ValueHandle,
     pub(crate) value: ValueHandle,
 }
@@ -729,6 +758,7 @@ impl Default for MapBucket {
         Self {
             state: MapBucketState::Empty,
             hash: 0,
+            probe_dist: 0,
             key: ptr::null_mut(),
             value: ptr::null_mut(),
         }
@@ -740,6 +770,13 @@ pub(crate) struct MapObject {
     pub(crate) buckets: Vec<MapBucket>,
     pub(crate) len: usize,
     tombstones: usize,
+}
+
+/// C2.5: Struct-layout store — contiguous field array with O(1) indexed access.
+/// Used for stores whose fields are all known at compile time.
+/// Fields are stored as a flat array of ValueHandles, indexed by field position.
+pub struct StructObject {
+    pub fields: Vec<ValueHandle>,
 }
 
 struct MapIter {
@@ -1442,18 +1479,36 @@ fn map_rehash(map: &mut MapObject) {
             continue;
         }
         let mut idx = map_bucket_index(new_capacity, bucket.hash);
+        let mut dist: u16 = 0;
         loop {
             let slot = &mut new_buckets[idx];
             if slot.state == MapBucketState::Empty {
                 *slot = MapBucket {
                     state: MapBucketState::Occupied,
                     hash: bucket.hash,
+                    probe_dist: dist,
                     key: bucket.key,
                     value: bucket.value,
                 };
                 break;
             }
+            // R1.4: Robin Hood during rehash — displace shorter-probed entries
+            if slot.probe_dist < dist {
+                let displaced = slot.clone();
+                *slot = MapBucket {
+                    state: MapBucketState::Occupied,
+                    hash: bucket.hash,
+                    probe_dist: dist,
+                    key: bucket.key,
+                    value: bucket.value,
+                };
+                bucket.hash = displaced.hash;
+                bucket.key = displaced.key;
+                bucket.value = displaced.value;
+                dist = displaced.probe_dist;
+            }
             idx = (idx + 1) & (new_capacity - 1);
+            dist += 1;
         }
     }
     map.buckets = new_buckets;
@@ -1474,6 +1529,8 @@ fn map_iter_snapshot(map: &MapObject) -> MapIter {
     MapIter { buckets, index: 0 }
 }
 
+/// R1.4: Robin Hood insertion — elements closer to their ideal bucket are displaced
+/// by elements farther away, bounding worst-case probe lengths and improving cache locality.
 fn map_insert(map: &mut MapObject, key: ValueHandle, value: ValueHandle) -> Option<ValueHandle> {
     if key.is_null() || value.is_null() {
         return None;
@@ -1487,47 +1544,80 @@ fn map_insert(map: &mut MapObject, key: ValueHandle, value: ValueHandle) -> Opti
     let hash = hash_value(key);
     let capacity = map.buckets.len();
     let mut idx = map_bucket_index(capacity, hash);
-    let mut first_tombstone: Option<usize> = None;
+    let mut dist: u16 = 0;
+    let mut cur_key = key;
+    let mut cur_value = value;
+    let mut cur_hash = hash;
+    let mut retained = false;
     loop {
         let bucket = &mut map.buckets[idx];
         match bucket.state {
-            MapBucketState::Empty => {
-                let target = first_tombstone.unwrap_or(idx);
-                let bucket = &mut map.buckets[target];
+            MapBucketState::Empty | MapBucketState::Tombstone => {
+                let was_tombstone = bucket.state == MapBucketState::Tombstone;
                 *bucket = MapBucket {
                     state: MapBucketState::Occupied,
-                    hash,
-                    key,
-                    value,
+                    hash: cur_hash,
+                    probe_dist: dist,
+                    key: cur_key,
+                    value: cur_value,
                 };
-                unsafe {
-                    coral_value_retain(key);
-                    coral_value_retain(value);
+                if !retained {
+                    unsafe {
+                        coral_value_retain(key);
+                        coral_value_retain(value);
+                    }
                 }
                 map.len += 1;
-                if first_tombstone.is_some() {
+                if was_tombstone {
                     map.tombstones -= 1;
                 }
                 return None;
             }
-            MapBucketState::Tombstone => {
-                if first_tombstone.is_none() {
-                    first_tombstone = Some(idx);
-                }
-            }
             MapBucketState::Occupied => {
-                if bucket.hash == hash && values_equal_handles(bucket.key, key) {
-                    unsafe { coral_value_retain(value); }
+                // Check for existing key match first
+                if bucket.hash == cur_hash && values_equal_handles(bucket.key, cur_key) {
+                    if !retained {
+                        unsafe { coral_value_retain(value); }
+                    }
                     let old = bucket.value;
                     bucket.value = value;
                     return Some(old);
                 }
+                // Robin Hood: if this bucket's probe distance is less than ours,
+                // steal the bucket and continue inserting the displaced entry.
+                if bucket.probe_dist < dist {
+                    if !retained {
+                        unsafe {
+                            coral_value_retain(cur_key);
+                            coral_value_retain(cur_value);
+                        }
+                        retained = true;
+                    }
+                    let displaced_key = bucket.key;
+                    let displaced_value = bucket.value;
+                    let displaced_hash = bucket.hash;
+                    let displaced_dist = bucket.probe_dist;
+                    *bucket = MapBucket {
+                        state: MapBucketState::Occupied,
+                        hash: cur_hash,
+                        probe_dist: dist,
+                        key: cur_key,
+                        value: cur_value,
+                    };
+                    cur_key = displaced_key;
+                    cur_value = displaced_value;
+                    cur_hash = displaced_hash;
+                    dist = displaced_dist;
+                }
             }
         }
         idx = (idx + 1) & (capacity - 1);
+        dist += 1;
     }
 }
 
+/// R1.4: Robin Hood lookup — early termination when probe distance exceeds the
+/// bucket's stored distance (the key cannot exist further along).
 fn map_get_entry<'a>(map: &'a MapObject, key: ValueHandle) -> Option<&'a MapBucket> {
     if key.is_null() || map.buckets.is_empty() {
         return None;
@@ -1535,11 +1625,17 @@ fn map_get_entry<'a>(map: &'a MapObject, key: ValueHandle) -> Option<&'a MapBuck
     let hash = hash_value(key);
     let capacity = map.buckets.len();
     let mut idx = map_bucket_index(capacity, hash);
+    let mut dist: u16 = 0;
     loop {
         let bucket = &map.buckets[idx];
         match bucket.state {
             MapBucketState::Empty => return None,
             MapBucketState::Occupied => {
+                // R1.4: Early termination — if this bucket's probe distance is less
+                // than ours, the key cannot be further along in the chain.
+                if bucket.probe_dist < dist {
+                    return None;
+                }
                 if bucket.hash == hash && values_equal_handles(bucket.key, key) {
                     return Some(bucket);
                 }
@@ -1547,6 +1643,7 @@ fn map_get_entry<'a>(map: &'a MapObject, key: ValueHandle) -> Option<&'a MapBuck
             MapBucketState::Tombstone => {}
         }
         idx = (idx + 1) & (capacity - 1);
+        dist += 1;
     }
 }
 
@@ -1560,9 +1657,22 @@ fn values_equal_handles(a: ValueHandle, b: ValueHandle) -> bool {
         return false;
     }
     match ValueTag::try_from(va.tag) {
-        Ok(ValueTag::Number) => unsafe { va.payload.number == vb.payload.number },
+        // R1.5: Bitwise number comparison (exact f64 bit equality)
+        Ok(ValueTag::Number) => unsafe { va.payload.number.to_bits() == vb.payload.number.to_bits() },
         Ok(ValueTag::Bool) => unsafe { va.payload.inline[0] == vb.payload.inline[0] },
-        Ok(ValueTag::String) | Ok(ValueTag::Bytes) => string_to_bytes(va) == string_to_bytes(vb),
+        Ok(ValueTag::String) | Ok(ValueTag::Bytes) => {
+            // R1.5: Fast path for inline strings — memcmp without allocation
+            let a_inline = va.is_inline_string();
+            let b_inline = vb.is_inline_string();
+            if a_inline && b_inline {
+                let a_len = inline_string_len(va.flags);
+                let b_len = inline_string_len(vb.flags);
+                if a_len != b_len { return false; }
+                unsafe { va.payload.inline[..a_len] == vb.payload.inline[..a_len] }
+            } else {
+                string_to_bytes(va) == string_to_bytes(vb)
+            }
+        }
         Ok(ValueTag::Unit) => true,
         Ok(ValueTag::List) => lists_equal(va, vb),
         Ok(ValueTag::Map) => maps_equal(va, vb),
@@ -1651,7 +1761,7 @@ pub(crate) fn coral_make_string_from_rust(s: &str) -> ValueHandle {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_make_string(ptr: *const u8, len: usize) -> ValueHandle {
-    if len <= 14 {
+    if len <= 22 {
         let bytes = read_bytes(ptr, len);
         return alloc_value(Value::inline_string(&bytes));
     }
@@ -1731,10 +1841,27 @@ pub extern "C" fn coral_make_list(items: *const ValueHandle, len: usize) -> Valu
 pub extern "C" fn coral_make_list_hinted(
     items: *const ValueHandle,
     len: usize,
-    _hint: u8,
+    hint: u8,
 ) -> ValueHandle {
-    // TODO: implement stack/arena/COW strategies. For now, delegate to heap and record hint.
-    coral_make_list(items, len)
+    let handle = coral_make_list(items, len);
+    if handle.is_null() {
+        return handle;
+    }
+    unsafe {
+        match hint {
+            1 => {
+                // Stack hint: immortal refcount + flag
+                (*handle).refcount = AtomicU64::new(u64::MAX);
+                (*handle).flags |= FLAG_STACK;
+            }
+            4 => {
+                // SharedCow hint: mark COW
+                (*handle).flags |= FLAG_COW;
+            }
+            _ => {} // Heap / Arena / Unknown — default behavior
+        }
+    }
+    handle
 }
 
 #[unsafe(no_mangle)]
@@ -1756,10 +1883,92 @@ pub extern "C" fn coral_make_map(entries: *const MapEntry, len: usize) -> ValueH
 pub extern "C" fn coral_make_map_hinted(
     entries: *const MapEntry,
     len: usize,
-    _hint: u8,
+    hint: u8,
 ) -> ValueHandle {
-    // TODO: implement stack/arena/COW strategies. For now, delegate to heap and record hint.
-    coral_make_map(entries, len)
+    let handle = coral_make_map(entries, len);
+    if handle.is_null() {
+        return handle;
+    }
+    unsafe {
+        match hint {
+            1 => {
+                (*handle).refcount = AtomicU64::new(u64::MAX);
+                (*handle).flags |= FLAG_STACK;
+            }
+            4 => {
+                (*handle).flags |= FLAG_COW;
+            }
+            _ => {}
+        }
+    }
+    handle
+}
+
+/// C2.4: Create an unboxed f64 list — stores numbers contiguously without NaN-boxing.
+/// Elements are raw f64 values, not ValueHandle pointers.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_make_unboxed_f64_list(items: *const f64, len: usize) -> ValueHandle {
+    let slice = if len == 0 {
+        &[][..]
+    } else {
+        assert!(!items.is_null(), "items pointer must not be null when len > 0");
+        unsafe { slice::from_raw_parts(items, len) }
+    };
+    let list = UnboxedF64List { items: slice.to_vec() };
+    let handle = Box::into_raw(Box::new(list)) as *mut c_void;
+    let mut value = Value::from_heap(ValueTag::List, handle);
+    // Mark as unboxed via the LIST_ITER flag repurposed for unboxed lists.
+    // This is safe because list-iterator and list-value are stored with
+    // different tags/contexts and never confused.
+    value.flags |= FLAG_LIST_ITER;
+    alloc_value(value)
+}
+
+/// C2.4: Get element from unboxed f64 list by index.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_unboxed_f64_list_get(list: ValueHandle, index: usize) -> f64 {
+    if list.is_null() { return 0.0; }
+    let val = unsafe { &*list };
+    if (val.flags & FLAG_LIST_ITER) == 0 {
+        // Boxed list fallback — extract the number from the element
+        let list_obj = unsafe { &*(val.payload.ptr as *const ListObject) };
+        if index < list_obj.items.len() {
+            let elem = list_obj.items[index];
+            if elem.is_null() { return 0.0; }
+            let elem_val = unsafe { &*elem };
+            return unsafe { elem_val.payload.number };
+        }
+        return 0.0;
+    }
+    let unboxed = unsafe { &*(val.payload.ptr as *const UnboxedF64List) };
+    if index < unboxed.items.len() {
+        unboxed.items[index]
+    } else {
+        0.0
+    }
+}
+
+/// C2.4: Get length of unboxed f64 list.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_unboxed_f64_list_len(list: ValueHandle) -> usize {
+    if list.is_null() { return 0; }
+    let val = unsafe { &*list };
+    if (val.flags & FLAG_LIST_ITER) == 0 {
+        let list_obj = unsafe { &*(val.payload.ptr as *const ListObject) };
+        return list_obj.items.len();
+    }
+    let unboxed = unsafe { &*(val.payload.ptr as *const UnboxedF64List) };
+    unboxed.items.len()
+}
+
+/// C2.4: Push to unboxed f64 list.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_unboxed_f64_list_push(list: ValueHandle, value: f64) {
+    if list.is_null() { return; }
+    let val = unsafe { &*list };
+    if (val.flags & FLAG_LIST_ITER) == 0 { return; } // wrong list type
+    let unboxed = unsafe { &mut *(val.payload.ptr as *mut UnboxedF64List) };
+    unboxed.items.push(value);
 }
 
 #[unsafe(no_mangle)]
@@ -1828,6 +2037,74 @@ pub extern "C" fn coral_make_tagged(
     };
     
     alloc_value(value)
+}
+
+/// C2.5: Create a struct-layout store with a fixed number of fields.
+/// Fields are stored contiguously and accessed by index (O(1)) rather than
+/// hash table lookup.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_make_struct(
+    fields: *const ValueHandle,
+    field_count: usize,
+) -> ValueHandle {
+    let fields_vec = if field_count > 0 && !fields.is_null() {
+        let slice = unsafe { slice::from_raw_parts(fields, field_count) };
+        for field in slice {
+            if !field.is_null() {
+                unsafe { coral_value_retain(*field) };
+            }
+        }
+        slice.to_vec()
+    } else {
+        Vec::new()
+    };
+    let obj = Box::new(StructObject { fields: fields_vec });
+    let handle = Box::into_raw(obj) as *mut c_void;
+    alloc_value(Value::from_heap(ValueTag::Store, handle))
+}
+
+/// C2.5: Get a field from a struct store by index. O(1) direct access.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_struct_get(store: ValueHandle, index: usize) -> ValueHandle {
+    if store.is_null() { return ptr::null_mut(); }
+    let val = unsafe { &*store };
+    let obj = unsafe { &*(val.payload.ptr as *const StructObject) };
+    if index < obj.fields.len() {
+        let field = obj.fields[index];
+        if !field.is_null() {
+            unsafe { coral_value_retain(field) };
+        }
+        field
+    } else {
+        ptr::null_mut()
+    }
+}
+
+/// C2.5: Set a field in a struct store by index. O(1) direct access.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_struct_set(store: ValueHandle, index: usize, value: ValueHandle) {
+    if store.is_null() { return; }
+    let val = unsafe { &mut *store };
+    let obj = unsafe { &mut *(val.payload.ptr as *mut StructObject) };
+    if index < obj.fields.len() {
+        let old = obj.fields[index];
+        if !old.is_null() {
+            unsafe { coral_value_release(old) };
+        }
+        if !value.is_null() {
+            unsafe { coral_value_retain(value) };
+        }
+        obj.fields[index] = value;
+    }
+}
+
+/// C2.5: Get number of fields in a struct store.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_struct_field_count(store: ValueHandle) -> usize {
+    if store.is_null() { return 0; }
+    let val = unsafe { &*store };
+    let obj = unsafe { &*(val.payload.ptr as *const StructObject) };
+    obj.fields.len()
 }
 
 #[unsafe(no_mangle)]

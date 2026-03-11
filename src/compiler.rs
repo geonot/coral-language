@@ -475,57 +475,147 @@ impl Compiler {
     
     fn fold_block(block: &mut crate::ast::Block) {
         // First fold all expressions within statements.
-        for stmt in &mut block.statements {
+        let mut new_stmts: Vec<crate::ast::Statement> = Vec::new();
+        for stmt in std::mem::take(&mut block.statements) {
             match stmt {
-                crate::ast::Statement::Binding(binding) => {
+                crate::ast::Statement::Binding(mut binding) => {
                     binding.value = Self::fold_expr(binding.value.clone());
+                    new_stmts.push(crate::ast::Statement::Binding(binding));
                 }
                 crate::ast::Statement::Expression(expr) => {
-                    *expr = Self::fold_expr(expr.clone());
+                    let folded = Self::fold_expr(expr);
+                    new_stmts.push(crate::ast::Statement::Expression(folded));
                 }
-                crate::ast::Statement::Return(expr, _) => {
-                    *expr = Self::fold_expr(expr.clone());
+                crate::ast::Statement::Return(expr, span) => {
+                    let folded = Self::fold_expr(expr);
+                    new_stmts.push(crate::ast::Statement::Return(folded, span));
                 }
-                crate::ast::Statement::If { condition, body, elif_branches, else_body, .. } => {
-                    *condition = Self::fold_expr(condition.clone());
-                    Self::fold_block(body);
-                    for (cond, blk) in elif_branches.iter_mut() {
-                        *cond = Self::fold_expr(cond.clone());
-                        Self::fold_block(blk);
+                crate::ast::Statement::If { condition, mut body, elif_branches, else_body, span } => {
+                    let folded_cond = Self::fold_expr(condition);
+                    Self::fold_block(&mut body);
+
+                    // C5.2: Dead branch elimination — if condition is constant bool,
+                    // inline the taken branch and discard the rest.
+                    if let Expression::Bool(true, _) = &folded_cond {
+                        // Condition always true — inline the body
+                        for s in body.statements {
+                            new_stmts.push(s);
+                        }
+                        // If body has a trailing value, wrap as expression stmt
+                        if let Some(val) = body.value {
+                            new_stmts.push(crate::ast::Statement::Expression(*val));
+                        }
+                        continue;
                     }
-                    if let Some(else_blk) = else_body {
-                        Self::fold_block(else_blk);
+                    if let Expression::Bool(false, _) = &folded_cond {
+                        // Condition always false — check elif branches
+                        let mut taken = false;
+                        let mut else_body = else_body; // shadow to mut
+                        let mut remaining_elifs: Vec<(Expression, crate::ast::Block)> = Vec::new();
+                        let mut pass_through = false;
+                        for (cond, mut blk) in elif_branches {
+                            if pass_through {
+                                let fc = Self::fold_expr(cond);
+                                Self::fold_block(&mut blk);
+                                remaining_elifs.push((fc, blk));
+                                continue;
+                            }
+                            let folded_elif = Self::fold_expr(cond);
+                            Self::fold_block(&mut blk);
+                            if let Expression::Bool(true, _) = &folded_elif {
+                                for s in blk.statements {
+                                    new_stmts.push(s);
+                                }
+                                if let Some(val) = blk.value {
+                                    new_stmts.push(crate::ast::Statement::Expression(*val));
+                                }
+                                taken = true;
+                                break;
+                            }
+                            if let Expression::Bool(false, _) = &folded_elif {
+                                continue;
+                            }
+                            remaining_elifs.push((folded_elif, blk));
+                            pass_through = true;
+                        }
+                        if !taken && !remaining_elifs.is_empty() {
+                            let (first_cond, first_body) = remaining_elifs.remove(0);
+                            let folded_else = else_body.take().map(|mut blk| { Self::fold_block(&mut blk); blk });
+                            new_stmts.push(crate::ast::Statement::If {
+                                condition: first_cond,
+                                body: first_body,
+                                elif_branches: remaining_elifs,
+                                else_body: folded_else,
+                                span,
+                            });
+                            taken = true;
+                        }
+                        if !taken {
+                            if let Some(mut else_blk) = else_body {
+                                Self::fold_block(&mut else_blk);
+                                for s in else_blk.statements {
+                                    new_stmts.push(s);
+                                }
+                                if let Some(val) = else_blk.value {
+                                    new_stmts.push(crate::ast::Statement::Expression(*val));
+                                }
+                            }
+                        }
+                        continue;
                     }
-                }
-                crate::ast::Statement::While { condition, body, .. } => {
-                    *condition = Self::fold_expr(condition.clone());
-                    Self::fold_block(body);
-                }
-                crate::ast::Statement::For { iterable, body, .. } => {
-                    *iterable = Self::fold_expr(iterable.clone());
-                    Self::fold_block(body);
-                }
-                crate::ast::Statement::ForKV { iterable, body, .. } => {
-                    *iterable = Self::fold_expr(iterable.clone());
-                    Self::fold_block(body);
-                }
-                crate::ast::Statement::ForRange { start, end, step, body, .. } => {
-                    *start = Self::fold_expr(start.clone());
-                    *end = Self::fold_expr(end.clone());
-                    if let Some(s) = step {
-                        *s = Self::fold_expr(s.clone());
+
+                    // Non-constant condition — fold sub-expressions and keep
+                    let mut folded_elifs = Vec::new();
+                    for (cond, mut blk) in elif_branches {
+                        let fc = Self::fold_expr(cond);
+                        Self::fold_block(&mut blk);
+                        folded_elifs.push((fc, blk));
                     }
-                    Self::fold_block(body);
+                    let folded_else = else_body.map(|mut blk| { Self::fold_block(&mut blk); blk });
+                    new_stmts.push(crate::ast::Statement::If {
+                        condition: folded_cond,
+                        body,
+                        elif_branches: folded_elifs,
+                        else_body: folded_else,
+                        span,
+                    });
                 }
-                crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_) => {}
-                crate::ast::Statement::FieldAssign { value, .. } => {
-                    *value = Self::fold_expr(value.clone());
+                crate::ast::Statement::While { condition, mut body, span } => {
+                    let folded_cond = Self::fold_expr(condition);
+                    Self::fold_block(&mut body);
+                    new_stmts.push(crate::ast::Statement::While { condition: folded_cond, body, span });
                 }
-                crate::ast::Statement::PatternBinding { value, .. } => {
-                    *value = Self::fold_expr(value.clone());
+                crate::ast::Statement::For { iterable, mut body, variable, span } => {
+                    let folded_iter = Self::fold_expr(iterable);
+                    Self::fold_block(&mut body);
+                    new_stmts.push(crate::ast::Statement::For { iterable: folded_iter, body, variable, span });
+                }
+                crate::ast::Statement::ForKV { iterable, mut body, key_var, value_var, span } => {
+                    let folded_iter = Self::fold_expr(iterable);
+                    Self::fold_block(&mut body);
+                    new_stmts.push(crate::ast::Statement::ForKV { iterable: folded_iter, body, key_var, value_var, span });
+                }
+                crate::ast::Statement::ForRange { start, end, step, mut body, variable, span } => {
+                    let folded_start = Self::fold_expr(start);
+                    let folded_end = Self::fold_expr(end);
+                    let folded_step = step.map(Self::fold_expr);
+                    Self::fold_block(&mut body);
+                    new_stmts.push(crate::ast::Statement::ForRange { start: folded_start, end: folded_end, step: folded_step, body, variable, span });
+                }
+                stmt @ (crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_)) => {
+                    new_stmts.push(stmt);
+                }
+                crate::ast::Statement::FieldAssign { target, field, value, span } => {
+                    let folded_val = Self::fold_expr(value);
+                    new_stmts.push(crate::ast::Statement::FieldAssign { target, field, value: folded_val, span });
+                }
+                crate::ast::Statement::PatternBinding { pattern, value, span } => {
+                    let folded_val = Self::fold_expr(value);
+                    new_stmts.push(crate::ast::Statement::PatternBinding { pattern, value: folded_val, span });
                 }
             }
         }
+        block.statements = new_stmts;
         
         // C1.5: Dead expression elimination — remove pure expression statements
         // whose results are unused (literals, identifiers, operations with no side effects).
@@ -688,6 +778,33 @@ impl Compiler {
                         // length() on list literal → number of items
                         if let Expression::List(ref items, _) = args[0] {
                             return Expression::Integer(items.len() as i64, span);
+                        }
+                    }
+
+                    // C5.2: assert_static() — compile-time assertion
+                    // If the argument folds to false, emit a compile-time panic.
+                    // If it folds to true, eliminate the call entirely (return unit).
+                    if name == "assert_static" && args.len() >= 1 {
+                        match &args[0] {
+                            Expression::Bool(false, _) => {
+                                let msg = if args.len() >= 2 {
+                                    if let Expression::String(s, _) = &args[1] {
+                                        s.clone()
+                                    } else {
+                                        "static assertion failed".to_string()
+                                    }
+                                } else {
+                                    "static assertion failed".to_string()
+                                };
+                                panic!("assert_static: {}", msg);
+                            }
+                            Expression::Bool(true, _) => {
+                                // Assertion passed at compile time — elide the call
+                                return Expression::Unit;
+                            }
+                            _ => {
+                                // Not a constant — leave as runtime call
+                            }
                         }
                     }
                 }

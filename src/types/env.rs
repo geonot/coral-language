@@ -498,6 +498,10 @@ pub struct SymbolUsage {
     pub mutations: u64,
     pub escapes: u64,
     pub calls: u64,
+    /// Number of times this symbol is captured by a closure/lambda.
+    pub closure_captures: u64,
+    /// Number of times this symbol is returned from its defining scope.
+    pub returned: u64,
 }
 
 /// Aggregated usage metrics for all symbols.

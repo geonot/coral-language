@@ -285,6 +285,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                         span,
                     ));
                 }
+                // C3.2: Inline lambda body for reduce when no seed
+                if args.len() == 1 {
+                    if let Expression::Lambda { params, body, .. } = &args[0] {
+                        if params.len() == 2 {
+                            return self.emit_inline_reduce(
+                                ctx, target, &params[0].name, &params[1].name, body, span,
+                            );
+                        }
+                    }
+                }
                 let list_value = self.emit_expression(ctx, target)?;
                 let (seed_arg, func_value) = if args.len() == 1 {
                     (self.wrap_none(), self.emit_expression(ctx, &args[0])?)
@@ -296,6 +306,48 @@ impl<'ctx> CodeGenerator<'ctx> {
                     &[list_value, seed_arg, func_value],
                     "list_reduce",
                 ))
+            }
+            "find" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list.find expects a single predicate", span));
+                }
+                // C3.2: Inline lambda body for find
+                if let Expression::Lambda { params, body, .. } = &args[0] {
+                    if params.len() == 1 {
+                        return self.emit_inline_find(ctx, target, &params[0].name, body, span);
+                    }
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let func_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.list_find, &[list_value, func_value], "list_find"))
+            }
+            "any" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list.any expects a single predicate", span));
+                }
+                // C3.2: Inline lambda body for any
+                if let Expression::Lambda { params, body, .. } = &args[0] {
+                    if params.len() == 1 {
+                        return self.emit_inline_any(ctx, target, &params[0].name, body, span);
+                    }
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let func_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.list_any, &[list_value, func_value], "list_any"))
+            }
+            "all" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("list.all expects a single predicate", span));
+                }
+                // C3.2: Inline lambda body for all
+                if let Expression::Lambda { params, body, .. } = &args[0] {
+                    if params.len() == 1 {
+                        return self.emit_inline_all(ctx, target, &params[0].name, body, span);
+                    }
+                }
+                let list_value = self.emit_expression(ctx, target)?;
+                let func_value = self.emit_expression(ctx, &args[0])?;
+                Ok(self.call_bridged(self.runtime.list_all, &[list_value, func_value], "list_all"))
             }
             "push" => {
                 if args.len() != 1 {
@@ -1979,5 +2031,296 @@ impl<'ctx> CodeGenerator<'ctx> {
         let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "filter_result")
             .unwrap().into_int_value();
         Ok(final_out)
+    }
+
+    /// C3.2: Emit an inline reduce loop, directly embedding the reducer body.
+    fn emit_inline_reduce(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        acc_name: &str,
+        elem_name: &str,
+        body: &Block,
+        _span: Span,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let function = ctx.function;
+        let list_value = self.emit_expression(ctx, target)?;
+
+        let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "reduce_len");
+        let len_f64 = self.value_to_number(len_nb);
+
+        // Accumulator alloca — initialized to first element
+        let acc_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "reduce_acc").unwrap();
+        let zero_idx = self.wrap_number(self.f64_type.const_float(0.0));
+        let first_elem = self.call_bridged(self.runtime.list_get, &[list_value, zero_idx], "reduce_first");
+        self.builder.build_store(acc_alloca, first_elem).unwrap();
+
+        // Counter alloca — start at 1 (skip first element)
+        let counter_alloca = self.builder.build_alloca(self.f64_type, "reduce_counter").unwrap();
+        self.builder.build_store(counter_alloca, self.f64_type.const_float(1.0)).unwrap();
+
+        let loop_header = self.context.append_basic_block(function, "reduce_cond");
+        let loop_body = self.context.append_basic_block(function, "reduce_body");
+        let loop_exit = self.context.append_basic_block(function, "reduce_exit");
+
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        // Header: check counter < length
+        self.builder.position_at_end(loop_header);
+        let current = self.builder.build_load(self.f64_type, counter_alloca, "reduce_i")
+            .unwrap().into_float_value();
+        let is_done = self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE, current, len_f64, "reduce_done",
+        ).unwrap();
+        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+        // Body: bind acc and elem, inline body, store result as new acc
+        self.builder.position_at_end(loop_body);
+        ctx.cse_cache.clear();
+        let acc_val = self.builder.build_load(self.runtime.value_i64_type, acc_alloca, "acc_val")
+            .unwrap().into_int_value();
+        let idx_nb = self.wrap_number(current);
+        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "reduce_elem");
+        self.store_variable(ctx, acc_name, acc_val);
+        self.store_variable(ctx, elem_name, elem_nb);
+
+        let result = self.emit_block(ctx, body)?;
+        self.builder.build_store(acc_alloca, result).unwrap();
+
+        // Increment counter
+        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "reduce_cur_upd")
+                .unwrap().into_float_value();
+            let next = self.builder.build_float_add(
+                cur_f64, self.f64_type.const_float(1.0), "reduce_next",
+            ).unwrap();
+            self.builder.build_store(counter_alloca, next).unwrap();
+            self.builder.build_unconditional_branch(loop_header).unwrap();
+        }
+
+        self.builder.position_at_end(loop_exit);
+        let final_acc = self.builder.build_load(self.runtime.value_i64_type, acc_alloca, "reduce_result")
+            .unwrap().into_int_value();
+        Ok(final_acc)
+    }
+
+    /// C3.2: Emit an inline find loop — returns first element where predicate is truthy, else absent.
+    fn emit_inline_find(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        param_name: &str,
+        body: &Block,
+        _span: Span,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let function = ctx.function;
+        let list_value = self.emit_expression(ctx, target)?;
+
+        let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "find_len");
+        let len_f64 = self.value_to_number(len_nb);
+
+        let counter_alloca = self.builder.build_alloca(self.f64_type, "find_counter").unwrap();
+        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+        let elem_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "find_elem_alloca").unwrap();
+
+        let result_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "find_result").unwrap();
+        let absent = self.wrap_none();
+        self.builder.build_store(result_alloca, absent).unwrap();
+
+        let loop_header = self.context.append_basic_block(function, "find_cond");
+        let loop_body = self.context.append_basic_block(function, "find_body");
+        let loop_found = self.context.append_basic_block(function, "find_found");
+        let loop_skip = self.context.append_basic_block(function, "find_skip");
+        let loop_exit = self.context.append_basic_block(function, "find_exit");
+
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        self.builder.position_at_end(loop_header);
+        let current = self.builder.build_load(self.f64_type, counter_alloca, "find_i")
+            .unwrap().into_float_value();
+        let is_done = self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE, current, len_f64, "find_done",
+        ).unwrap();
+        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+        self.builder.position_at_end(loop_body);
+        ctx.cse_cache.clear();
+        let idx_nb = self.wrap_number(current);
+        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "find_elem");
+        self.builder.build_store(elem_alloca, elem_nb).unwrap();
+        self.store_variable(ctx, param_name, elem_nb);
+
+        let predicate_result = self.emit_block(ctx, body)?;
+        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "find_truthy");
+        let truthy_bool = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            is_truthy,
+            self.i8_type.const_int(0, false),
+            "find_bool",
+        ).unwrap();
+        self.builder.build_conditional_branch(truthy_bool, loop_found, loop_skip).unwrap();
+
+        // Found: save element, jump to exit
+        self.builder.position_at_end(loop_found);
+        let saved_elem = self.builder.build_load(self.runtime.value_i64_type, elem_alloca, "found_elem")
+            .unwrap().into_int_value();
+        self.builder.build_store(result_alloca, saved_elem).unwrap();
+        self.builder.build_unconditional_branch(loop_exit).unwrap();
+
+        // Skip: increment and continue
+        self.builder.position_at_end(loop_skip);
+        let next = self.builder.build_float_add(
+            current, self.f64_type.const_float(1.0), "find_next",
+        ).unwrap();
+        self.builder.build_store(counter_alloca, next).unwrap();
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        self.builder.position_at_end(loop_exit);
+        let final_result = self.builder.build_load(self.runtime.value_i64_type, result_alloca, "find_result")
+            .unwrap().into_int_value();
+        Ok(final_result)
+    }
+
+    /// C3.2: Emit an inline any loop — returns true if any element satisfies predicate.
+    fn emit_inline_any(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        param_name: &str,
+        body: &Block,
+        _span: Span,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let function = ctx.function;
+        let list_value = self.emit_expression(ctx, target)?;
+
+        let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "any_len");
+        let len_f64 = self.value_to_number(len_nb);
+
+        let counter_alloca = self.builder.build_alloca(self.f64_type, "any_counter").unwrap();
+        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+        let loop_header = self.context.append_basic_block(function, "any_cond");
+        let loop_body = self.context.append_basic_block(function, "any_body");
+        let loop_true = self.context.append_basic_block(function, "any_true");
+        let loop_skip = self.context.append_basic_block(function, "any_skip");
+        let loop_exit = self.context.append_basic_block(function, "any_exit");
+
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        self.builder.position_at_end(loop_header);
+        let current = self.builder.build_load(self.f64_type, counter_alloca, "any_i")
+            .unwrap().into_float_value();
+        let is_done = self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE, current, len_f64, "any_done",
+        ).unwrap();
+        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+        self.builder.position_at_end(loop_body);
+        ctx.cse_cache.clear();
+        let idx_nb = self.wrap_number(current);
+        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "any_elem");
+        self.store_variable(ctx, param_name, elem_nb);
+
+        let predicate_result = self.emit_block(ctx, body)?;
+        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "any_truthy");
+        let truthy_bool = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            is_truthy,
+            self.i8_type.const_int(0, false),
+            "any_bool",
+        ).unwrap();
+        self.builder.build_conditional_branch(truthy_bool, loop_true, loop_skip).unwrap();
+
+        // Found a truthy: return true
+        self.builder.position_at_end(loop_true);
+        let true_val = self.wrap_bool(self.boolean_to_int(true));
+        self.builder.build_unconditional_branch(loop_exit).unwrap();
+
+        // Skip: increment
+        self.builder.position_at_end(loop_skip);
+        let next = self.builder.build_float_add(
+            current, self.f64_type.const_float(1.0), "any_next",
+        ).unwrap();
+        self.builder.build_store(counter_alloca, next).unwrap();
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        // Exit: phi node — true from loop_true, false from loop_header (exhausted)
+        self.builder.position_at_end(loop_exit);
+        let false_val = self.wrap_bool(self.boolean_to_int(false));
+        let phi = self.builder.build_phi(self.runtime.value_i64_type, "any_result").unwrap();
+        phi.add_incoming(&[(&true_val, loop_true), (&false_val, loop_header)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
+    /// C3.2: Emit an inline all loop — returns true only if all elements satisfy predicate.
+    fn emit_inline_all(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        target: &Expression,
+        param_name: &str,
+        body: &Block,
+        _span: Span,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let function = ctx.function;
+        let list_value = self.emit_expression(ctx, target)?;
+
+        let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "all_len");
+        let len_f64 = self.value_to_number(len_nb);
+
+        let counter_alloca = self.builder.build_alloca(self.f64_type, "all_counter").unwrap();
+        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+
+        let loop_header = self.context.append_basic_block(function, "all_cond");
+        let loop_body = self.context.append_basic_block(function, "all_body");
+        let loop_false = self.context.append_basic_block(function, "all_false");
+        let loop_skip = self.context.append_basic_block(function, "all_skip");
+        let loop_exit = self.context.append_basic_block(function, "all_exit");
+
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        self.builder.position_at_end(loop_header);
+        let current = self.builder.build_load(self.f64_type, counter_alloca, "all_i")
+            .unwrap().into_float_value();
+        let is_done = self.builder.build_float_compare(
+            inkwell::FloatPredicate::OGE, current, len_f64, "all_done",
+        ).unwrap();
+        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+
+        self.builder.position_at_end(loop_body);
+        ctx.cse_cache.clear();
+        let idx_nb = self.wrap_number(current);
+        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "all_elem");
+        self.store_variable(ctx, param_name, elem_nb);
+
+        let predicate_result = self.emit_block(ctx, body)?;
+        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "all_truthy");
+        let truthy_bool = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE,
+            is_truthy,
+            self.i8_type.const_int(0, false),
+            "all_bool",
+        ).unwrap();
+        self.builder.build_conditional_branch(truthy_bool, loop_skip, loop_false).unwrap();
+
+        // Found a falsy: return false
+        self.builder.position_at_end(loop_false);
+        let false_val = self.wrap_bool(self.boolean_to_int(false));
+        self.builder.build_unconditional_branch(loop_exit).unwrap();
+
+        // Skip: increment
+        self.builder.position_at_end(loop_skip);
+        let next = self.builder.build_float_add(
+            current, self.f64_type.const_float(1.0), "all_next",
+        ).unwrap();
+        self.builder.build_store(counter_alloca, next).unwrap();
+        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+        // Exit: phi node — false from loop_false, true from loop_header (all passed)
+        self.builder.position_at_end(loop_exit);
+        let true_val = self.wrap_bool(self.boolean_to_int(true));
+        let phi = self.builder.build_phi(self.runtime.value_i64_type, "all_result").unwrap();
+        phi.add_incoming(&[(&false_val, loop_false), (&true_val, loop_header)]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 }

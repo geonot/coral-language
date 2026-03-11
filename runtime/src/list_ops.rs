@@ -2,6 +2,30 @@
 
 use crate::*;
 
+/// M4.3: Copy-on-write — if the list is marked COW, clone the backing store
+/// before mutation. Clears the COW flag after copying.
+fn cow_ensure_unique(list: ValueHandle) {
+    if list.is_null() { return; }
+    let value = unsafe { &mut *list };
+    if value.flags & FLAG_COW == 0 { return; }
+    // Copy the list's backing store
+    if value.tag == ValueTag::List as u8 {
+        let old_ptr = value.heap_ptr();
+        if !old_ptr.is_null() {
+            let old_list = unsafe { &*(old_ptr as *const ListObject) };
+            let new_items: Vec<ValueHandle> = old_list.items.iter().copied().collect();
+            for item in &new_items {
+                unsafe { coral_value_retain(*item); }
+            }
+            let new_list = Box::new(ListObject { items: new_items });
+            let new_ptr = Box::into_raw(new_list) as *mut std::ffi::c_void;
+            value.payload.ptr = new_ptr;
+        }
+    }
+    // Clear COW flag — this value now owns its backing store
+    value.flags &= !FLAG_COW;
+}
+
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_list_iter(list: ValueHandle) -> ValueHandle {
@@ -165,6 +189,96 @@ pub extern "C" fn coral_list_reduce(list: ValueHandle, seed: ValueHandle, func: 
     acc
 }
 
+/// C3.2: list.find(predicate) — return first element matching predicate, or none.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_find(list: ValueHandle, func: ValueHandle) -> ValueHandle {
+    if list.is_null() || func.is_null() {
+        return coral_make_absent();
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return coral_make_absent();
+    }
+    let func_value = unsafe { &*func };
+    if func_value.tag != ValueTag::Closure as u8 {
+        return coral_make_absent();
+    }
+    let Some(list_obj) = list_from_value(list_value) else {
+        return coral_make_absent();
+    };
+    for &item in &list_obj.items {
+        let args = [item];
+        let result = coral_closure_invoke(func, args.as_ptr(), args.len());
+        let truthy = coral_value_as_bool(result) != 0;
+        unsafe { coral_value_release(result); }
+        if truthy {
+            if !item.is_null() {
+                unsafe { coral_value_retain(item); }
+            }
+            return item;
+        }
+    }
+    coral_make_absent()
+}
+
+/// C3.2: list.any(predicate) — return true if any element matches predicate.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_any(list: ValueHandle, func: ValueHandle) -> ValueHandle {
+    if list.is_null() || func.is_null() {
+        return coral_make_bool(0);
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return coral_make_bool(0);
+    }
+    let func_value = unsafe { &*func };
+    if func_value.tag != ValueTag::Closure as u8 {
+        return coral_make_bool(0);
+    }
+    let Some(list_obj) = list_from_value(list_value) else {
+        return coral_make_bool(0);
+    };
+    for &item in &list_obj.items {
+        let args = [item];
+        let result = coral_closure_invoke(func, args.as_ptr(), args.len());
+        let truthy = coral_value_as_bool(result) != 0;
+        unsafe { coral_value_release(result); }
+        if truthy {
+            return coral_make_bool(1);
+        }
+    }
+    coral_make_bool(0)
+}
+
+/// C3.2: list.all(predicate) — return true if all elements match predicate.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_all(list: ValueHandle, func: ValueHandle) -> ValueHandle {
+    if list.is_null() || func.is_null() {
+        return coral_make_bool(1);
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return coral_make_bool(1);
+    }
+    let func_value = unsafe { &*func };
+    if func_value.tag != ValueTag::Closure as u8 {
+        return coral_make_bool(1);
+    }
+    let Some(list_obj) = list_from_value(list_value) else {
+        return coral_make_bool(1);
+    };
+    for &item in &list_obj.items {
+        let args = [item];
+        let result = coral_closure_invoke(func, args.as_ptr(), args.len());
+        let truthy = coral_value_as_bool(result) != 0;
+        unsafe { coral_value_release(result); }
+        if truthy == false {
+            return coral_make_bool(0);
+        }
+    }
+    coral_make_bool(1)
+}
+
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_list_push(list: ValueHandle, value: ValueHandle) -> ValueHandle {
@@ -174,6 +288,8 @@ pub extern "C" fn coral_list_push(list: ValueHandle, value: ValueHandle) -> Valu
     if is_frozen(list) {
         return coral_make_unit();
     }
+    // M4.3: Copy-on-write — clone backing store if shared
+    cow_ensure_unique(list);
     let list_value = unsafe { &*list };
     if list_value.tag != ValueTag::List as u8 {
         return coral_make_unit();
@@ -551,6 +667,50 @@ fn compare_values(a: ValueHandle, b: ValueHandle) -> std::cmp::Ordering {
     let sa = value_to_rust_string(va);
     let sb = value_to_rust_string(vb);
     sa.cmp(&sb)
+}
+
+/// M4.3: Mark a value as copy-on-write (shared backing store).
+/// The next mutating operation (push, pop, set) will clone before writing.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_value_mark_cow(handle: ValueHandle) {
+    if !handle.is_null() {
+        unsafe { (*handle).flags |= FLAG_COW; }
+    }
+}
+
+/// M4.3: Create a COW copy of a list — both the original and the copy share
+/// the same backing store until one of them is mutated.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_cow_copy(list: ValueHandle) -> ValueHandle {
+    if list.is_null() {
+        return list;
+    }
+    let value = unsafe { &*list };
+    if value.tag != ValueTag::List as u8 {
+        return list;
+    }
+    // Mark the original as COW
+    unsafe { (*list).flags |= FLAG_COW; }
+    // Create a new Value pointing to the same ListObject
+    let new_val = Value {
+        tag: ValueTag::List as u8,
+        flags: FLAG_COW,
+        epoch: 0,
+        owner_thread: current_thread_id(),
+        refcount: AtomicU64::new(1),
+        #[cfg(feature = "metrics")]
+        retain_events: AtomicU32::new(0),
+        #[cfg(feature = "metrics")]
+        release_events: AtomicU32::new(0),
+        payload: Payload { ptr: value.heap_ptr() },
+    };
+    // Retain all items (they're now referenced by two list objects)
+    if let Some(list_obj) = list_from_value(value) {
+        for item in &list_obj.items {
+            unsafe { coral_value_retain(*item); }
+        }
+    }
+    alloc_value(new_val)
 }
 
 /// Build a list of numbers from `start` (inclusive) to `end` (exclusive).
