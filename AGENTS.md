@@ -87,8 +87,9 @@ grepping or reading files blind.
 - Emit IR:           cargo run -- --emit-ir output.ll examples/hello.coral
 
 ## Test Baseline (update after each session)
-- Compiler tests: 310 pass, 1 pre-existing fail (e2e_cc53_fizzbuzz_example)
-- Runtime tests: 162 pass, 1 pre-existing fail (map_iterator_is_snapshot_after_mutation)
+- Compiler tests: ~879 pass, 0 failures
+- Runtime tests: 212 pass, 1 pre-existing fail (map_iterator_is_snapshot_after_mutation)
+- Total: 1091 pass across all crates
 - Runtime: cargo test -p runtime
 
 ## Key File Locations

@@ -178,6 +178,64 @@ pub enum StoredValue {
     Map(Vec<(String, StoredValue)>),
 }
 
+impl Eq for StoredValue {}
+
+impl std::hash::Hash for StoredValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            StoredValue::Unit | StoredValue::None => {}
+            StoredValue::Bool(b) => b.hash(state),
+            StoredValue::Int(i) => i.hash(state),
+            StoredValue::Float(f) => f.to_bits().hash(state),
+            StoredValue::String(s) => s.hash(state),
+            StoredValue::Bytes(b) => b.hash(state),
+            StoredValue::List(l) => l.hash(state),
+            StoredValue::Map(m) => m.hash(state),
+        }
+    }
+}
+
+impl PartialOrd for StoredValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StoredValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let tag = |v: &StoredValue| -> u8 {
+            match v {
+                StoredValue::Unit => 0,
+                StoredValue::None => 1,
+                StoredValue::Bool(_) => 2,
+                StoredValue::Int(_) => 3,
+                StoredValue::Float(_) => 4,
+                StoredValue::String(_) => 5,
+                StoredValue::Bytes(_) => 6,
+                StoredValue::List(_) => 7,
+                StoredValue::Map(_) => 8,
+            }
+        };
+        let t1 = tag(self);
+        let t2 = tag(other);
+        if t1 != t2 {
+            return t1.cmp(&t2);
+        }
+        match (self, other) {
+            (StoredValue::Int(a), StoredValue::Int(b)) => a.cmp(b),
+            (StoredValue::Float(a), StoredValue::Float(b)) => {
+                a.to_bits().cmp(&b.to_bits())
+            }
+            (StoredValue::String(a), StoredValue::String(b)) => a.cmp(b),
+            (StoredValue::Bool(a), StoredValue::Bool(b)) => a.cmp(b),
+            (StoredValue::Bytes(a), StoredValue::Bytes(b)) => a.cmp(b),
+            _ => Ordering::Equal,
+        }
+    }
+}
+
 impl StoredValue {
     /// Serialize to bytes
     pub fn serialize(&self, buf: &mut Vec<u8>) {

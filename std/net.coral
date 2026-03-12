@@ -120,4 +120,36 @@ err HttpError
     DnsError
     InvalidUrl
     Timeout
+
+# ─── UDP Networking (L3.3) ───────────────────────────────
+
+# Bind a UDP socket to host:port.
+# Returns a handle number, or -1 on error.
+# Use port 0 for OS-assigned port.
+#
+# Example:
+#   sock is udp_bind("0.0.0.0", 5000)
+*udp_bind(host, port)
+    udp_bind(host, port)
+
+# Send data to a destination via a UDP socket.
+# Returns bytes sent, or -1 on error.
+#
+# Example:
+#   sent is udp_send(sock, "hello", "127.0.0.1", 5001)
+*udp_send(handle, data, dest_host, dest_port)
+    udp_send(handle, data, dest_host, dest_port)
+
+# Receive data from a UDP socket (blocks until data arrives).
+# Returns a map: {"data": str, "addr": str}
+#
+# Example:
+#   msg is udp_recv(sock, 1024)
+#   log(msg["data"])
+*udp_recv(handle, max_bytes)
+    udp_recv(handle, max_bytes)
+
+# Close a UDP socket.
+*udp_close(handle)
+    udp_close(handle)
     TooManyRedirects

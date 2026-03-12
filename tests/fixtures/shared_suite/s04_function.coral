@@ -1,0 +1,6 @@
+# expect: 10
+*add(a, b)
+	a + b
+
+*main()
+	log(add(3, 7))

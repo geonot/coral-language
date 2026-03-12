@@ -257,6 +257,12 @@ pub struct RuntimeBindings<'ctx> {
     pub store_persist: FunctionValue<'ctx>,
     pub store_checkpoint: FunctionValue<'ctx>,
     pub store_all_indices: FunctionValue<'ctx>,
+    // Secondary index operations (R3.7)
+    pub store_create_index: FunctionValue<'ctx>,
+    pub store_drop_index: FunctionValue<'ctx>,
+    pub store_find_by_field: FunctionValue<'ctx>,
+    pub store_find_by_range: FunctionValue<'ctx>,
+    pub store_indexed_fields: FunctionValue<'ctx>,
     // JSON operations (SL-8)
     pub json_parse: FunctionValue<'ctx>,
     pub json_serialize: FunctionValue<'ctx>,
@@ -290,6 +296,9 @@ pub struct RuntimeBindings<'ctx> {
     pub base64_decode: FunctionValue<'ctx>,
     pub hex_encode: FunctionValue<'ctx>,
     pub hex_decode: FunctionValue<'ctx>,
+    // URL encoding (L3.2)
+    pub url_encode: FunctionValue<'ctx>,
+    pub url_decode: FunctionValue<'ctx>,
     // TCP networking (SL-13)
     pub tcp_listen: FunctionValue<'ctx>,
     pub tcp_accept: FunctionValue<'ctx>,
@@ -301,11 +310,24 @@ pub struct RuntimeBindings<'ctx> {
     pub http_get: FunctionValue<'ctx>,
     pub http_post: FunctionValue<'ctx>,
     pub http_request: FunctionValue<'ctx>,
+    // UDP networking (L3.3)
+    pub udp_bind: FunctionValue<'ctx>,
+    pub udp_send: FunctionValue<'ctx>,
+    pub udp_recv: FunctionValue<'ctx>,
+    pub udp_close: FunctionValue<'ctx>,
+    // Cryptography (L3.4)
+    pub sha256: FunctionValue<'ctx>,
+    pub hmac_sha256: FunctionValue<'ctx>,
+    pub aes256_encrypt: FunctionValue<'ctx>,
+    pub aes256_decrypt: FunctionValue<'ctx>,
+    pub random_bytes: FunctionValue<'ctx>,
     // Actor monitoring (AC-2)
     pub actor_monitor: FunctionValue<'ctx>,
     pub actor_demonitor: FunctionValue<'ctx>,
     // Graceful stop (AC-4)
     pub actor_graceful_stop: FunctionValue<'ctx>,
+    // Fast message dispatch (R2.3)
+    pub msg_dispatch: FunctionValue<'ctx>,
     // Range helper (Phase D)
     pub list_range: FunctionValue<'ctx>,
     // StringBuilder / optimized string ops (L1.1)
@@ -1674,6 +1696,50 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // Secondary index operations (R3.7)
+        // coral_store_create_index(handle, field_name, kind) -> ValuePtr
+        let store_create_index = module.add_function(
+            "coral_store_create_index",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        // coral_store_drop_index(handle, field_name) -> ValuePtr
+        let store_drop_index = module.add_function(
+            "coral_store_drop_index",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        // coral_store_find_by_field(handle, field_name, value) -> ValuePtr
+        let store_find_by_field = module.add_function(
+            "coral_store_find_by_field",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        // coral_store_find_by_range(handle, field_name, min, max) -> ValuePtr
+        let store_find_by_range = module.add_function(
+            "coral_store_find_by_range",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        // coral_store_indexed_fields(handle) -> ValuePtr
+        let store_indexed_fields = module.add_function(
+            "coral_store_indexed_fields",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         // JSON operations (SL-8)
         let json_parse = module.add_function(
             "coral_json_parse",
@@ -1815,6 +1881,18 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // URL encoding (L3.2)
+        let url_encode = module.add_function(
+            "coral_url_encode",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let url_decode = module.add_function(
+            "coral_url_decode",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         // TCP networking
         let tcp_listen = module.add_function(
             "coral_tcp_listen",
@@ -1864,6 +1942,55 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // UDP networking (L3.3)
+        let udp_bind = module.add_function(
+            "coral_udp_bind",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let udp_send = module.add_function(
+            "coral_udp_send",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let udp_recv = module.add_function(
+            "coral_udp_recv",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let udp_close = module.add_function(
+            "coral_udp_close",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Cryptography (L3.4)
+        let sha256 = module.add_function(
+            "coral_sha256",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let hmac_sha256 = module.add_function(
+            "coral_hmac_sha256",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let aes256_encrypt = module.add_function(
+            "coral_aes256_encrypt",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let aes256_decrypt = module.add_function(
+            "coral_aes256_decrypt",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            None,
+        );
+        let random_bytes = module.add_function(
+            "coral_random_bytes",
+            value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
         // Actor monitoring (AC-2)
         let actor_monitor = module.add_function(
             "coral_actor_monitor",
@@ -1879,6 +2006,22 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let actor_graceful_stop = module.add_function(
             "coral_actor_graceful_stop",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // Fast message dispatch (R2.3)
+        // coral_msg_dispatch(msg_name, table_ptrs, table_lens, count) -> i64
+        let msg_dispatch = module.add_function(
+            "coral_msg_dispatch",
+            i64_type.fn_type(
+                &[
+                    value_ptr_type.into(),                                  // msg_name
+                    i8_ptr.ptr_type(AddressSpace::default()).into(),         // table (array of i8*)
+                    usize_type.ptr_type(AddressSpace::default()).into(),     // lengths (array of usize)
+                    usize_type.into(),                                      // count
+                ],
+                false,
+            ),
             None,
         );
 
@@ -2097,6 +2240,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
             store_persist,
             store_checkpoint,
             store_all_indices,
+            store_create_index,
+            store_drop_index,
+            store_find_by_field,
+            store_find_by_range,
+            store_indexed_fields,
             json_parse,
             json_serialize,
             json_serialize_pretty,
@@ -2122,6 +2270,8 @@ impl<'ctx> RuntimeBindings<'ctx> {
             base64_decode,
             hex_encode,
             hex_decode,
+            url_encode,
+            url_decode,
             tcp_listen,
             tcp_accept,
             tcp_connect,
@@ -2131,9 +2281,19 @@ impl<'ctx> RuntimeBindings<'ctx> {
             http_get,
             http_post,
             http_request,
+            udp_bind,
+            udp_send,
+            udp_recv,
+            udp_close,
+            sha256,
+            hmac_sha256,
+            aes256_encrypt,
+            aes256_decrypt,
+            random_bytes,
             actor_monitor,
             actor_demonitor,
             actor_graceful_stop,
+            msg_dispatch,
             list_range,
             sb_new,
             sb_push,

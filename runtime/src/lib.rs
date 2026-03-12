@@ -32,6 +32,8 @@ pub mod regex_ops;
 pub mod string_ops;
 pub mod tagged_ops;
 pub mod time_ops;
+pub mod udp_ops;
+pub mod crypto_ops;
 
 // Re-export split modules so cross-module calls work
 pub use actor_ops::*;
@@ -52,6 +54,8 @@ pub use rc_ops::*;
 pub use string_ops::*;
 pub use tagged_ops::*;
 pub use time_ops::*;
+pub use udp_ops::*;
+pub use crypto_ops::*;
 
 
 // Re-export memory operations for FFI

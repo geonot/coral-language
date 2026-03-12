@@ -1,0 +1,4 @@
+# expect: 3
+*main()
+	items is [1, 2, 3]
+	log(items.length())

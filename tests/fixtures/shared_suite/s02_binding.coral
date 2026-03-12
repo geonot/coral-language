@@ -1,0 +1,4 @@
+# expect: 42
+*main()
+	x is 42
+	log(x)

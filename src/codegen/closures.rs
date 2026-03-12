@@ -793,6 +793,9 @@ fn collect_pattern_locals(pattern: &crate::ast::MatchPattern, locals: &mut HashS
         crate::ast::MatchPattern::Rest(name, _) => {
             locals.insert(name.clone());
         }
+        crate::ast::MatchPattern::RangeBinding { name, .. } => {
+            locals.insert(name.clone());
+        }
         crate::ast::MatchPattern::Integer(_)
         | crate::ast::MatchPattern::Bool(_)
         | crate::ast::MatchPattern::String(_)

@@ -1618,6 +1618,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let v = self.emit_expression(ctx, &args[0])?;
                 Ok(Some(self.call_bridged(self.runtime.hex_decode, &[v], "hex_dec_call")))
             }
+            // URL encoding (L3.2)
+            "url_encode" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("url_encode expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.url_encode, &[v], "url_enc_call")))
+            }
+            "url_decode" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("url_decode expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.url_decode, &[v], "url_dec_call")))
+            }
             // TCP networking
             "tcp_listen" => {
                 if args.len() != 2 {
@@ -1690,6 +1705,81 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let h = self.emit_expression(ctx, &args[2])?;
                 let b = self.emit_expression(ctx, &args[3])?;
                 Ok(Some(self.call_bridged(self.runtime.http_request, &[m, u, h, b], "http_request_call")))
+            }
+            // UDP networking (L3.3)
+            "udp_bind" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("udp_bind expects two arguments (host, port)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let p = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.udp_bind, &[h, p], "udp_bind_call")))
+            }
+            "udp_send" => {
+                if args.len() != 4 {
+                    return Err(Diagnostic::new("udp_send expects four arguments (handle, data, dest_host, dest_port)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let d = self.emit_expression(ctx, &args[1])?;
+                let dh = self.emit_expression(ctx, &args[2])?;
+                let dp = self.emit_expression(ctx, &args[3])?;
+                Ok(Some(self.call_bridged(self.runtime.udp_send, &[h, d, dh, dp], "udp_send_call")))
+            }
+            "udp_recv" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("udp_recv expects two arguments (handle, max_bytes)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let n = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.udp_recv, &[h, n], "udp_recv_call")))
+            }
+            "udp_close" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("udp_close expects one argument", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.udp_close, &[v], "udp_close_call")))
+            }
+            // Cryptography (L3.4)
+            "sha256" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("sha256 expects one argument (data)", span));
+                }
+                let v = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.sha256, &[v], "sha256_call")))
+            }
+            "hmac_sha256" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("hmac_sha256 expects two arguments (key, message)", span));
+                }
+                let k = self.emit_expression(ctx, &args[0])?;
+                let m = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.hmac_sha256, &[k, m], "hmac_sha256_call")))
+            }
+            "aes256_encrypt" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("aes256_encrypt expects three arguments (plaintext, key_hex, iv_hex)", span));
+                }
+                let p = self.emit_expression(ctx, &args[0])?;
+                let k = self.emit_expression(ctx, &args[1])?;
+                let iv = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_bridged(self.runtime.aes256_encrypt, &[p, k, iv], "aes256_encrypt_call")))
+            }
+            "aes256_decrypt" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("aes256_decrypt expects three arguments (ciphertext_hex, key_hex, iv_hex)", span));
+                }
+                let c = self.emit_expression(ctx, &args[0])?;
+                let k = self.emit_expression(ctx, &args[1])?;
+                let iv = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_bridged(self.runtime.aes256_decrypt, &[c, k, iv], "aes256_decrypt_call")))
+            }
+            "random_bytes" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("random_bytes expects one argument (count)", span));
+                }
+                let n = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.random_bytes, &[n], "random_bytes_call")))
             }
             // Actor monitoring (AC-2)
             "monitor" | "actor_monitor" => {
@@ -1831,6 +1921,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let pat = self.emit_expression(ctx, &args[0])?;
                 let txt = self.emit_expression(ctx, &args[1])?;
                 Ok(Some(self.call_bridged(self.runtime.regex_split, &[pat, txt], "regex_split")))
+            }
+            // Store secondary index operations (R3.7)
+            "store_create_index" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("store_create_index expects (handle, field_name, kind)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let f = self.emit_expression(ctx, &args[1])?;
+                let k = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_bridged(self.runtime.store_create_index, &[h, f, k], "store_create_index")))
+            }
+            "store_drop_index" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new("store_drop_index expects (handle, field_name)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let f = self.emit_expression(ctx, &args[1])?;
+                Ok(Some(self.call_bridged(self.runtime.store_drop_index, &[h, f], "store_drop_index")))
+            }
+            "store_find_by_field" => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new("store_find_by_field expects (handle, field_name, value)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let f = self.emit_expression(ctx, &args[1])?;
+                let v = self.emit_expression(ctx, &args[2])?;
+                Ok(Some(self.call_bridged(self.runtime.store_find_by_field, &[h, f, v], "store_find_by_field")))
+            }
+            "store_find_by_range" => {
+                if args.len() != 4 {
+                    return Err(Diagnostic::new("store_find_by_range expects (handle, field_name, min, max)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                let f = self.emit_expression(ctx, &args[1])?;
+                let mn = self.emit_expression(ctx, &args[2])?;
+                let mx = self.emit_expression(ctx, &args[3])?;
+                Ok(Some(self.call_bridged(self.runtime.store_find_by_range, &[h, f, mn, mx], "store_find_by_range")))
+            }
+            "store_indexed_fields" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new("store_indexed_fields expects (handle)", span));
+                }
+                let h = self.emit_expression(ctx, &args[0])?;
+                Ok(Some(self.call_bridged(self.runtime.store_indexed_fields, &[h], "store_indexed_fields")))
             }
             _ => {
                 // Check if it's a store/actor constructor (not arbitrary make_* functions)

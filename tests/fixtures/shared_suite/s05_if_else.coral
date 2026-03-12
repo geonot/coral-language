@@ -1,0 +1,7 @@
+# expect: yes
+*main()
+	x is 10
+	if x > 5
+		log("yes")
+	else
+		log("no")

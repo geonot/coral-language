@@ -1,0 +1,3 @@
+# expect: hello
+*main()
+	log("hello")

@@ -458,6 +458,9 @@ fn pattern_snapshot(pattern: &MatchPattern) -> Value {
         MatchPattern::Range { start, end, .. } => json!({
             "range": { "start": start, "end": end }
         }),
+        MatchPattern::RangeBinding { name, start, end, .. } => json!({
+            "range_binding": { "name": name, "start": start, "end": end }
+        }),
         MatchPattern::Rest(name, _) => json!({ "rest": name }),
     }
 }

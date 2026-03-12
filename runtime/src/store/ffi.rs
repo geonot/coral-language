@@ -693,6 +693,146 @@ pub extern "C" fn coral_store_compact(handle: ValueHandle) -> ValueHandle {
     }
 }
 
+// ============================================================================
+// Secondary Index FFI Functions (R3.7)
+// ============================================================================
+
+/// Create a secondary index on a field.
+///
+/// # Arguments
+/// * `handle` - Store handle
+/// * `field_name` - String value of the field name
+/// * `kind` - Number: 0 = Hash, 1 = Ordered
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_store_create_index(
+    handle: ValueHandle,
+    field_name: ValueHandle,
+    kind: ValueHandle,
+) -> ValueHandle {
+    let field = extract_string(field_name);
+    let kind_num = unsafe { coral_value_as_number(kind) as u64 };
+    let idx_kind = if kind_num == 1 {
+        super::secondary_index::SecondaryIndexKind::Ordered
+    } else {
+        super::secondary_index::SecondaryIndexKind::Hash
+    };
+    match with_engine(handle, |engine| {
+        engine.create_secondary_index(&field, idx_kind)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(()) => unsafe { coral_make_bool(1) },
+        Err(e) => e,
+    }
+}
+
+/// Drop a secondary index on a field.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_store_drop_index(
+    handle: ValueHandle,
+    field_name: ValueHandle,
+) -> ValueHandle {
+    let field = extract_string(field_name);
+    match with_engine(handle, |engine| {
+        Ok(engine.drop_secondary_index(&field))
+    }) {
+        Ok(dropped) => unsafe { coral_make_bool(if dropped { 1 } else { 0 }) },
+        Err(e) => e,
+    }
+}
+
+/// Find objects by equality on an indexed field.
+/// Returns a list of _index values.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_store_find_by_field(
+    handle: ValueHandle,
+    field_name: ValueHandle,
+    value: ValueHandle,
+) -> ValueHandle {
+    let field = extract_string(field_name);
+    let stored_val = handle_to_stored_value(value).unwrap_or(StoredValue::Unit);
+    match with_engine(handle, |engine| {
+        engine.find_by_field(&field, &stored_val)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(ids) => unsafe {
+            let handles: Vec<ValueHandle> = ids.iter()
+                .map(|id| coral_make_number(*id as f64))
+                .collect();
+            let result = coral_make_list(handles.as_ptr(), handles.len());
+            for h in handles {
+                coral_value_release(h);
+            }
+            result
+        },
+        Err(e) => e,
+    }
+}
+
+/// Range query on an ordered secondary index.
+/// Returns a list of _index values where min <= field_value <= max.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_store_find_by_range(
+    handle: ValueHandle,
+    field_name: ValueHandle,
+    min_value: ValueHandle,
+    max_value: ValueHandle,
+) -> ValueHandle {
+    let field = extract_string(field_name);
+    let min_val = handle_to_stored_value(min_value).unwrap_or(StoredValue::Unit);
+    let max_val = handle_to_stored_value(max_value).unwrap_or(StoredValue::Unit);
+    match with_engine(handle, |engine| {
+        engine.find_by_field_range(&field, &min_val, &max_val)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(ids) => unsafe {
+            let handles: Vec<ValueHandle> = ids.iter()
+                .map(|id| coral_make_number(*id as f64))
+                .collect();
+            let result = coral_make_list(handles.as_ptr(), handles.len());
+            for h in handles {
+                coral_value_release(h);
+            }
+            result
+        },
+        Err(e) => e,
+    }
+}
+
+/// List all indexed field names for a store.
+/// Returns a list of strings.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_store_indexed_fields(handle: ValueHandle) -> ValueHandle {
+    match with_engine(handle, |engine| {
+        Ok(engine.indexed_fields())
+    }) {
+        Ok(fields) => unsafe {
+            let handles: Vec<ValueHandle> = fields.iter()
+                .map(|f| coral_make_string(f.as_ptr(), f.len()))
+                .collect();
+            let result = coral_make_list(handles.as_ptr(), handles.len());
+            for h in handles {
+                coral_value_release(h);
+            }
+            result
+        },
+        Err(e) => e,
+    }
+}
+
+/// Helper: extract string from ValueHandle
+fn extract_string(value: ValueHandle) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+    let tag = unsafe { coral_value_tag(value) };
+    if tag == TAG_STRING {
+        let val = unsafe { &*(value as *const crate::Value) };
+        crate::value_to_rust_string(val)
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

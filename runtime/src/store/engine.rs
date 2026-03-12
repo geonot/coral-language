@@ -19,6 +19,7 @@ use super::binary::{BinaryReader, BinaryRecord, BinaryWriter, StoredValue};
 use super::config::{StoreConfig, SyncMode};
 use super::index::PrimaryIndex;
 use super::jsonl::JsonlWriter;
+use super::secondary_index::{SecondaryIndexKind, SecondaryIndexManager};
 use super::uuid7::Uuid7;
 use super::wal::{WalEntry, WalReader, WalWriter};
 
@@ -48,6 +49,8 @@ pub struct StoreEngine {
     dirty: bool,
     /// Last checkpoint LSN
     last_checkpoint_lsn: u64,
+    /// Secondary index manager
+    secondary_indexes: SecondaryIndexManager,
 }
 
 /// Cached object in memory
@@ -154,6 +157,7 @@ impl StoreEngine {
             next_index,
             dirty: false,
             last_checkpoint_lsn: 0,
+            secondary_indexes: SecondaryIndexManager::new(),
         };
         
         // Recover from WAL if needed
@@ -193,10 +197,11 @@ impl StoreEngine {
                     created_at: entry.timestamp_ms,
                     updated_at: entry.timestamp_ms,
                     deleted_at: -1,
-                    fields,
+                    fields: fields.clone(),
                     dirty: false,
                 };
                 self.cache.insert(entry.index, obj);
+                self.secondary_indexes.on_insert(entry.index, &fields);
                 if entry.index >= self.next_index {
                     self.next_index = entry.index + 1;
                 }
@@ -204,14 +209,18 @@ impl StoreEngine {
             WalOpType::Update => {
                 let fields = entry.parse_payload()?;
                 if let Some(obj) = self.cache.get_mut(&entry.index) {
-                    obj.fields = fields;
+                    let old_fields = obj.fields.clone();
+                    obj.fields = fields.clone();
                     obj.updated_at = entry.timestamp_ms;
                     obj.version += 1;
+                    self.secondary_indexes.on_update(entry.index, &old_fields, &fields);
                 }
             }
             WalOpType::Delete => {
                 if let Some(obj) = self.cache.get_mut(&entry.index) {
+                    let deleted_fields = obj.fields.clone();
                     obj.deleted_at = entry.timestamp_ms;
+                    self.secondary_indexes.on_delete(entry.index, &deleted_fields);
                 }
             }
             WalOpType::Commit => {
@@ -251,6 +260,7 @@ impl StoreEngine {
         }
         
         self.cache.insert(index, obj);
+        self.secondary_indexes.on_insert(index, &fields);
         self.dirty = true;
         
         Ok(index)
@@ -318,7 +328,8 @@ impl StoreEngine {
                 }
             }
             
-            obj.fields = fields;
+            let old_fields = obj.fields.clone();
+            obj.fields = fields.clone();
             obj.updated_at = now;
             obj.version += 1;
             obj.dirty = true;
@@ -332,6 +343,7 @@ impl StoreEngine {
                 }
             }
             
+            self.secondary_indexes.on_update(index, &old_fields, &fields);
             self.dirty = true;
         }
         
@@ -351,6 +363,8 @@ impl StoreEngine {
         let now = current_timestamp_ms();
         
         if let Some(obj) = self.cache.get_mut(&index) {
+            let old_fields = obj.fields.clone();
+            
             // Update or add the field
             let mut found = false;
             for (name, val) in &mut obj.fields {
@@ -375,6 +389,7 @@ impl StoreEngine {
                 }
             }
             
+            let new_fields = obj.fields.clone();
             obj.updated_at = now;
             obj.version += 1;
             obj.dirty = true;
@@ -388,6 +403,7 @@ impl StoreEngine {
                 }
             }
             
+            self.secondary_indexes.on_update(index, &old_fields, &new_fields);
             self.dirty = true;
         }
         
@@ -405,6 +421,8 @@ impl StoreEngine {
             if obj.is_deleted() {
                 return Ok(()); // Already deleted
             }
+            
+            let deleted_fields = obj.fields.clone();
             
             // Write to WAL
             if let Some(ref mut wal) = self.wal_writer {
@@ -425,6 +443,7 @@ impl StoreEngine {
             // Update index flags
             self.index.mark_deleted(index);
             
+            self.secondary_indexes.on_delete(index, &deleted_fields);
             self.dirty = true;
         }
         
@@ -693,6 +712,52 @@ impl StoreEngine {
         }
         Ok(total)
     }
+
+    /// Create a secondary index on a field. Scans all cached objects to populate it.
+    pub fn create_secondary_index(
+        &mut self,
+        field_name: &str,
+        kind: SecondaryIndexKind,
+    ) -> io::Result<()> {
+        self.secondary_indexes.create_index(field_name, kind)?;
+        // Populate index from cache
+        let entries: Vec<(u64, Vec<(String, StoredValue)>, bool)> = self
+            .cache
+            .iter()
+            .map(|(id, obj)| (*id, obj.fields.clone(), obj.is_deleted()))
+            .collect();
+        self.secondary_indexes.rebuild(&entries);
+        Ok(())
+    }
+
+    /// Drop a secondary index.
+    pub fn drop_secondary_index(&mut self, field_name: &str) -> bool {
+        self.secondary_indexes.drop_index(field_name)
+    }
+
+    /// Query by equality on a secondary-indexed field.
+    pub fn find_by_field(
+        &mut self,
+        field_name: &str,
+        value: &StoredValue,
+    ) -> io::Result<Vec<u64>> {
+        Ok(self.secondary_indexes.find_eq(field_name, value).unwrap_or_default())
+    }
+
+    /// Range query on an ordered secondary index.
+    pub fn find_by_field_range(
+        &mut self,
+        field_name: &str,
+        min: &StoredValue,
+        max: &StoredValue,
+    ) -> io::Result<Vec<u64>> {
+        Ok(self.secondary_indexes.find_range(field_name, min, max).unwrap_or_default())
+    }
+
+    /// List all secondary-indexed field names.
+    pub fn indexed_fields(&self) -> Vec<String> {
+        self.secondary_indexes.indexed_fields()
+    }
 }
 
 /// Store statistics
@@ -777,6 +842,44 @@ impl SharedStoreEngine {
     /// R3.2: Compact the WAL (thread-safe wrapper).
     pub fn compact_wal(&self) -> io::Result<(u64, u64)> {
         self.inner.write().unwrap().compact_wal()
+    }
+
+    /// Create a secondary index (thread-safe wrapper).
+    pub fn create_secondary_index(
+        &self,
+        field_name: &str,
+        kind: SecondaryIndexKind,
+    ) -> io::Result<()> {
+        self.inner.write().unwrap().create_secondary_index(field_name, kind)
+    }
+
+    /// Drop a secondary index (thread-safe wrapper).
+    pub fn drop_secondary_index(&self, field_name: &str) -> bool {
+        self.inner.write().unwrap().drop_secondary_index(field_name)
+    }
+
+    /// Query by equality on a secondary-indexed field (thread-safe wrapper).
+    pub fn find_by_field(
+        &self,
+        field_name: &str,
+        value: &StoredValue,
+    ) -> io::Result<Vec<u64>> {
+        self.inner.write().unwrap().find_by_field(field_name, value)
+    }
+
+    /// Range query on an ordered secondary index (thread-safe wrapper).
+    pub fn find_by_field_range(
+        &self,
+        field_name: &str,
+        min: &StoredValue,
+        max: &StoredValue,
+    ) -> io::Result<Vec<u64>> {
+        self.inner.write().unwrap().find_by_field_range(field_name, min, max)
+    }
+
+    /// List all secondary-indexed field names (thread-safe wrapper).
+    pub fn indexed_fields(&self) -> Vec<String> {
+        self.inner.read().unwrap().indexed_fields()
     }
 }
 
@@ -1137,6 +1240,160 @@ mod tests {
             }
         }
 
+        let _ = fs::remove_dir_all(&path);
+    }
+    
+    // ── R3.8: WAL Recovery Verification Tests ────────────────────────
+    
+    #[test]
+    fn test_wal_recovery_after_crash() {
+        // Simulate crash: write to WAL, drop engine without save(), reopen.
+        let path = unique_test_path("wal_crash_recovery");
+        let _ = fs::remove_dir_all(&path);
+        
+        let config = StoreConfig::minimal("WalCrash", &path);
+        
+        // Phase 1: Create objects, commit WAL, then "crash" (drop without save)
+        {
+            let mut engine = StoreEngine::open("WalCrash", "default", config.clone()).unwrap();
+            engine.create(vec![
+                ("name".to_string(), StoredValue::String("Alice".to_string())),
+                ("score".to_string(), StoredValue::Int(100)),
+            ]).unwrap();
+            engine.create(vec![
+                ("name".to_string(), StoredValue::String("Bob".to_string())),
+                ("score".to_string(), StoredValue::Int(200)),
+            ]).unwrap();
+            // Commit WAL but do NOT call save() — simulates crash before flush
+            if let Some(ref mut wal) = engine.wal_writer {
+                wal.commit().unwrap();
+            }
+            // Drop engine — simulates crash
+        }
+        
+        // Phase 2: Reopen — recovery should replay WAL
+        {
+            let mut engine = StoreEngine::open("WalCrash", "default", config.clone()).unwrap();
+            
+            let obj1 = engine.get(1).unwrap();
+            assert!(obj1.is_some(), "Object 1 should be recovered from WAL");
+            let obj1 = obj1.unwrap();
+            let name = obj1.fields.iter().find(|(n, _)| n == "name").unwrap();
+            assert_eq!(name.1, StoredValue::String("Alice".to_string()));
+            
+            let obj2 = engine.get(2).unwrap();
+            assert!(obj2.is_some(), "Object 2 should be recovered from WAL");
+            let obj2 = obj2.unwrap();
+            let name2 = obj2.fields.iter().find(|(n, _)| n == "name").unwrap();
+            assert_eq!(name2.1, StoredValue::String("Bob".to_string()));
+        }
+        
+        let _ = fs::remove_dir_all(&path);
+    }
+    
+    #[test]
+    fn test_wal_recovery_with_updates() {
+        // Write, update, crash, recover — verify updates are replayed.
+        let path = unique_test_path("wal_update_recovery");
+        let _ = fs::remove_dir_all(&path);
+        
+        let config = StoreConfig::minimal("WalUpd", &path);
+        
+        // Phase 1: Create + update, crash
+        {
+            let mut engine = StoreEngine::open("WalUpd", "default", config.clone()).unwrap();
+            engine.create(vec![
+                ("name".to_string(), StoredValue::String("Alice".to_string())),
+                ("score".to_string(), StoredValue::Int(100)),
+            ]).unwrap();
+            engine.update_field(1, "score", StoredValue::Int(999)).unwrap();
+            if let Some(ref mut wal) = engine.wal_writer {
+                wal.commit().unwrap();
+            }
+        }
+        
+        // Phase 2: Recover
+        {
+            let mut engine = StoreEngine::open("WalUpd", "default", config).unwrap();
+            let obj = engine.get(1).unwrap().unwrap();
+            let score = obj.fields.iter().find(|(n, _)| n == "score").unwrap();
+            assert_eq!(score.1, StoredValue::Int(999), "Updated value should survive crash");
+        }
+        
+        let _ = fs::remove_dir_all(&path);
+    }
+    
+    #[test]
+    fn test_wal_recovery_with_deletes() {
+        // Write, delete, crash, recover — verify deletes are replayed.
+        let path = unique_test_path("wal_delete_recovery");
+        let _ = fs::remove_dir_all(&path);
+        
+        let config = StoreConfig::minimal("WalDel", &path);
+        
+        {
+            let mut engine = StoreEngine::open("WalDel", "default", config.clone()).unwrap();
+            engine.create(vec![
+                ("name".to_string(), StoredValue::String("ToDelete".to_string())),
+            ]).unwrap();
+            engine.create(vec![
+                ("name".to_string(), StoredValue::String("Keep".to_string())),
+            ]).unwrap();
+            engine.delete(1).unwrap();
+            if let Some(ref mut wal) = engine.wal_writer {
+                wal.commit().unwrap();
+            }
+        }
+        
+        {
+            let mut engine = StoreEngine::open("WalDel", "default", config).unwrap();
+            let obj1 = engine.get(1).unwrap().unwrap();
+            assert!(obj1.is_deleted(), "Deleted object should remain deleted after recovery");
+            
+            let obj2 = engine.get(2).unwrap().unwrap();
+            assert!(!obj2.is_deleted(), "Non-deleted object should survive recovery");
+        }
+        
+        let _ = fs::remove_dir_all(&path);
+    }
+    
+    #[test]
+    fn test_wal_recovery_checkpoint_then_crash() {
+        // Create objects, checkpoint, add more, crash — should recover post-checkpoint data.
+        let path = unique_test_path("wal_checkpoint_recovery");
+        let _ = fs::remove_dir_all(&path);
+        
+        let config = StoreConfig::minimal("WalCkpt", &path);
+        
+        {
+            let mut engine = StoreEngine::open("WalCkpt", "default", config.clone()).unwrap();
+            // Create pre-checkpoint data
+            engine.create(vec![
+                ("phase".to_string(), StoredValue::String("before".to_string())),
+            ]).unwrap();
+            engine.save().unwrap(); // Persist to disk
+            engine.checkpoint().unwrap();
+            
+            // Create post-checkpoint data (not saved, only in WAL)
+            engine.create(vec![
+                ("phase".to_string(), StoredValue::String("after".to_string())),
+            ]).unwrap();
+            if let Some(ref mut wal) = engine.wal_writer {
+                wal.commit().unwrap();
+            }
+        }
+        
+        {
+            let mut engine = StoreEngine::open("WalCkpt", "default", config).unwrap();
+            let obj1 = engine.get(1).unwrap();
+            assert!(obj1.is_some(), "Pre-checkpoint object should exist");
+            
+            let obj2 = engine.get(2).unwrap();
+            assert!(obj2.is_some(), "Post-checkpoint object should be recovered from WAL");
+            let phase = obj2.unwrap().fields.iter().find(|(n, _)| n == "phase").unwrap();
+            assert_eq!(phase.1, StoredValue::String("after".to_string()));
+        }
+        
         let _ = fs::remove_dir_all(&path);
     }
 }

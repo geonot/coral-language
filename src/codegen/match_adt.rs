@@ -15,6 +15,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             MatchPattern::Or(alts) => alts.iter().any(Self::pattern_has_bindings),
             MatchPattern::List(pats) => pats.iter().any(Self::pattern_has_bindings),
             MatchPattern::Range { .. } => false,
+            MatchPattern::RangeBinding { .. } => true,
             _ => false,
         }
     }
@@ -259,6 +260,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let le_bool = self.value_to_bool(le_result);
 
                 let in_range = self.builder.build_and(ge_bool, le_bool, "in_range").unwrap();
+                Ok(in_range)
+            }
+            MatchPattern::RangeBinding { name, start, end, .. } => {
+                // S3.5: Range binding — same range check as Range, plus bind variable
+                let start_val = self.wrap_number(self.f64_type.const_float(*start as f64));
+                let end_val = self.wrap_number(self.f64_type.const_float(*end as f64));
+
+                let ge_result = self.call_nb(
+                    self.runtime.nb_greater_equal,
+                    &[match_value.into(), start_val.into()],
+                    "rb_ge",
+                );
+                let ge_bool = self.value_to_bool(ge_result);
+
+                let le_result = self.call_nb(
+                    self.runtime.nb_less_equal,
+                    &[match_value.into(), end_val.into()],
+                    "rb_le",
+                );
+                let le_bool = self.value_to_bool(le_result);
+
+                // Bind the matched value to the variable name
+                self.store_variable(ctx, name, match_value);
+
+                let in_range = self.builder.build_and(ge_bool, le_bool, "rb_in_range").unwrap();
                 Ok(in_range)
             }
             MatchPattern::Or(alternatives) => {

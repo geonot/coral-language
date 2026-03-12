@@ -2842,6 +2842,53 @@ fn e2e_match_range_pattern_or_combo() {
     );
 }
 
+#[test]
+fn e2e_range_binding_basic() {
+    // S3.5: Range binding pattern: `x from 0 to 10`
+    assert_output(
+        r#"
+*main()
+    val is 5
+    result is match val
+        n from 0 to 10 ? n * 2
+        _ ? -1
+    log(result)
+"#,
+        &["10"],
+    );
+}
+
+#[test]
+fn e2e_range_binding_multiple_arms() {
+    assert_output(
+        r#"
+*main()
+    for x in [3, 50, 150]
+        result is match x
+            n from 0 to 10 ? "small:" + to_string(n)
+            n from 11 to 100 ? "medium:" + to_string(n)
+            _ ? "large"
+        log(result)
+"#,
+        &["small:3", "medium:50", "large"],
+    );
+}
+
+#[test]
+fn e2e_range_binding_boundary_values() {
+    assert_output(
+        r#"
+*main()
+    for x in [0, 10, 11]
+        result is match x
+            n from 0 to 10 ? "in:" + to_string(n)
+            _ ? "out"
+        log(result)
+"#,
+        &["in:0", "in:10", "out"],
+    );
+}
+
 // S3.4 — Nested Pattern Matching Tests
 
 #[test]

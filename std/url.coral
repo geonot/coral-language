@@ -1,0 +1,138 @@
+# URL standard library - URL parsing and manipulation
+#
+# Provides functions for working with URLs:
+# - Parsing URLs into component parts
+# - Encoding/decoding URL components
+# - Building URLs from parts
+
+# ─── URL Parsing ─────────────────────────────────────────
+
+# Parse a URL string into a map of components.
+# Returns: {"scheme": str, "host": str, "port": str, "path": str, "query": str, "fragment": str}
+#
+# Example:
+#   parts is parse("https://example.com:8080/api?key=val#top")
+#   log(parts["scheme"])   # "https"
+#   log(parts["host"])     # "example.com"
+#   log(parts["port"])     # "8080"
+*parse(url_str)
+    result is {}
+    rest is url_str
+
+    # Extract scheme
+    scheme_end is index_of(rest, "://")
+    if scheme_end > 0 - 1
+        result["scheme"] is slice(rest, 0, scheme_end)
+        rest is slice(rest, scheme_end + 3, length(rest))
+    else
+        result["scheme"] is ""
+
+    # Extract fragment
+    frag_pos is index_of(rest, "#")
+    if frag_pos > 0 - 1
+        result["fragment"] is slice(rest, frag_pos + 1, length(rest))
+        rest is slice(rest, 0, frag_pos)
+    else
+        result["fragment"] is ""
+
+    # Extract query
+    query_pos is index_of(rest, "?")
+    if query_pos > 0 - 1
+        result["query"] is slice(rest, query_pos + 1, length(rest))
+        rest is slice(rest, 0, query_pos)
+    else
+        result["query"] is ""
+
+    # Extract path
+    path_pos is index_of(rest, "/")
+    if path_pos > 0 - 1
+        result["path"] is slice(rest, path_pos, length(rest))
+        rest is slice(rest, 0, path_pos)
+    else
+        result["path"] is "/"
+
+    # Extract host and port
+    port_pos is index_of(rest, ":")
+    if port_pos > 0 - 1
+        result["host"] is slice(rest, 0, port_pos)
+        result["port"] is slice(rest, port_pos + 1, length(rest))
+    else
+        result["host"] is rest
+        result["port"] is ""
+
+    return result
+
+# ─── URL Encoding/Decoding ──────────────────────────────
+
+# Percent-encode a string for use in URL components.
+# Encodes all characters except unreserved ones (A-Z, a-z, 0-9, -, _, ., ~).
+#
+# Example:
+#   encoded is encode("hello world&foo=bar")
+#   # "hello%20world%26foo%3Dbar"
+*encode(text)
+    url_encode(text)
+
+# Decode a percent-encoded URL string.
+#
+# Example:
+#   decoded is decode("hello%20world")
+#   # "hello world"
+*decode(text)
+    url_decode(text)
+
+# ─── URL Building ────────────────────────────────────────
+
+# Build a URL string from a map of components.
+# Accepts: {"scheme", "host", "port", "path", "query", "fragment"}
+#
+# Example:
+#   url is build({"scheme": "https", "host": "api.example.com", "path": "/v1/data"})
+*build(parts)
+    result is ""
+    if map_has(parts, "scheme")
+        if length(parts["scheme"]) > 0
+            result is concat(result, parts["scheme"])
+            result is concat(result, "://")
+    if map_has(parts, "host")
+        result is concat(result, parts["host"])
+    if map_has(parts, "port")
+        if length(parts["port"]) > 0
+            result is concat(result, ":")
+            result is concat(result, parts["port"])
+    if map_has(parts, "path")
+        result is concat(result, parts["path"])
+    else
+        result is concat(result, "/")
+    if map_has(parts, "query")
+        if length(parts["query"]) > 0
+            result is concat(result, "?")
+            result is concat(result, parts["query"])
+    if map_has(parts, "fragment")
+        if length(parts["fragment"]) > 0
+            result is concat(result, "#")
+            result is concat(result, parts["fragment"])
+    return result
+
+# ─── Query String Helpers ────────────────────────────────
+
+# Parse a query string into a map of key-value pairs.
+# "key1=val1&key2=val2" -> {"key1": "val1", "key2": "val2"}
+*parse_query(query_str)
+    result is {}
+    pairs is split(query_str, "&")
+    for pair in pairs
+        eq_pos is index_of(pair, "=")
+        if eq_pos > 0 - 1
+            key is slice(pair, 0, eq_pos)
+            val is slice(pair, eq_pos + 1, length(pair))
+            result[key] is val
+    return result
+
+# Build a query string from a map.
+# {"key1": "val1", "key2": "val2"} -> "key1=val1&key2=val2"
+*build_query(params)
+    parts is []
+    for key in map_keys(params)
+        push(parts, concat(concat(key, "="), params[key]))
+    return join(parts, "&")

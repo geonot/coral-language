@@ -126,7 +126,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         ).unwrap().into_pointer_value();
 
         // Extract message name/data and dispatch to @message methods
-        // Use hash-based dispatch table for efficient message routing
         let name_key = self.emit_string_literal("name");
         let name_key_ptr = self.nb_to_ptr(name_key);
         let data_key = self.emit_string_literal("data");
@@ -156,45 +155,85 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
-        // Sequential dispatch: compare message name against each handler.
-        // (Hash-based dispatch removed due to compile-time/runtime hash mismatch
-        //  and value_hash return-type incompatibility with call_runtime_ptr.)
-        let done_bb = self.context.append_basic_block(invoke_fn, "msg_done");
+        // R2.3: Fast dispatch via coral_msg_dispatch + LLVM switch.
+        // Build dispatch table: arrays of string pointers and lengths.
+        let i8_ptr_type = self.i8_type.ptr_type(AddressSpace::default());
+        let handler_count = handlers.len();
 
-        let mut current_bb = handler_entry;
+        // Create compile-time string constant arrays for the dispatch table
+        let mut ptr_values = Vec::with_capacity(handler_count);
+        let mut len_values = Vec::with_capacity(handler_count);
         for method in &handlers {
-            let match_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_match", method.name));
-            let next_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}_next", method.name));
+            let str_global = self.get_or_create_string_constant(&method.name);
+            let str_ptr = self.builder.build_pointer_cast(
+                str_global.as_pointer_value(), i8_ptr_type, "str_ptr"
+            ).unwrap();
+            ptr_values.push(str_ptr);
+            len_values.push(self.usize_type.const_int(method.name.len() as u64, false));
+        }
 
-            self.builder.position_at_end(current_bb);
-            let method_name = self.emit_string_literal(&method.name);
-            let method_name_ptr = self.nb_to_ptr(method_name);
-            let eq = self.call_runtime_ptr(
-                self.runtime.value_equals,
-                &[name_field.into(), method_name_ptr.into()],
-                "msg_name_eq",
-            );
-            let eq_nb = self.ptr_to_nb(eq);
-            let is_match = self.value_to_bool(eq_nb);
-            self.builder
-                .build_conditional_branch(is_match, match_bb, next_bb)
-                .unwrap();
+        // Allocate arrays on the stack
+        let ptrs_array = self.builder.build_array_alloca(
+            i8_ptr_type,
+            self.usize_type.const_int(handler_count as u64, false),
+            "dispatch_ptrs",
+        ).unwrap();
+        let lens_array = self.builder.build_array_alloca(
+            self.usize_type,
+            self.usize_type.const_int(handler_count as u64, false),
+            "dispatch_lens",
+        ).unwrap();
 
-            self.builder.position_at_end(match_bb);
+        // Fill the arrays
+        for (i, (ptr_val, len_val)) in ptr_values.iter().zip(len_values.iter()).enumerate() {
+            let idx = self.usize_type.const_int(i as u64, false);
+            let ptr_slot = unsafe {
+                self.builder.build_in_bounds_gep(i8_ptr_type, ptrs_array, &[idx], "ptr_slot").unwrap()
+            };
+            self.builder.build_store(ptr_slot, *ptr_val).unwrap();
+            let len_slot = unsafe {
+                self.builder.build_in_bounds_gep(self.usize_type, lens_array, &[idx], "len_slot").unwrap()
+            };
+            self.builder.build_store(len_slot, *len_val).unwrap();
+        }
+
+        let count_val = self.usize_type.const_int(handler_count as u64, false);
+
+        // Call coral_msg_dispatch → returns handler index (i64) or -1
+        let dispatch_result = self.builder.build_call(
+            self.runtime.msg_dispatch,
+            &[name_field.into(), ptrs_array.into(), lens_array.into(), count_val.into()],
+            "dispatch_idx",
+        ).unwrap().try_as_basic_value().left().unwrap().into_int_value();
+
+        // Build LLVM switch over the dispatch result
+        let done_bb = self.context.append_basic_block(invoke_fn, "msg_done");
+        let default_bb = self.context.append_basic_block(invoke_fn, "msg_default");
+
+        let mut cases: Vec<(inkwell::values::IntValue, inkwell::basic_block::BasicBlock)> = Vec::new();
+        for (i, method) in handlers.iter().enumerate() {
+            let case_bb = self.context.append_basic_block(invoke_fn, &format!("msg_{}", method.name));
+            cases.push((self.context.i64_type().const_int(i as u64, false), case_bb));
+
+            self.builder.position_at_end(case_bb);
             let mangled = format!("{}_{}", store.name, method.name);
             if let Some(target_fn) = self.functions.get(&mangled).copied() {
                 let mut args: Vec<BasicMetadataValueEnum> = vec![state.into()];
                 if !method.params.is_empty() {
-                    // Pass data_field as Value* pointer directly — handlers expect Value*
                     args.push(data_field.into());
                 }
                 let _ = self.builder.build_call(target_fn, &args, "call_msg_fn");
             }
             self.builder.build_unconditional_branch(done_bb).unwrap();
-            current_bb = next_bb;
         }
-        self.builder.position_at_end(current_bb);
+
+        // Default case: no match, just branch to done
+        self.builder.position_at_end(default_bb);
         self.builder.build_unconditional_branch(done_bb).unwrap();
+
+        // Emit the switch from the entry block
+        self.builder.position_at_end(handler_entry);
+        self.builder.build_switch(dispatch_result, default_bb, &cases).unwrap();
 
         self.builder.position_at_end(done_bb);
         self.builder.build_return(None).unwrap();

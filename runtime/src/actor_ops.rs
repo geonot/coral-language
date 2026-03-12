@@ -630,3 +630,36 @@ pub extern "C" fn coral_actor_yield_check() {
     });
 }
 
+/// Fast message dispatch: compare a message name (ValueHandle string) against
+/// a table of raw C strings. Returns the index (0-based) of the first match,
+/// or -1 if no match. This avoids boxing overhead of value_equals.
+///
+/// `table` is an array of (ptr, len) pairs: [(ptr0, len0), (ptr1, len1), ...]
+/// packed as `*const u8` pointers and `usize` lengths alternating.
+/// `table_count` is the number of entries.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_msg_dispatch(
+    msg_name: crate::ValueHandle,
+    table: *const *const u8,
+    lengths: *const usize,
+    table_count: usize,
+) -> i64 {
+    if msg_name.is_null() || table_count == 0 {
+        return -1;
+    }
+    let val = unsafe { &*msg_name };
+    let name_bytes = crate::string_to_bytes(val);
+
+    for i in 0..table_count {
+        let entry_ptr = unsafe { *table.add(i) };
+        let entry_len = unsafe { *lengths.add(i) };
+        if entry_len == name_bytes.len() {
+            let entry_slice = unsafe { std::slice::from_raw_parts(entry_ptr, entry_len) };
+            if entry_slice == name_bytes.as_slice() {
+                return i as i64;
+            }
+        }
+    }
+    -1
+}
+

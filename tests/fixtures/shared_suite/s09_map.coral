@@ -1,0 +1,4 @@
+# expect: alice
+*main()
+	m is map("name" is "alice", "age" is 30)
+	log(m.get("name"))

@@ -1,0 +1,8 @@
+# expect: 1
+# expect: 2
+# expect: 3
+*main()
+	i is 1
+	while i <= 3
+		log(i)
+		i is i + 1

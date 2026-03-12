@@ -1475,6 +1475,11 @@ fn collect_constraints_expr(
                         // S3.5: Range pattern constrains scrutinee to numeric
                         constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
                     }
+                    crate::ast::MatchPattern::RangeBinding { name, .. } => {
+                        // S3.5: Range binding — numeric constraint + bind name
+                        constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                        types.insert(name.clone(), scrutinee_ty.clone());
+                    }
                     crate::ast::MatchPattern::Rest(name, _) => {
                         // S3.4: Rest pattern binds remaining list elements
                         types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
@@ -1709,6 +1714,10 @@ fn collect_pattern_bindings(pattern: &crate::ast::MatchPattern, ty: &TypeId, typ
             // S3.4: Rest captures remaining elements as a list
             types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
         }
+        crate::ast::MatchPattern::RangeBinding { name, .. } => {
+            // S3.5: Range binding introduces a numeric binding
+            types.insert(name.clone(), ty.clone());
+        }
         crate::ast::MatchPattern::Integer(_)
         | crate::ast::MatchPattern::Bool(_)
         | crate::ast::MatchPattern::String(_)
@@ -1897,6 +1906,9 @@ fn declare_pattern_scope_names(pattern: &crate::ast::MatchPattern, scopes: &mut 
             }
         }
         crate::ast::MatchPattern::Rest(name, _) => {
+            scopes.declare(name.clone(), span);
+        }
+        crate::ast::MatchPattern::RangeBinding { name, .. } => {
             scopes.declare(name.clone(), span);
         }
         crate::ast::MatchPattern::Integer(_)
@@ -2173,6 +2185,9 @@ fn declare_pattern_bindings(pattern: &crate::ast::MatchPattern, scopes: &mut Sco
             }
         }
         crate::ast::MatchPattern::Rest(name, _) => {
+            scopes.declare(name.clone(), span);
+        }
+        crate::ast::MatchPattern::RangeBinding { name, .. } => {
             scopes.declare(name.clone(), span);
         }
         crate::ast::MatchPattern::Integer(_)
@@ -2817,6 +2832,9 @@ fn touch_pattern_names(pattern: &crate::ast::MatchPattern, tracker: &mut UsageTr
             }
         }
         crate::ast::MatchPattern::Rest(name, _) => {
+            tracker.touch(name);
+        }
+        crate::ast::MatchPattern::RangeBinding { name, .. } => {
             tracker.touch(name);
         }
         crate::ast::MatchPattern::Integer(_)

@@ -1215,7 +1215,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             MatchPattern::Integer(_) | MatchPattern::Bool(_) | MatchPattern::String(_)
-            | MatchPattern::Wildcard(_) | MatchPattern::Range { .. } | MatchPattern::Rest(..) => {}
+            | MatchPattern::Wildcard(_) | MatchPattern::Range { .. } | MatchPattern::RangeBinding { .. } | MatchPattern::Rest(..) => {}
         }
     }
 

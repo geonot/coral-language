@@ -33,6 +33,7 @@ mod index;
 mod binary;
 mod jsonl;
 mod wal;
+mod secondary_index;
 mod engine;
 pub mod ffi;
 
@@ -42,6 +43,7 @@ pub use index::{PrimaryIndex, IndexEntry};
 pub use binary::{BinaryWriter, BinaryReader, BinaryRecord, StoredValue};
 pub use jsonl::{JsonlWriter, JsonlReader, JsonlRecord};
 pub use wal::{WalWriter, WalReader, WalEntry};
+pub use secondary_index::{SecondaryIndex, SecondaryIndexKind, SecondaryIndexManager};
 pub use engine::{StoreEngine, SharedStoreEngine, CachedObject, StoreStats};
 pub use ffi::*;
 

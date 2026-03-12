@@ -40,7 +40,7 @@ Items that improve daily developer experience and round out the language.
 | S2.6 | Spread operator | Medium | `[...list1, ...list2]`, `{...map1, key: val}` |
 | S2.7 | Tuple syntax | Medium | `(3, 4)` — lightweight structural tuple type |
 | S3.4 | Nested pattern matching | High | `Ok(Some([first, ...rest])) ? process(first, rest)` |
-| S3.5 | String/number range patterns | Medium | `match code / 200 to 299 ? "success"` |
+| S3.5 | String/number range patterns | Medium | `match val / x from 0 to 10 -> "small"` — range patterns with `from`/`to` syntax |
 
 ### Type System
 
@@ -192,32 +192,29 @@ Replace the Rust runtime (`libruntime.so`) with a Coral-native runtime for full 
 
 ## Suggested Sprint Sequencing
 
-### Sprint 6 — Language Polish & Networking
-Focus: Round out syntax and stdlib for day-to-day usability.
+### Sprint 6 — Language Polish, Comprehensions & Infrastructure
+Combined sprint: syntax refinements, comprehensions, pattern matching, networking & crypto stdlib, store indexing, actor hardening, static linking, shared test suite. Spread operator and std.csv deferred. Range patterns use `x from A to B` syntax.
+
 - S2.7 Tuple syntax
 - S2.4 Destructuring assignment
 - S2.5 Slice syntax
-- S2.6 Spread operator
-- L3.2 `std.url`
-- L3.5 `std.csv`
-- R3.8 WAL recovery verification
-- CC4.4 Static linking
-- R2.3 Message dispatch optimization
-- S3.5 String/number range patterns
-
-### Sprint 7 — Comprehensions, Crypto & Store Indexing
+- S3.5 String/number range patterns (`x from 0 to 10`)
 - S2.2 List comprehensions
 - S2.3 Map comprehensions
 - S3.4 Nested pattern matching
+- L3.2 `std.url`
 - L3.3 UDP support
 - L3.4 `std.crypto`
-- R3.1 Secondary indexes
-- R3.7 Index from language level
-- R2.9 Supervision hardening
-- R2.12 Actor integration tests
-- CC1.2 Shared test suite
+- ✅ R3.8 WAL recovery verification
+- ✅ CC4.4 Static linking (`--static` flag, `libruntime.a` produced)
+- ✅ R2.3 Message dispatch optimization (`coral_msg_dispatch` + LLVM switch)
+- ✅ R3.1 Secondary indexes (hash + ordered/BTree, 8 tests)
+- ✅ R3.7 Index from language level (5 FFI functions + codegen builtins)
+- ✅ R2.9 Supervision hardening (exponential backoff, max_children, 4 tests)
+- ✅ R2.12 Actor integration tests (multi-level supervision, monitoring, stress, 4 tests)
+- ✅ CC1.2 Shared test suite (10 annotated programs, 11 tests)
 
-### Sprint 8 — Type Intelligence, Specialization & Performance Engineering
+### Sprint 7+ — Ecosystem & Bootstrap
 Combined sprint: type system maturity, codegen specialization, inferred comptime, memory optimizations, and runtime data structure hardening. WASM target deferred to Sprint 9+.
 
 - ✅ T2.4 Trait bounds on generics
@@ -233,8 +230,8 @@ Combined sprint: type system maturity, codegen specialization, inferred comptime
 - ✅ R1.1–R1.5 Runtime data structure optimizations
 - ✅ R4.4 Cache-line-aligned Value
 
-### Sprint 9+ — Ecosystem & Bootstrap
-- L4.4 Documentation generator
+### Sprint 9+ — Ecosystem & Bootstrap- S2.6 Spread operator (deferred)
+- L3.5 `std.csv` (deferred)- L4.4 Documentation generator
 - L4.5 Package manager
 - C5.1/C5.3/C5.4 Comptime features
 - R2.5/R2.11 Actor pinning & remote actors

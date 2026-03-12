@@ -71,6 +71,10 @@ struct Args {
     #[arg(long = "lto")]
     lto: bool,
 
+    /// CC4.4: Produce a fully static binary (embed runtime, no libruntime.so dependency)
+    #[arg(long = "static")]
+    link_static: bool,
+
     /// C4.5: Instrument the output for profile collection (PGO generation).
     /// The resulting binary writes a `default.profraw` file on exit.
     #[arg(long = "pgo-gen")]
@@ -223,6 +227,7 @@ fn main() -> anyhow::Result<()> {
                         ir_path,
                         binary_path,
                         bin_opt,
+                        args.link_static,
                     )?;
                 }
             }
@@ -357,6 +362,7 @@ fn link_native_binary(
     ir_path: &Path,
     output: &Path,
     opt_level: u8,
+    link_static: bool,
 ) -> anyhow::Result<()> {
     let mut obj = NamedTempFile::new().context("failed to create temporary object file")?;
     let obj_path = obj
@@ -381,22 +387,40 @@ fn link_native_binary(
     let mut clang_cmd = Command::new(clang);
     clang_cmd
         .arg(&obj_path)
-        .arg(&opt_flag)
-        .arg("-L")
-        .arg(runtime_dir)
-        .arg("-l")
-        .arg("runtime")
-        .arg("-lm")
-        .arg("-o")
-        .arg(output);
+        .arg(&opt_flag);
+
+    if link_static {
+        // CC4.4: Static linking — link against libruntime.a directly
+        let static_lib = runtime_dir.join("libruntime.a");
+        ensure!(
+            static_lib.exists(),
+            "static runtime library not found at {}. Build with `cargo build -p runtime`",
+            static_lib.display()
+        );
+        clang_cmd.arg(&static_lib);
+        // Link system libraries that the runtime depends on
+        clang_cmd.arg("-lm").arg("-lpthread").arg("-ldl");
+        if cfg!(target_os = "linux") {
+            clang_cmd.arg("-static-libgcc");
+        }
+    } else {
+        clang_cmd
+            .arg("-L")
+            .arg(runtime_dir)
+            .arg("-l")
+            .arg("runtime")
+            .arg("-lm");
+
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            let rpath_flag = format!("-Wl,-rpath,{}", runtime_dir.display());
+            clang_cmd.arg(rpath_flag);
+        }
+    }
+
+    clang_cmd.arg("-o").arg(output);
 
     if cfg!(target_os = "linux") {
         clang_cmd.arg("-no-pie");
-    }
-
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
-        let rpath_flag = format!("-Wl,-rpath,{}", runtime_dir.display());
-        clang_cmd.arg(rpath_flag);
     }
 
     let clang_status = clang_cmd
@@ -416,4 +440,9 @@ fn runtime_library_filename() -> &'static str {
     } else {
         "libruntime.so"
     }
+}
+
+/// CC4.4: Filename for the static runtime library archive.
+fn static_runtime_library_filename() -> &'static str {
+    "libruntime.a"
 }

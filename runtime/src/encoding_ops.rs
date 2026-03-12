@@ -150,3 +150,60 @@ fn hex_digit(b: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+// ============================================================================
+// URL percent-encoding (L3.2)
+// ============================================================================
+
+fn is_url_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~'
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_url_encode(value: ValueHandle) -> ValueHandle {
+    if value.is_null() { return coral_make_string_from_rust(""); }
+    let val = unsafe { &*value };
+    if val.tag != ValueTag::String as u8 { return coral_make_string_from_rust(""); }
+    let input = value_to_rust_string(val);
+    let mut encoded = String::with_capacity(input.len() * 3);
+    for &b in input.as_bytes() {
+        if is_url_unreserved(b) {
+            encoded.push(b as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX_UPPER[b as usize >> 4]));
+            encoded.push(char::from(HEX_UPPER[b as usize & 0xf]));
+        }
+    }
+    coral_make_string_from_rust(&encoded)
+}
+
+const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_url_decode(value: ValueHandle) -> ValueHandle {
+    if value.is_null() { return coral_make_string_from_rust(""); }
+    let val = unsafe { &*value };
+    if val.tag != ValueTag::String as u8 { return coral_make_string_from_rust(""); }
+    let input = value_to_rust_string(val);
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                decoded.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            decoded.push(b' '); // form-encoded space
+        } else {
+            decoded.push(bytes[i]);
+        }
+        i += 1;
+    }
+    let s = String::from_utf8_lossy(&decoded).to_string();
+    coral_make_string_from_rust(&s)
+}

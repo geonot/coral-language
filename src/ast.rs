@@ -540,6 +540,9 @@ pub enum MatchPattern {
     /// S3.5: Range pattern — matches if value is within an inclusive range.
     /// e.g. `200 to 299` matches integers from 200 to 299 inclusive.
     Range { start: i64, end: i64, span: Span },
+    /// S3.5: Range binding pattern — matches if value is within range and binds it.
+    /// e.g. `x from 0 to 10` binds `x` and checks 0 <= value <= 10.
+    RangeBinding { name: String, start: i64, end: i64, span: Span },
     /// S3.4: Rest/spread pattern — captures remaining list elements.
     /// e.g. `[first, ...rest]` binds `rest` to remaining elements.
     Rest(String, Span),

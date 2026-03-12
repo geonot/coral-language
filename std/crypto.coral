@@ -1,0 +1,64 @@
+# Cryptographic standard library
+#
+# Provides cryptographic hash functions, message authentication,
+# symmetric encryption, and secure random number generation.
+#
+# All functions use pure Rust implementations (no OpenSSL dependency).
+
+# ─── Hashing ─────────────────────────────────────────────
+
+# Compute SHA-256 hash of a string.
+# Returns 64-character hex string.
+#
+# Example:
+#   hash is sha256("hello")
+#   # "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+*sha256(data)
+    sha256(data)
+
+# ─── Message Authentication ──────────────────────────────
+
+# Compute HMAC-SHA256 of a message with a key.
+# key: hex string or raw string key
+# message: string to authenticate
+# Returns 64-character hex string.
+#
+# Example:
+#   mac is hmac_sha256("secret_key", "message to sign")
+*hmac_sha256(key, message)
+    hmac_sha256(key, message)
+
+# ─── Symmetric Encryption ───────────────────────────────
+
+# Encrypt plaintext using AES-256-CBC.
+# key_hex: 64-character hex string (32 bytes)
+# iv_hex: 32-character hex string (16 bytes)
+# Returns ciphertext as hex string.
+#
+# Example:
+#   ct is encrypt("secret message", key_hex, iv_hex)
+*encrypt(plaintext, key_hex, iv_hex)
+    aes256_encrypt(plaintext, key_hex, iv_hex)
+
+# Decrypt AES-256-CBC ciphertext.
+# ciphertext_hex: hex-encoded ciphertext
+# key_hex: 64-character hex string (32 bytes)
+# iv_hex: 32-character hex string (16 bytes)
+# Returns plaintext string, or "" on failure.
+#
+# Example:
+#   plain is decrypt(ciphertext_hex, key_hex, iv_hex)
+*decrypt(ciphertext_hex, key_hex, iv_hex)
+    aes256_decrypt(ciphertext_hex, key_hex, iv_hex)
+
+# ─── Random ─────────────────────────────────────────────
+
+# Generate n random bytes from OS entropy.
+# Returns hex-encoded string (2*n characters).
+# Maximum 1024 bytes.
+#
+# Example:
+#   key is random_bytes(32)   # 64 hex chars = 256-bit key
+#   iv is random_bytes(16)    # 32 hex chars = 128-bit IV
+*random_bytes(n)
+    random_bytes(n)

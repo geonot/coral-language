@@ -2746,6 +2746,45 @@ impl Parser {
                     });
                 }
                 
+                // S3.5: Range binding pattern: `x from 0 to 10`
+                if matches!(self.tokens.get(self.index), Some(token) if matches!(&token.kind, TokenKind::Identifier(s) if s == "from")) {
+                    self.advance(); // consume `from`
+                    let start_token = self.advance();
+                    let start_val = match &start_token.kind {
+                        TokenKind::Integer(v) => *v,
+                        TokenKind::Minus => {
+                            let next = self.advance();
+                            if let TokenKind::Integer(v) = next.kind {
+                                -v
+                            } else {
+                                return Err(self.error_here("expected integer after `-` in range pattern"));
+                            }
+                        }
+                        _ => return Err(self.error_here("expected integer after `from` in range pattern")),
+                    };
+                    self.expect(TokenKind::KeywordTo, "expected `to` in range pattern")?;
+                    let end_token = self.advance();
+                    let end_val = match &end_token.kind {
+                        TokenKind::Integer(v) => *v,
+                        TokenKind::Minus => {
+                            let next = self.advance();
+                            if let TokenKind::Integer(v) = next.kind {
+                                -v
+                            } else {
+                                return Err(self.error_here("expected integer after `-` in range pattern"));
+                            }
+                        }
+                        _ => return Err(self.error_here("expected integer after `to` in range pattern")),
+                    };
+                    let span = name_span.join(end_token.span);
+                    return Ok(MatchPattern::RangeBinding {
+                        name,
+                        start: start_val,
+                        end: end_val,
+                        span,
+                    });
+                }
+                
                 Ok(MatchPattern::Identifier(name))
             }
             _ => Err(self.error_here("invalid match pattern")),
