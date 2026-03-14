@@ -39,7 +39,8 @@ actor Counter @messages(CounterMsg)
     log('done')
 "#;
     let warnings = compile_warnings(source);
-    let typed_warnings: Vec<_> = warnings.iter()
+    let typed_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("@messages"))
         .collect();
     assert!(
@@ -64,7 +65,8 @@ actor Counter @messages(CounterMsg)
     log('done')
 "#;
     let warnings = compile_warnings(source);
-    let typed_warnings: Vec<_> = warnings.iter()
+    let typed_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("@messages") && w.contains("nonexistent"))
         .collect();
     assert!(
@@ -74,8 +76,16 @@ actor Counter @messages(CounterMsg)
     );
     // Verify it mentions the actor name and known handlers
     let w = &typed_warnings[0];
-    assert!(w.contains("Counter"), "warning should mention actor name: {}", w);
-    assert!(w.contains("increment"), "warning should list known handlers: {}", w);
+    assert!(
+        w.contains("Counter"),
+        "warning should mention actor name: {}",
+        w
+    );
+    assert!(
+        w.contains("increment"),
+        "warning should list known handlers: {}",
+        w
+    );
 }
 
 #[test]
@@ -93,7 +103,8 @@ actor Worker
     log('ok')
 "#;
     let warnings = compile_warnings(source);
-    let typed_warnings: Vec<_> = warnings.iter()
+    let typed_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("@messages"))
         .collect();
     assert!(
@@ -124,11 +135,23 @@ actor Validator @messages(ValidatorMsg)
         "actor_message_types should contain 'Validator'"
     );
     assert_eq!(
-        model.actor_message_types.get("Validator").map(|s| s.as_str()),
+        model
+            .actor_message_types
+            .get("Validator")
+            .map(|s| s.as_str()),
         Some("ValidatorMsg"),
         "message type should be 'ValidatorMsg'"
     );
-    let handlers = model.actor_handler_names.get("Validator").expect("should have handler names");
-    assert!(handlers.contains(&"validate".to_string()), "should contain 'validate'");
-    assert!(handlers.contains(&"clear".to_string()), "should contain 'clear'");
+    let handlers = model
+        .actor_handler_names
+        .get("Validator")
+        .expect("should have handler names");
+    assert!(
+        handlers.contains(&"validate".to_string()),
+        "should contain 'validate'"
+    );
+    assert!(
+        handlers.contains(&"clear".to_string()),
+        "should contain 'clear'"
+    );
 }

@@ -18,8 +18,16 @@ pub struct RuntimeModule {
 }
 
 impl RuntimeModule {
-    pub fn new(name: impl Into<String>, version: impl Into<String>, capabilities: Vec<Capability>) -> Self {
-        Self { name: name.into(), version: version.into(), capabilities }
+    pub fn new(
+        name: impl Into<String>,
+        version: impl Into<String>,
+        capabilities: Vec<Capability>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            capabilities,
+        }
     }
 }
 

@@ -7,9 +7,9 @@ fn compiles_basic_program() {
     total + 1
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     // Functions now return i64 (NaN-boxed) after M1 transition
     assert!(ir.contains("define i64 @__user_main"));
 }
@@ -24,9 +24,9 @@ fn lowers_match_expression() {
         ! 30
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(ir.contains("match_arm_0"));
     assert!(ir.contains("match_phi"));
 }
@@ -38,9 +38,9 @@ fn lowers_string_literal_binding() {
     0
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(
         ir.contains("@coral_make_string"),
         "IR should reference coral_make_string runtime hook"
@@ -55,9 +55,9 @@ fn lowers_logical_and_or() {
     (a and b) or true
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(
         ir.contains("@coral_value_as_bool"),
         "bool accessor should be declared"
@@ -75,9 +75,9 @@ fn lowers_addition_via_runtime_helper() {
     greeting + 'bar'
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(
         ir.contains("@coral_value_add"),
         "string addition should route through runtime helper"
@@ -92,9 +92,9 @@ fn lowers_equality_via_runtime_helper() {
     (a is b)
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(
         ir.contains("@coral_value_equals"),
         "equality should call runtime helper"
@@ -108,9 +108,9 @@ fn lowers_list_literal() {
     0
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(
         ir.contains("@coral_make_list"),
         "list literals should call runtime list constructor"
@@ -126,9 +126,9 @@ fn lowers_list_push_and_length() {
     values.get(0)
 ";
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect(
-        "failed to compile source",
-    );
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("failed to compile source");
     assert!(
         ir.contains("@coral_list_push"),
         "list push should call runtime helper"
@@ -300,10 +300,28 @@ fn compiles_full_language_fixture() {
         .compile_to_ir(source)
         .expect("failed to compile comprehensive program");
     assert!(ir.contains("@coral_make_list"), "lists should be emitted");
-    assert!(ir.contains("@coral_list_push"), "list.push should call runtime helper");
-    assert!(ir.contains("@coral_list_pop"), "list.pop should call runtime helper");
-    assert!(ir.contains("@coral_make_map"), "map literals should call runtime constructor");
-    assert!(ir.contains("@coral_map_get"), "map.get should call runtime helper");
-    assert!(ir.contains("@coral_map_set"), "map.set should call runtime helper");
-    assert!(ir.contains("match_arm_0"), "match expressions should lower to control flow");
+    assert!(
+        ir.contains("@coral_list_push"),
+        "list.push should call runtime helper"
+    );
+    assert!(
+        ir.contains("@coral_list_pop"),
+        "list.pop should call runtime helper"
+    );
+    assert!(
+        ir.contains("@coral_make_map"),
+        "map literals should call runtime constructor"
+    );
+    assert!(
+        ir.contains("@coral_map_get"),
+        "map.get should call runtime helper"
+    );
+    assert!(
+        ir.contains("@coral_map_set"),
+        "map.set should call runtime helper"
+    );
+    assert!(
+        ir.contains("match_arm_0"),
+        "match expressions should lower to control flow"
+    );
 }

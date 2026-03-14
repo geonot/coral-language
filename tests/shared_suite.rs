@@ -30,8 +30,8 @@ fn parse_expected_output(source: &str) -> Vec<String> {
 /// Returns the IR string.
 fn compile_shared_program(name: &str) -> String {
     let path = PathBuf::from(WORKSPACE).join(SUITE_DIR).join(name);
-    let source = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", name, e));
+    let source =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", name, e));
     let compiler = Compiler;
     compiler
         .compile_to_ir(&source)

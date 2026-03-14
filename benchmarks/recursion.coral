@@ -1,0 +1,41 @@
+# Benchmark: Recursive algorithms
+# Tests: deep recursion, tree-like computation, tail patterns
+
+*ackermann(m, n)
+    if m is 0
+        return n + 1
+    if n is 0
+        return ackermann(m - 1, 1)
+    ackermann(m - 1, ackermann(m, n - 1))
+
+*tree_sum(depth)
+    if depth is 0
+        return 1
+    tree_sum(depth - 1) + tree_sum(depth - 1)
+
+*gcd(a, b)
+    if b is 0
+        return a
+    gcd(b, a % b)
+
+*main()
+    start is time_now()
+
+    # Ackermann (small args — grows extremely fast)
+    ack_result is ackermann(3, 8)
+
+    # Binary tree summation
+    tree_result is tree_sum(20)
+
+    # GCD in tight loop
+    gcd_sum is 0
+    i is 1
+    while i < 100000
+        gcd_sum is gcd_sum + gcd(i, i + 7)
+        i is i + 1
+
+    elapsed is time_now() - start
+    log("ackermann(3,8) = " + to_string(ack_result))
+    log("tree_sum(20) = " + to_string(tree_result))
+    log("gcd_sum = " + to_string(gcd_sum))
+    log("elapsed_ms: " + to_string(elapsed))

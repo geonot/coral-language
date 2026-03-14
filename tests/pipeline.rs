@@ -10,7 +10,9 @@ use coralc::Compiler;
 
 fn compile_and_verify(source: &str) -> Result<String, String> {
     let compiler = Compiler;
-    compiler.compile_to_ir(source).map_err(|e| format!("{:?}", e))
+    compiler
+        .compile_to_ir(source)
+        .map_err(|e| format!("{:?}", e))
 }
 
 // ========== BASIC PIPELINE TESTS ==========

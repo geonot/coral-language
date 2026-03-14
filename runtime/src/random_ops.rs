@@ -1,15 +1,11 @@
-//! Random number generation FFI functions for the Coral runtime.
-
 use crate::*;
 use std::sync::Mutex;
 
-/// Simple xoshiro256** PRNG state
 static PRNG_STATE: Mutex<[u64; 4]> = Mutex::new([0; 4]);
 static PRNG_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn ensure_seeded() {
     if !PRNG_SEEDED.load(std::sync::atomic::Ordering::Relaxed) {
-        // Seed from system time
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -20,7 +16,7 @@ fn ensure_seeded() {
 
 fn seed_prng(seed: u64) {
     let mut state = PRNG_STATE.lock().unwrap();
-    // SplitMix64 to expand seed into state
+
     let mut s = seed;
     for i in 0..4 {
         s = s.wrapping_add(0x9e3779b97f4a7c15);
@@ -29,7 +25,7 @@ fn seed_prng(seed: u64) {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         state[i] = z ^ (z >> 31);
     }
-    // Ensure non-zero state
+
     if state.iter().all(|&x| x == 0) {
         state[0] = 1;
     }
@@ -50,25 +46,35 @@ fn next_u64() -> u64 {
     result
 }
 
-/// Return a random float in [0.0, 1.0)
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_random() -> ValueHandle {
     let bits = next_u64();
-    // Convert to f64 in [0, 1): take upper 53 bits and divide
+
     let f = (bits >> 11) as f64 / (1u64 << 53) as f64;
     coral_make_number(f)
 }
 
-/// Return a random integer in [min, max] (inclusive)
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_random_int(min_val: ValueHandle, max_val: ValueHandle) -> ValueHandle {
-    let min_f = if min_val.is_null() { 0.0 } else {
+    let min_f = if min_val.is_null() {
+        0.0
+    } else {
         let v = unsafe { &*min_val };
-        if v.tag == ValueTag::Number as u8 { unsafe { v.payload.number } } else { 0.0 }
+        if v.tag == ValueTag::Number as u8 {
+            unsafe { v.payload.number }
+        } else {
+            0.0
+        }
     };
-    let max_f = if max_val.is_null() { 100.0 } else {
+    let max_f = if max_val.is_null() {
+        100.0
+    } else {
         let v = unsafe { &*max_val };
-        if v.tag == ValueTag::Number as u8 { unsafe { v.payload.number } } else { 100.0 }
+        if v.tag == ValueTag::Number as u8 {
+            unsafe { v.payload.number }
+        } else {
+            100.0
+        }
     };
     let min = min_f as i64;
     let max = max_f as i64;
@@ -80,7 +86,6 @@ pub extern "C" fn coral_random_int(min_val: ValueHandle, max_val: ValueHandle) -
     coral_make_number((min + r as i64) as f64)
 }
 
-/// Set the PRNG seed for reproducibility
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_random_seed(seed_val: ValueHandle) -> ValueHandle {
     let seed = if seed_val.is_null() {
@@ -101,10 +106,9 @@ pub extern "C" fn coral_random_seed(seed_val: ValueHandle) -> ValueHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_random_produces_values_in_range() {
-        // Seed for reproducibility
         seed_prng(12345);
         for _ in 0..100 {
             let handle = coral_random();

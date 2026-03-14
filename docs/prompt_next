@@ -1,0 +1,7 @@
+update EVOLUTION_FINAL, EVOLUTION_PROGRESS, and LANGUAGE_EVOLUTION_ROADMAP with the progress. 
+
+Plan and work through remaining items (Sprint 9+), except - 
+CC4.2/CC4.3 - compile targets 
+R5.1-R5.12 - self-hosted runtime 
+which we will handle later. 
+For L4.5 Package manager, for now just implement basic functionality - package, publish, add depedency, etc.  

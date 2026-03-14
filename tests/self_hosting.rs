@@ -4,8 +4,8 @@
 //! (lexer.coral, parser.coral) can be compiled by the Rust compiler.
 //! They catch regressions that would break self-hosting readiness.
 
-use coralc::module_loader::ModuleLoader;
 use coralc::Compiler;
+use coralc::module_loader::ModuleLoader;
 use std::path::PathBuf;
 
 /// Workspace root (Cargo manifest dir at compile time).
@@ -154,12 +154,30 @@ fn self_hosted_parser_has_complete_coverage() {
 
     // Expression parsing
     assert!(source.contains("parse_ternary"), "Missing ternary parsing");
-    assert!(source.contains("parse_pipeline"), "Missing pipeline parsing");
-    assert!(source.contains("parse_logic_or"), "Missing logic_or parsing");
-    assert!(source.contains("parse_logic_and"), "Missing logic_and parsing");
-    assert!(source.contains("parse_bitwise_or"), "Missing bitwise_or parsing");
-    assert!(source.contains("parse_equality"), "Missing equality parsing");
-    assert!(source.contains("parse_comparison"), "Missing comparison parsing");
+    assert!(
+        source.contains("parse_pipeline"),
+        "Missing pipeline parsing"
+    );
+    assert!(
+        source.contains("parse_logic_or"),
+        "Missing logic_or parsing"
+    );
+    assert!(
+        source.contains("parse_logic_and"),
+        "Missing logic_and parsing"
+    );
+    assert!(
+        source.contains("parse_bitwise_or"),
+        "Missing bitwise_or parsing"
+    );
+    assert!(
+        source.contains("parse_equality"),
+        "Missing equality parsing"
+    );
+    assert!(
+        source.contains("parse_comparison"),
+        "Missing comparison parsing"
+    );
     assert!(source.contains("parse_term"), "Missing term parsing");
     assert!(source.contains("parse_factor"), "Missing factor parsing");
     assert!(source.contains("parse_unary"), "Missing unary parsing");
@@ -167,30 +185,72 @@ fn self_hosted_parser_has_complete_coverage() {
     assert!(source.contains("parse_primary"), "Missing primary parsing");
 
     // Statement parsing
-    assert!(source.contains("parse_if_statement"), "Missing if statement");
-    assert!(source.contains("parse_while_statement"), "Missing while statement");
-    assert!(source.contains("parse_for_statement"), "Missing for statement");
-    assert!(source.contains("parse_return_statement"), "Missing return statement");
+    assert!(
+        source.contains("parse_if_statement"),
+        "Missing if statement"
+    );
+    assert!(
+        source.contains("parse_while_statement"),
+        "Missing while statement"
+    );
+    assert!(
+        source.contains("parse_for_statement"),
+        "Missing for statement"
+    );
+    assert!(
+        source.contains("parse_return_statement"),
+        "Missing return statement"
+    );
 
     // Item parsing
-    assert!(source.contains("parse_function"), "Missing function parsing");
+    assert!(
+        source.contains("parse_function"),
+        "Missing function parsing"
+    );
     assert!(source.contains("parse_store_def"), "Missing store parsing");
     assert!(source.contains("parse_actor_def"), "Missing actor parsing");
     assert!(source.contains("parse_trait_def"), "Missing trait parsing");
-    assert!(source.contains("parse_error_definition"), "Missing error def parsing");
-    assert!(source.contains("parse_enum_def"), "Missing enum/ADT parsing");
-    assert!(source.contains("parse_type_def"), "Missing type def parsing");
-    assert!(source.contains("parse_extern_function"), "Missing extern fn parsing");
-    assert!(source.contains("parse_use_statement"), "Missing use statement");
+    assert!(
+        source.contains("parse_error_definition"),
+        "Missing error def parsing"
+    );
+    assert!(
+        source.contains("parse_enum_def"),
+        "Missing enum/ADT parsing"
+    );
+    assert!(
+        source.contains("parse_type_def"),
+        "Missing type def parsing"
+    );
+    assert!(
+        source.contains("parse_extern_function"),
+        "Missing extern fn parsing"
+    );
+    assert!(
+        source.contains("parse_use_statement"),
+        "Missing use statement"
+    );
 
     // Pattern parsing
-    assert!(source.contains("make_pat_integer"), "Missing integer pattern");
+    assert!(
+        source.contains("make_pat_integer"),
+        "Missing integer pattern"
+    );
     assert!(source.contains("make_pat_bool"), "Missing bool pattern");
     assert!(source.contains("make_pat_string"), "Missing string pattern");
-    assert!(source.contains("make_pat_constructor"), "Missing constructor pattern");
-    assert!(source.contains("make_pat_wildcard"), "Missing wildcard pattern");
+    assert!(
+        source.contains("make_pat_constructor"),
+        "Missing constructor pattern"
+    );
+    assert!(
+        source.contains("make_pat_wildcard"),
+        "Missing wildcard pattern"
+    );
     assert!(source.contains("make_pat_list"), "Missing list pattern");
-    assert!(source.contains("make_pat_identifier"), "Missing identifier pattern");
+    assert!(
+        source.contains("make_pat_identifier"),
+        "Missing identifier pattern"
+    );
 }
 
 // ─── Self-Hosted Lower ──────────────────────────────────────────────
@@ -198,10 +258,7 @@ fn self_hosted_parser_has_complete_coverage() {
 #[test]
 fn self_hosted_lower_loads() {
     let source = load_source("self_hosted/lower.coral");
-    assert!(
-        source.contains("lower"),
-        "Expected lower entry function"
-    );
+    assert!(source.contains("lower"), "Expected lower entry function");
     assert!(
         source.contains("lower_expression"),
         "Expected lower_expression function"
@@ -219,10 +276,7 @@ fn self_hosted_lower_loads() {
 #[test]
 fn self_hosted_lower_compiles_to_ir() {
     let ir = compile_to_ir("self_hosted/lower.coral");
-    assert!(
-        ir.contains("@lower"),
-        "Expected lower in generated IR"
-    );
+    assert!(ir.contains("@lower"), "Expected lower in generated IR");
     assert!(
         ir.contains("@lower_expression"),
         "Expected lower_expression in generated IR"
@@ -309,10 +363,7 @@ fn self_hosted_semantic_loads() {
 #[test]
 fn self_hosted_semantic_compiles_to_ir() {
     let ir = compile_to_ir("self_hosted/semantic.coral");
-    assert!(
-        ir.contains("@analyze"),
-        "Expected analyze in generated IR"
-    );
+    assert!(ir.contains("@analyze"), "Expected analyze in generated IR");
     assert!(
         ir.contains("@make_type_graph"),
         "Expected make_type_graph in generated IR"
@@ -407,10 +458,7 @@ fn self_hosted_compiler_compiles_to_ir() {
     // compiler.coral orchestrates all other self-hosted components via `use` directives.
     // The module loader resolves them relative to the self_hosted/ directory.
     let ir = compile_to_ir("self_hosted/compiler.coral");
-    assert!(
-        ir.contains("@compile"),
-        "Expected compile in generated IR"
-    );
+    assert!(ir.contains("@compile"), "Expected compile in generated IR");
     assert!(
         ir.len() > 3_000,
         "Generated IR suspiciously small: {} bytes",
@@ -424,13 +472,26 @@ fn self_hosted_compiler_compiles_to_ir() {
 fn stdlib_modules_all_compile() {
     // Verify each stdlib module can be loaded (module loader resolves it)
     let modules = [
-        "std/math.coral", "std/string.coral", "std/list.coral",
-        "std/map.coral", "std/set.coral", "std/io.coral",
-        "std/char.coral", "std/bytes.coral", "std/fmt.coral",
-        "std/json.coral", "std/time.coral", "std/encoding.coral",
-        "std/sort.coral", "std/option.coral", "std/result.coral",
-        "std/testing.coral", "std/process.coral", "std/net.coral",
-        "std/prelude.coral", "std/bit.coral",
+        "std/math.coral",
+        "std/string.coral",
+        "std/list.coral",
+        "std/map.coral",
+        "std/set.coral",
+        "std/io.coral",
+        "std/char.coral",
+        "std/bytes.coral",
+        "std/fmt.coral",
+        "std/json.coral",
+        "std/time.coral",
+        "std/encoding.coral",
+        "std/sort.coral",
+        "std/option.coral",
+        "std/result.coral",
+        "std/testing.coral",
+        "std/process.coral",
+        "std/net.coral",
+        "std/prelude.coral",
+        "std/bit.coral",
     ];
     for module in &modules {
         let path = PathBuf::from(WORKSPACE).join(module);
@@ -458,7 +519,9 @@ fn dump_expanded_sources() {
     for f in &files {
         let source = load_source(f);
         let out_name = f.replace("/", "_").replace(".coral", "_expanded.txt");
-        let out_path = std::path::PathBuf::from(WORKSPACE).join("target/tmp").join(&out_name);
+        let out_path = std::path::PathBuf::from(WORKSPACE)
+            .join("target/tmp")
+            .join(&out_name);
         std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
         std::fs::write(&out_path, &source).unwrap();
         eprintln!("{}: {} bytes", f, source.len());
@@ -542,8 +605,8 @@ fn sh4_range_calls_runtime() {
 /// a test program through it, then execute the result.
 fn run_self_hosted_e2e(coral_source: &str) -> String {
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Once;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     static COMPILE_ONCE: Once = Once::new();
@@ -643,7 +706,8 @@ fn e2e_self_hosted_l4_function() {
 /// L5: If/else control flow
 #[test]
 fn e2e_self_hosted_l5_if_else() {
-    let output = run_self_hosted_e2e("*main()\n\tif true\n\t\tlog(\"yes\")\n\telse\n\t\tlog(\"no\")\n");
+    let output =
+        run_self_hosted_e2e("*main()\n\tif true\n\t\tlog(\"yes\")\n\telse\n\t\tlog(\"no\")\n");
     assert_eq!(output, "yes");
 }
 
@@ -657,6 +721,146 @@ fn e2e_self_hosted_l6_loop() {
 /// L7: List literal and iteration
 #[test]
 fn e2e_self_hosted_l7_list() {
-    let output = run_self_hosted_e2e("*main()\n\titems is [1, 2, 3]\n\tfor x in items\n\t\tlog(x)\n");
+    let output =
+        run_self_hosted_e2e("*main()\n\titems is [1, 2, 3]\n\tfor x in items\n\t\tlog(x)\n");
     assert_eq!(output, "1\n2\n3");
+}
+
+// ─── Phase 5: New Feature Coverage Tests ─────────────────────────
+
+/// Verify new parser constructs are present in the self-hosted parser
+#[test]
+fn sh5_parser_has_new_syntax_constructs() {
+    let source = load_source("self_hosted/parser.coral");
+
+    // New expression types
+    assert!(source.contains("make_spread_expr"), "Missing spread expression constructor");
+    assert!(source.contains("make_list_comprehension_expr"), "Missing list comprehension constructor");
+    assert!(source.contains("make_map_comprehension_expr"), "Missing map comprehension constructor");
+    assert!(source.contains("make_slice_expr"), "Missing slice expression constructor");
+    assert!(source.contains("make_unsafe_expr"), "Missing unsafe expression constructor");
+    assert!(source.contains("make_inline_asm_expr"), "Missing inline asm expression constructor");
+    assert!(source.contains("make_ptr_load_expr"), "Missing ptr_load expression constructor");
+
+    // New statement/item types
+    assert!(source.contains("make_pattern_binding_stmt"), "Missing pattern binding constructor");
+    assert!(source.contains("make_field_assign_stmt"), "Missing field assign constructor");
+    assert!(source.contains("make_extension_item"), "Missing extension item constructor");
+
+    // New pattern types
+    assert!(source.contains("make_pat_or"), "Missing or-pattern constructor");
+    assert!(source.contains("make_pat_range"), "Missing range pattern constructor");
+    assert!(source.contains("make_pat_rest"), "Missing rest pattern constructor");
+
+    // New parsing functions
+    assert!(source.contains("parse_type_params"), "Missing type params parsing");
+    assert!(source.contains("parse_extension_def"), "Missing extension def parsing");
+    assert!(source.contains("parse_unsafe_block"), "Missing unsafe block parsing");
+    assert!(source.contains("parse_inline_asm"), "Missing inline asm parsing");
+    assert!(source.contains("parse_do_end_block"), "Missing do..end block parsing");
+
+    // Named args support
+    assert!(source.contains("arg_names"), "Missing named argument support");
+}
+
+/// Verify new lowering pass handles all new node types
+#[test]
+fn sh5_lower_handles_new_nodes() {
+    let source = load_source("self_hosted/lower.coral");
+
+    assert!(source.contains("lower_extension_item"), "Missing extension item lowering");
+    assert!(source.contains("lower_pattern_binding_stmt"), "Missing pattern binding lowering");
+    assert!(source.contains("lower_list_comprehension"), "Missing list comprehension lowering");
+    assert!(source.contains("lower_map_comprehension"), "Missing map comprehension lowering");
+    assert!(source.contains("lower_slice_expr"), "Missing slice expression lowering");
+    assert!(source.contains(r#""spread""#), "Missing spread node handling in lowering");
+    assert!(source.contains("arg_names"), "Missing arg_names preservation in lowering");
+}
+
+/// Verify semantic analysis handles new expression types
+#[test]
+fn sh5_semantic_handles_new_nodes() {
+    let source = load_source("self_hosted/semantic.coral");
+
+    // check_expression handlers
+    assert!(source.contains(r#""list_comprehension""#), "Missing list comprehension in check_expression");
+    assert!(source.contains(r#""map_comprehension""#), "Missing map comprehension in check_expression");
+    assert!(source.contains(r#""spread""#), "Missing spread in check_expression");
+    assert!(source.contains(r#""slice""#), "Missing slice in check_expression");
+    assert!(source.contains(r#""unsafe""#), "Missing unsafe in check_expression");
+    assert!(source.contains(r#""inline_asm""#), "Missing inline_asm in check_expression");
+    assert!(source.contains(r#""ptr_load""#), "Missing ptr_load in check_expression");
+    assert!(source.contains(r#""pattern_binding""#), "Missing pattern_binding in check_statement");
+    assert!(source.contains(r#""extension""#), "Missing extension in analyze");
+}
+
+/// Verify codegen handles new expression types
+#[test]
+fn sh5_codegen_handles_new_nodes() {
+    let source = load_source("self_hosted/codegen.coral");
+
+    assert!(source.contains("emit_list_comprehension"), "Missing list comprehension codegen");
+    assert!(source.contains("emit_map_comprehension"), "Missing map comprehension codegen");
+    assert!(source.contains("emit_slice"), "Missing slice codegen");
+    assert!(source.contains("emit_pattern_binding_stmt"), "Missing pattern binding codegen");
+    assert!(source.contains(r#""list_comprehension""#), "Missing list_comprehension dispatch in emit_expression");
+    assert!(source.contains(r#""map_comprehension""#), "Missing map_comprehension dispatch in emit_expression");
+    assert!(source.contains(r#""spread""#), "Missing spread dispatch in emit_expression");
+    assert!(source.contains(r#""slice""#), "Missing slice dispatch in emit_expression");
+    assert!(source.contains(r#""unsafe""#), "Missing unsafe dispatch in emit_expression");
+    assert!(source.contains(r#""inline_asm""#), "Missing inline_asm dispatch in emit_expression");
+    assert!(source.contains(r#""ptr_load""#), "Missing ptr_load dispatch in emit_expression");
+}
+
+/// Verify compiler pipeline folds new expression types
+#[test]
+fn sh5_compiler_folds_new_nodes() {
+    let source = load_source("self_hosted/compiler.coral");
+
+    assert!(source.contains(r#""list_comprehension""#), "Missing list comprehension in fold_expr");
+    assert!(source.contains(r#""map_comprehension""#), "Missing map comprehension in fold_expr");
+    assert!(source.contains(r#""spread""#), "Missing spread in fold_expr");
+    assert!(source.contains(r#""slice""#), "Missing slice in fold_expr");
+    assert!(source.contains(r#""pattern_binding""#), "Missing pattern_binding in fold_statement");
+    assert!(source.contains(r#""match""#), "Missing match in fold_expr");
+    assert!(source.contains(r#""pipeline""#), "Missing pipeline in fold_expr");
+}
+
+/// Verify all self-hosted files still compile to IR after changes
+#[test]
+fn sh5_all_files_compile_to_ir() {
+    let files = [
+        "self_hosted/lexer.coral",
+        "self_hosted/parser.coral",
+        "self_hosted/lower.coral",
+        "self_hosted/semantic.coral",
+        "self_hosted/codegen.coral",
+        "self_hosted/compiler.coral",
+    ];
+    for f in &files {
+        let ir = compile_to_ir(f);
+        assert!(
+            ir.contains("define"),
+            "{} did not produce valid LLVM IR",
+            f
+        );
+    }
+}
+
+/// E2E: List comprehension through self-hosted compiler
+#[test]
+fn e2e_self_hosted_l8_list_comprehension() {
+    let output = run_self_hosted_e2e(
+        "*main()\n\tnums is [1, 2, 3, 4, 5]\n\tdoubled is [x * 2 for x in nums]\n\tfor n in doubled\n\t\tlog(n)\n",
+    );
+    assert_eq!(output, "2\n4\n6\n8\n10");
+}
+
+/// E2E: List comprehension with filter
+#[test]
+fn e2e_self_hosted_l9_filtered_comprehension() {
+    let output = run_self_hosted_e2e(
+        "*main()\n\tnums is [1, 2, 3, 4, 5, 6]\n\tevens is [x for x in nums if x % 2 is 0]\n\tfor n in evens\n\t\tlog(n)\n",
+    );
+    assert_eq!(output, "2\n4\n6");
 }

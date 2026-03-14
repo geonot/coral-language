@@ -1,0 +1,40 @@
+# Benchmark: For-in loop iteration
+# Tests: for-in syntax, range iteration, collection traversal
+
+*main()
+    start is time_now()
+
+    # For-in with list
+    data is []
+    i is 0
+    while i < 50000
+        data is data.push(i)
+        i is i + 1
+
+    sum1 is 0
+    for x in data
+        sum1 is sum1 + x
+
+    # Nested for-in
+    sum2 is 0
+    small is [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    j is 0
+    while j < 1000
+        for x in small
+            sum2 is sum2 + x
+        j is j + 1
+
+    # For-in with string operations
+    words is ["hello", "world", "coral", "benchmark", "test", "fast", "loop", "run"]
+    total_len is 0
+    k is 0
+    while k < 10000
+        for w in words
+            total_len is total_len + w.length
+        k is k + 1
+
+    elapsed is time_now() - start
+    log("list_sum = " + to_string(sum1))
+    log("nested_sum = " + to_string(sum2))
+    log("total_strlen = " + to_string(total_len))
+    log("elapsed_ms: " + to_string(elapsed))

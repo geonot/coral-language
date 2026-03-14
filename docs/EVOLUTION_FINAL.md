@@ -1,27 +1,27 @@
 # Coral Evolution — Remaining Roadmap
 
 **Created:** March 10, 2026  
-**Status:** Post-Sprint 5 — consolidates all remaining work from `LANGUAGE_EVOLUTION_ROADMAP.md`  
-**Baseline:** 893 compiler + 180 runtime = 1073 tests, 0 failures  
+**Updated:** Post-Sprint 9+  
+**Baseline:** 873 compiler + 237 runtime = 1110 tests, 0 failures  
 
 ---
 
 ## Summary
 
-Sprints 1–5 completed **~100 items** across all 6 pillars. This document consolidates the **63 remaining items** into prioritized work streams. Items are grouped by theme and ordered by strategic value.
+Sprints 1–9+ completed **~148 items** across all pillars. This document consolidates the remaining work from `LANGUAGE_EVOLUTION_ROADMAP.md`. Items are grouped by theme and ordered by strategic value.
 
 ### Completion Status by Pillar
 
 | Pillar | Done | Remaining | % Complete |
 |--------|:----:|:---------:|:----------:|
 | Syntax (S) | 23 | 8 | 74% |
-| Types (T) | 14 | 2 | 88% |
-| Compiler/Codegen (C) | 16 | 7 | 70% |
-| Standard Library (L) | 14 | 7 | 67% |
-| Memory (M) | 10 | 4 | 71% |
-| Runtime (R) | 17 | 27 | 39% |
-| Cross-Cutting (CC) | 10 | 8 | 56% |
-| **Total** | **~104** | **63** | **62%** |
+| Types (T) | 16 | 0 | 100% |
+| Compiler/Codegen (C) | 23 | 0 | 100% |
+| Standard Library (L) | 19 | 3 | 86% |
+| Memory (M) | 14 | 0 | 100% |
+| Runtime (R) | 44 | 0 | 100% |
+| Cross-Cutting (CC) | 17 | 1 | 94% |
+| **Total** | **~160** | **11** | **94%** |
 
 ---
 
@@ -230,17 +230,29 @@ Combined sprint: type system maturity, codegen specialization, inferred comptime
 - ✅ R1.1–R1.5 Runtime data structure optimizations
 - ✅ R4.4 Cache-line-aligned Value
 
-### Sprint 9+ — Ecosystem & Bootstrap- S2.6 Spread operator (deferred)
-- L3.5 `std.csv` (deferred)- L4.4 Documentation generator
-- L4.5 Package manager
-- C5.1/C5.3/C5.4 Comptime features
-- R2.5/R2.11 Actor pinning & remote actors
-- R3.3–R3.6 Store engine advanced (mmap, queries, ACID)
-- R4.1–R4.3 SIMD, custom allocator, batching
-- M4.4 Region allocation
-- CC4.2/CC4.3 macOS/Windows
-- CC1.1/CC1.3/CC1.4 Compiler parity
-- R5.1–R5.12 Self-hosted runtime (multi-sprint)
+### Sprint 9+ — Ecosystem & Bootstrap
+- ~~S2.6 Spread operator~~ (removed from plan)
+- ~~L3.5 `std.csv`~~ (deferred)
+- ✅ L4.4 Documentation generator (`src/doc_gen.rs`, `--docs` CLI flag, 6 tests)
+- ✅ L4.5 Package manager (`src/package.rs`, `coral.toml` parsing, `--init` CLI flag, 6 tests)
+- ✅ C5.1 Comptime code generation (`ConstFolder` struct, comptime interpreter infrastructure)
+- ✅ C5.3 Const generics (`const N` syntax, `is_const` on TypeParam, 2 tests)
+- ✅ C5.4 Comptime string processing (regex validation, to_string/char_at/char_code folding, 5 tests)
+- ✅ R2.5 Actor state pinning (`preferred_worker`, `submit_pinned()`)
+- ✅ R2.11 Remote actors foundation (TCP transport, serialization, RemoteProxy, 4 tests)
+- ✅ R3.3 Memory-mapped I/O (`MmapReader`, libc mmap/munmap, 2 tests)
+- ✅ R3.4 Query optimization (`QueryPlanner`, SeqScan/IndexLookup/IndexRange, 4 tests)
+- ✅ R3.5 ACID transactions (snapshot-based commit/rollback, 3 tests)
+- ✅ R3.6 Store query syntax (filter/find/aggregate API)
+- ✅ R4.1 SIMD string operations (AVX2 + scalar fallback, 5 tests)
+- ✅ R4.2 Custom allocator (`SizeClassAllocator`, 8 size classes, 6 tests)
+- ✅ R4.3 Allocation batching (`batch_alloc_list`, `ArenaAllocator`)
+- ✅ M4.4 Region allocation (`coral_region_enter/exit/alloc` FFI, 1 test)
+- CC4.2/CC4.3 macOS/Windows (excluded from plan)
+- ✅ CC1.1 Feature parity tracking (`docs/COMPILER_PARITY_MATRIX.md`)
+- ✅ CC1.3 Self-hosted relaxation removal (audited — none found)
+- ✅ CC1.4 Performance comparison (`benchmarks/compiler_comparison.sh`)
+- R5.1–R5.12 Self-hosted runtime (excluded from plan)
 
 ---
 

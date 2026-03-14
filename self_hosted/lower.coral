@@ -137,6 +137,8 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		return make_ok(item)
 	if kind is "trait_def"
 		return make_ok(item)
+	if kind is "extension"
+		return lower_extension_item(item)
 	if kind is "expression_stmt"
 		lowered is lower_expression(item.get("expr"))
 		if lowered.get("ok") is false
@@ -180,7 +182,7 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		if result.get("ok") is false
 			return result
 		lowered_methods.push(result.get("value"))
-	return make_ok(map("kind" is "type_def", "name" is ty.get("name"), "traits" is ty.get("traits"), "fields" is lowered_fields, "methods" is lowered_methods, "variants" is ty.get("variants"), "span" is ty.get("span")))
+	return make_ok(map("kind" is "type_def", "name" is ty.get("name"), "type_params" is ty.get("type_params"), "traits" is ty.get("traits"), "fields" is lowered_fields, "methods" is lowered_methods, "variants" is ty.get("variants"), "span" is ty.get("span")))
 
 *lower_store_item(store)
 	lowered_fields is []
@@ -269,6 +271,8 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		return make_ok(stmt)
 	if kind is "field_assign"
 		return lower_field_assign_stmt(stmt)
+	if kind is "pattern_binding"
+		return lower_pattern_binding_stmt(stmt)
 	if kind is "guard"
 		return lower_guard_stmt(stmt)
 	# Pass through unknown statement kinds
@@ -367,6 +371,25 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		return body_result
 	return make_ok(map("kind" is "guard", "condition" is cond_result.get("value"), "body" is body_result.get("value"), "span" is stmt.get("span")))
 
+*lower_extension_item(ext)
+	lowered_methods is []
+	for method in ext.get("methods")
+		result is lower_function_item(method)
+		if result.get("ok") is false
+			return result
+		lowered_methods.push(result.get("value"))
+	return make_ok(map("kind" is "extension", "target_type" is ext.get("target_type"), "methods" is lowered_methods, "span" is ext.get("span")))
+
+*lower_pattern_binding_stmt(stmt)
+	lowered_val is lower_expression(stmt.get("value"))
+	if lowered_val.get("ok") is false
+		return lowered_val
+	lr_val is lowered_val.get("value")
+	val_result is expect_no_placeholders(lr_val, PLACEHOLDER_MSG)
+	if val_result.get("ok") is false
+		return val_result
+	return make_ok(map("kind" is "pattern_binding", "pattern" is stmt.get("pattern"), "value" is val_result.get("value"), "span" is stmt.get("span")))
+
 # ─── Expression Lowering ───────────────────────────────────────────
 
 *lower_expression(expr)
@@ -428,7 +451,23 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 			return inner
 		lr is inner.get("value")
 		return make_ok(make_lowering(map("kind" is "error_propagate", "expr" is lr.get("expr"), "span" is expr.get("span")), lr.get("placeholder")))
-	# Error value, inline_asm, etc. — pass through
+	# List comprehension
+	if kind is "list_comprehension"
+		return lower_list_comprehension(expr)
+	# Map comprehension
+	if kind is "map_comprehension"
+		return lower_map_comprehension(expr)
+	# Spread — lower inner expression
+	if kind is "spread"
+		inner is lower_expression(expr.get("expr"))
+		if inner.get("ok") is false
+			return inner
+		lr is inner.get("value")
+		return make_ok(make_lowering(map("kind" is "spread", "expr" is lr.get("expr"), "span" is expr.get("span")), lr.get("placeholder")))
+	# Slice — lower target, start, end
+	if kind is "slice"
+		return lower_slice_expr(expr)
+	# Error value, inline_asm, unsafe, ptr_load, etc. — pass through
 	return make_ok(make_lowering(expr, none))
 
 *lower_binary_expr(expr)
@@ -508,7 +547,7 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 			lowered_args.push(wrapped.get("value"))
 		else
 			lowered_args.push(lr.get("expr"))
-	new_expr is map("kind" is "call", "callee" is lr_callee.get("expr"), "args" is lowered_args, "span" is expr.get("span"))
+	new_expr is map("kind" is "call", "callee" is lr_callee.get("expr"), "args" is lowered_args, "arg_names" is expr.get("arg_names"), "span" is expr.get("span"))
 	return make_ok(make_lowering(new_expr, none))
 
 *lower_member_expr(expr)
@@ -576,7 +615,14 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		body_result is lower_block(arm.get("body"))
 		if body_result.get("ok") is false
 			return body_result
-		lowered_arms.push(map("pattern" is arm.get("pattern"), "body" is body_result.get("value")))
+		guard_expr is none
+		if arm.get("guard") isnt none
+			guard_result is lower_expression(arm.get("guard"))
+			if guard_result.get("ok") is false
+				return guard_result
+			lr_guard is guard_result.get("value")
+			guard_expr is lr_guard.get("expr")
+		lowered_arms.push(map("pattern" is arm.get("pattern"), "guard" is guard_expr, "body" is body_result.get("value")))
 	# Lower default arm
 	lowered_default is none
 	default_arm is expr.get("default")
@@ -587,6 +633,76 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		lowered_default is default_result.get("value")
 	new_expr is map("kind" is "match", "value" is lr_val.get("expr"), "arms" is lowered_arms, "default" is lowered_default, "span" is expr.get("span"))
 	return make_ok(make_lowering(new_expr, lr_val.get("placeholder")))
+
+*lower_list_comprehension(expr)
+	body_result is lower_expression(expr.get("body"))
+	if body_result.get("ok") is false
+		return body_result
+	iter_result is lower_expression(expr.get("iterable"))
+	if iter_result.get("ok") is false
+		return iter_result
+	lr_body is body_result.get("value")
+	lr_iter is iter_result.get("value")
+	lowered_cond is none
+	if expr.get("condition") isnt none
+		cond_result is lower_expression(expr.get("condition"))
+		if cond_result.get("ok") is false
+			return cond_result
+		lr_cond is cond_result.get("value")
+		lowered_cond is lr_cond.get("expr")
+	merged_ph is merge_placeholder_info(lr_body.get("placeholder"), lr_iter.get("placeholder"))
+	new_expr is map("kind" is "list_comprehension", "body" is lr_body.get("expr"), "variable" is expr.get("variable"), "iterable" is lr_iter.get("expr"), "condition" is lowered_cond, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_map_comprehension(expr)
+	key_result is lower_expression(expr.get("key"))
+	if key_result.get("ok") is false
+		return key_result
+	val_result is lower_expression(expr.get("value"))
+	if val_result.get("ok") is false
+		return val_result
+	iter_result is lower_expression(expr.get("iterable"))
+	if iter_result.get("ok") is false
+		return iter_result
+	lr_key is key_result.get("value")
+	lr_val is val_result.get("value")
+	lr_iter is iter_result.get("value")
+	lowered_cond is none
+	if expr.get("condition") isnt none
+		cond_result is lower_expression(expr.get("condition"))
+		if cond_result.get("ok") is false
+			return cond_result
+		lr_cond is cond_result.get("value")
+		lowered_cond is lr_cond.get("expr")
+	merged_ph is merge_placeholder_info(lr_key.get("placeholder"), lr_val.get("placeholder"))
+	merged_ph is merge_placeholder_info(merged_ph, lr_iter.get("placeholder"))
+	new_expr is map("kind" is "map_comprehension", "key" is lr_key.get("expr"), "value" is lr_val.get("expr"), "variable" is expr.get("variable"), "iterable" is lr_iter.get("expr"), "condition" is lowered_cond, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
+
+*lower_slice_expr(expr)
+	target_result is lower_expression(expr.get("target"))
+	if target_result.get("ok") is false
+		return target_result
+	lr_target is target_result.get("value")
+	merged_ph is lr_target.get("placeholder")
+	lowered_start is none
+	if expr.get("start") isnt none
+		start_result is lower_expression(expr.get("start"))
+		if start_result.get("ok") is false
+			return start_result
+		lr_start is start_result.get("value")
+		lowered_start is lr_start.get("expr")
+		merged_ph is merge_placeholder_info(merged_ph, lr_start.get("placeholder"))
+	lowered_end is none
+	if expr.get("end") isnt none
+		end_result is lower_expression(expr.get("end"))
+		if end_result.get("ok") is false
+			return end_result
+		lr_end is end_result.get("value")
+		lowered_end is lr_end.get("expr")
+		merged_ph is merge_placeholder_info(merged_ph, lr_end.get("placeholder"))
+	new_expr is map("kind" is "slice", "target" is lr_target.get("expr"), "start" is lowered_start, "end" is lowered_end, "span" is expr.get("span"))
+	return make_ok(make_lowering(new_expr, merged_ph))
 
 # ─── Placeholder Lambda Wrapping ───────────────────────────────────
 
@@ -632,7 +748,7 @@ PLACEHOLDER_MSG is "placeholder expressions are only valid inside function call 
 		args is []
 		for arg in expr.get("args")
 			args.push(replace_placeholders(arg, names))
-		return map("kind" is "call", "callee" is callee, "args" is args, "span" is expr.get("span"))
+		return map("kind" is "call", "callee" is callee, "args" is args, "arg_names" is expr.get("arg_names"), "span" is expr.get("span"))
 	if kind is "member"
 		target is replace_placeholders(expr.get("target"), names)
 		return map("kind" is "member", "target" is target, "property" is expr.get("property"), "span" is expr.get("span"))

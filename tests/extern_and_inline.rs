@@ -1,5 +1,5 @@
-use coralc::diagnostics::Stage;
 use coralc::Compiler;
+use coralc::diagnostics::Stage;
 use std::sync::{Mutex, OnceLock};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -52,9 +52,18 @@ extern fn coral_load_u64(p: usize) : u64
     let ir = compiler
         .compile_to_ir(source)
         .expect("extern memory intrinsics should lower");
-    assert!(ir.contains("declare i64 @coral_malloc"), "malloc extern should be declared as i64->i64");
-    assert!(ir.contains("declare void @coral_store_u64(i64, i64)"), "store_u64 extern should take ptr,value as i64");
-    assert!(ir.contains("declare i64 @coral_load_u64(i64)"), "load_u64 extern should return i64");
+    assert!(
+        ir.contains("declare i64 @coral_malloc"),
+        "malloc extern should be declared as i64->i64"
+    );
+    assert!(
+        ir.contains("declare void @coral_store_u64(i64, i64)"),
+        "store_u64 extern should take ptr,value as i64"
+    );
+    assert!(
+        ir.contains("declare i64 @coral_load_u64(i64)"),
+        "load_u64 extern should return i64"
+    );
 }
 
 #[test]
@@ -76,7 +85,9 @@ fn inline_asm_noop_when_allowed() {
     let _lock = env_lock().lock().unwrap();
     let _guard = EnvGuard::set("CORAL_INLINE_ASM", "allow-noop");
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect("inline asm should noop when allowed");
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("inline asm should noop when allowed");
     // Functions now return i64 (NaN-boxed) after M1 transition
     assert!(ir.contains("define i64 @__user_main"));
 }
@@ -87,7 +98,9 @@ fn inline_asm_emits_when_enabled() {
     let _lock = env_lock().lock().unwrap();
     let _guard = EnvGuard::set("CORAL_INLINE_ASM", "emit");
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(source).expect("inline asm should compile when enabled");
+    let ir = compiler
+        .compile_to_ir(source)
+        .expect("inline asm should compile when enabled");
     assert!(
         ir.contains("asm") && ir.contains("nop"),
         "inline asm should be present in IR: {ir}"

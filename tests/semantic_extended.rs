@@ -8,7 +8,9 @@ use coralc::Compiler;
 /// Helper: attempts to compile — returns Ok(ir) or Err(message).
 fn try_compile(source: &str) -> Result<String, String> {
     let compiler = Compiler;
-    compiler.compile_to_ir(source).map_err(|e| format!("{:?}", e))
+    compiler
+        .compile_to_ir(source)
+        .map_err(|e| format!("{:?}", e))
 }
 
 fn compiles_ok(source: &str) {
@@ -48,12 +50,16 @@ fn semantic_recognizes_time_format_iso() {
 
 #[test]
 fn semantic_recognizes_time_components() {
-    compiles_ok("*main()\n    log(time_year(0))\n    log(time_month(0))\n    log(time_day(0))\n    log(time_hour(0))\n    log(time_minute(0))\n    log(time_second(0))\n");
+    compiles_ok(
+        "*main()\n    log(time_year(0))\n    log(time_month(0))\n    log(time_day(0))\n    log(time_hour(0))\n    log(time_minute(0))\n    log(time_second(0))\n",
+    );
 }
 
 #[test]
 fn semantic_recognizes_base64() {
-    compiles_ok("*main()\n    x is base64_encode(\"hello\")\n    y is base64_decode(x)\n    log(y)\n");
+    compiles_ok(
+        "*main()\n    x is base64_encode(\"hello\")\n    y is base64_decode(x)\n    log(y)\n",
+    );
 }
 
 #[test]
@@ -63,17 +69,23 @@ fn semantic_recognizes_hex() {
 
 #[test]
 fn semantic_recognizes_list_ops() {
-    compiles_ok("*main()\n    lst is [1, 2, 3]\n    log(list_contains(lst, 1))\n    log(list_index_of(lst, 2))\n    log(list_reverse(lst))\n    log(list_sort(lst))\n");
+    compiles_ok(
+        "*main()\n    lst is [1, 2, 3]\n    log(list_contains(lst, 1))\n    log(list_index_of(lst, 2))\n    log(list_reverse(lst))\n    log(list_sort(lst))\n",
+    );
 }
 
 #[test]
 fn semantic_recognizes_map_ops() {
-    compiles_ok("*main()\n    m is map(\"a\" is 1)\n    log(map_keys(m))\n    log(map_values(m))\n    log(has_key(m, \"a\"))\n");
+    compiles_ok(
+        "*main()\n    m is map(\"a\" is 1)\n    log(map_keys(m))\n    log(map_values(m))\n    log(has_key(m, \"a\"))\n",
+    );
 }
 
 #[test]
 fn semantic_recognizes_string_ops() {
-    compiles_ok("*main()\n    log(trim(\"  hi  \"))\n    log(to_upper(\"hi\"))\n    log(to_lower(\"HI\"))\n    log(starts_with(\"abc\", \"a\"))\n    log(ends_with(\"abc\", \"c\"))\n");
+    compiles_ok(
+        "*main()\n    log(trim(\"  hi  \"))\n    log(to_upper(\"hi\"))\n    log(to_lower(\"HI\"))\n    log(starts_with(\"abc\", \"a\"))\n    log(ends_with(\"abc\", \"c\"))\n",
+    );
 }
 
 #[test]
@@ -83,12 +95,16 @@ fn semantic_recognizes_type_of() {
 
 #[test]
 fn semantic_recognizes_error_builtins() {
-    compiles_ok("*main()\n    e is err NotFound\n    log(is_err(e))\n    log(is_ok(e))\n    log(error_name(e))\n");
+    compiles_ok(
+        "*main()\n    e is err NotFound\n    log(is_err(e))\n    log(is_ok(e))\n    log(error_name(e))\n",
+    );
 }
 
 #[test]
 fn semantic_recognizes_bytes_ops() {
-    compiles_ok("*main()\n    b is bytes_from_string(\"hi\")\n    s is bytes_to_string(b)\n    log(s)\n");
+    compiles_ok(
+        "*main()\n    b is bytes_from_string(\"hi\")\n    s is bytes_to_string(b)\n    log(s)\n",
+    );
 }
 
 #[test]
@@ -121,27 +137,37 @@ fn semantic_recognizes_string_lines() {
 #[test]
 fn semantic_rejects_undefined_variable() {
     let err = compile_fails("*main()\n    log(undefined_thing)\n");
-    assert!(err.contains("undefined") || err.contains("unknown") || err.contains("Semantic"),
-        "Expected undefined name error, got: {}", err);
+    assert!(
+        err.contains("undefined") || err.contains("unknown") || err.contains("Semantic"),
+        "Expected undefined name error, got: {}",
+        err
+    );
 }
 
 #[test]
 fn semantic_rejects_undefined_function_call() {
     let err = compile_fails("*main()\n    result is nonexistent_func(42)\n    log(result)\n");
-    assert!(err.contains("undefined") || err.contains("unknown") || err.contains("Semantic"),
-        "Expected undefined name error, got: {}", err);
+    assert!(
+        err.contains("undefined") || err.contains("unknown") || err.contains("Semantic"),
+        "Expected undefined name error, got: {}",
+        err
+    );
 }
 
 // ─── Store Compilation ──────────────────────────────────────────────
 
 #[test]
 fn semantic_accepts_store_definition() {
-    compiles_ok("store Point\n    x ? 0\n    y ? 0\n\n*main()\n    p is make_Point()\n    log(p.x)\n");
+    compiles_ok(
+        "store Point\n    x ? 0\n    y ? 0\n\n*main()\n    p is make_Point()\n    log(p.x)\n",
+    );
 }
 
 #[test]
 fn semantic_accepts_store_with_method() {
-    compiles_ok("store Counter\n    count ? 0\n\n    *inc()\n        self.count is self.count + 1\n\n*main()\n    c is make_Counter()\n    c.inc()\n    log(c.count)\n");
+    compiles_ok(
+        "store Counter\n    count ? 0\n\n    *inc()\n        self.count is self.count + 1\n\n*main()\n    c is make_Counter()\n    c.inc()\n    log(c.count)\n",
+    );
 }
 
 // ─── Trait Compilation ──────────────────────────────────────────────
@@ -162,7 +188,9 @@ fn semantic_accepts_type_definition() {
 
 #[test]
 fn semantic_accepts_error_definition() {
-    compiles_ok("err NotFound\n    code is 404\n    message is \"not found\"\n\n*main()\n    e is err NotFound\n    log(is_err(e))\n");
+    compiles_ok(
+        "err NotFound\n    code is 404\n    message is \"not found\"\n\n*main()\n    e is err NotFound\n    log(is_err(e))\n",
+    );
 }
 
 // ─── Complex Programs ───────────────────────────────────────────────
@@ -174,12 +202,16 @@ fn semantic_accepts_fibonacci_program() {
 
 #[test]
 fn semantic_accepts_store_with_trait() {
-    compiles_ok("trait Describable\n    *describe()\n\nstore Dog with Describable\n    name ? \"Rex\"\n\n    *describe()\n        self.name\n\n*main()\n    d is make_Dog()\n    log(d.describe())\n");
+    compiles_ok(
+        "trait Describable\n    *describe()\n\nstore Dog with Describable\n    name ? \"Rex\"\n\n    *describe()\n        self.name\n\n*main()\n    d is make_Dog()\n    log(d.describe())\n",
+    );
 }
 
 #[test]
 fn semantic_accepts_match_expression() {
-    compiles_ok("*classify(n)\n    return match n\n        1 ? \"one\"\n        2 ? \"two\"\n        ! \"other\"\n\n*main()\n    log(classify(1))\n");
+    compiles_ok(
+        "*classify(n)\n    return match n\n        1 ? \"one\"\n        2 ? \"two\"\n        ! \"other\"\n\n*main()\n    log(classify(1))\n",
+    );
 }
 
 #[test]
@@ -209,5 +241,7 @@ fn semantic_accepts_lambda() {
 
 #[test]
 fn semantic_accepts_bitwise_ops() {
-    compiles_ok("*main()\n    log(bit_and(3, 5))\n    log(bit_or(3, 5))\n    log(bit_xor(3, 5))\n    log(bit_shl(1, 3))\n    log(bit_shr(8, 1))\n");
+    compiles_ok(
+        "*main()\n    log(bit_and(3, 5))\n    log(bit_or(3, 5))\n    log(bit_xor(3, 5))\n    log(bit_shl(1, 3))\n    log(bit_shr(8, 1))\n",
+    );
 }

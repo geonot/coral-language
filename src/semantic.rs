@@ -1,37 +1,14 @@
 use crate::ast::{
-    Binding,
-    Block,
-    ErrorDefinition,
-    ExtensionDefinition,
-    Field,
-    Function,
-    FunctionKind,
-    Item,
-    MatchExpression,
-    MatchPattern,
-    Parameter,
-    Program,
-    Statement,
-    Expression,
+    Binding, Block, ErrorDefinition, Expression, Field, Function,
+    FunctionKind, Item, MatchExpression, MatchPattern, Parameter, Program, Statement,
     TraitDefinition,
 };
 use crate::diagnostics::{Diagnostic, WarningCategory};
-use crate::types::{
-    AllocationHints,
-    AllocationStrategy,
-    ConstraintKind,
-    ConstraintSet,
-    Mutability,
-    MutabilityEnv,
-    Primitive,
-    SymbolUsage,
-    TraitRegistry,
-    TypeEnv,
-    TypeId,
-    TypeGraph,
-    UsageMetrics,
-};
 use crate::span::Span;
+use crate::types::{
+    AllocationHints, AllocationStrategy, ConstraintKind, ConstraintSet, Mutability, MutabilityEnv,
+    Primitive, SymbolUsage, TraitRegistry, TypeEnv, TypeGraph, TypeId, UsageMetrics,
+};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -40,68 +17,66 @@ pub struct SemanticModel {
     pub functions: Vec<Function>,
     pub extern_functions: Vec<crate::ast::ExternFunction>,
     pub stores: Vec<crate::ast::StoreDefinition>,
-    pub type_defs: Vec<crate::ast::TypeDefinition>,  // For ADT codegen
-    pub trait_defs: Vec<TraitDefinition>,  // For trait method resolution
-    pub error_defs: Vec<ErrorDefinition>,  // For error hierarchy
+    pub type_defs: Vec<crate::ast::TypeDefinition>,
+    pub trait_defs: Vec<TraitDefinition>,
+    pub error_defs: Vec<ErrorDefinition>,
     pub constraints: ConstraintSet,
     pub types: TypeEnv,
     pub mutability: MutabilityEnv,
     pub allocation: AllocationHints,
     pub usage: UsageMetrics,
-    pub warnings: Vec<Diagnostic>,  // Non-fatal warnings (e.g., unhandled errors)
-    /// Maps (TypeName, FieldName) → field index for store/type field tracking
+    pub warnings: Vec<Diagnostic>,
+
     pub field_types: HashMap<(String, String), usize>,
-    /// Maps store/type names to list of field names for member access validation
+
     pub store_field_names: HashMap<String, Vec<String>>,
-    /// CC3.2: Maps short module name (e.g., "math") to list of exported function names
+
     pub module_exports: HashMap<String, Vec<String>>,
-    /// R2.7: Maps actor name → message type annotation (if any).
+
     pub actor_message_types: HashMap<String, String>,
-    /// R2.7: Maps actor name → set of handler names for typed send validation.
+
     pub actor_handler_names: HashMap<String, Vec<String>>,
-    /// T2.4: Trait implementation registry for type checking.
+
     pub trait_registry: TraitRegistry,
-    /// T2.5: Monomorphization table — tracks concrete type instantiations seen
-    /// for each generic type. Maps generic name → set of concrete type arg lists.
-    /// Used by codegen to generate specialized LLVM functions/layouts.
+
     pub monomorphizations: HashMap<String, Vec<Vec<TypeId>>>,
-    /// C2.4: Set of binding names whose resolved type is List[Number],
-    /// enabling unboxed f64 list specialization in codegen.
+
     pub unboxed_number_lists: HashSet<String>,
-    /// C2.5: Maps (StoreName, FieldName) → field index for struct-layout stores.
-    /// Enables O(1) field access by index instead of hash table lookup.
+
     pub store_field_indices: HashMap<(String, String), u32>,
-    /// C2.5: Set of store names eligible for struct-layout specialization.
-    /// Stores in this set have all fields known at compile time and are
-    /// never used dynamically (no indexed access, no spread).
+
     pub specialized_stores: HashSet<String>,
 }
 
-/// Register error definitions recursively, building paths like "Database:Connection:Timeout"
-fn register_error_definitions(def: &ErrorDefinition, prefix: &str, known_names: &mut HashSet<String>) {
+fn register_error_definitions(
+    def: &ErrorDefinition,
+    prefix: &str,
+    known_names: &mut HashSet<String>,
+) {
     let full_name = if prefix.is_empty() {
         def.name.clone()
     } else {
         format!("{}:{}", prefix, def.name)
     };
-    
-    // Register the error name (like "Database" or "Database:Connection")
+
     known_names.insert(full_name.clone());
-    
-    // Recursively register child errors
+
     for child in &def.children {
         register_error_definitions(child, &full_name, known_names);
     }
 }
 
 pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
-    // CC3.2: Build module_exports map from parsed modules
     let mut module_exports: HashMap<String, Vec<String>> = HashMap::new();
     for module in &program.modules {
-        // Use the short name (last segment) as the lookup key
-        let short_name = module.name.rsplit('.').next().unwrap_or(&module.name).to_string();
+        let short_name = module
+            .name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&module.name)
+            .to_string();
         module_exports.insert(short_name, module.exports.clone());
-        // Also register the full name for qualified access like `std.math.sin()`
+
         if module.name.contains('.') {
             module_exports.insert(module.name.clone(), module.exports.clone());
         }
@@ -118,18 +93,15 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     let mut types = TypeEnv::default();
     let mut global_scope = ScopeStack::new();
     global_scope.push();
-    
-    // Track constructor→enum_name to detect collisions (S3)
+
     let mut constructor_owners: HashMap<String, String> = HashMap::new();
-    // Track (TypeName, FieldName) → field index for member access type inference (TS-4)
+
     let mut field_types: HashMap<(String, String), usize> = HashMap::new();
     let mut store_field_names: HashMap<String, Vec<String>> = HashMap::new();
-    // R2.7: Track actor message types and handler names
+
     let mut actor_message_types: HashMap<String, String> = HashMap::new();
     let mut actor_handler_names: HashMap<String, Vec<String>> = HashMap::new();
 
-    // First pass: collect all top-level names (functions, externs, store constructors, types)
-    // This allows undefined name detection to know about forward references
     let mut known_names: HashSet<String> = HashSet::new();
     for item in &program.items {
         match item {
@@ -140,18 +112,16 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                 known_names.insert(extern_fn.name.clone());
             }
             Item::Store(store) => {
-                // Store constructors: make_StoreName
                 known_names.insert(format!("make_{}", store.name));
-                // Also register the store/actor name itself for type references
+
                 known_names.insert(store.name.clone());
             }
             Item::Binding(binding) => {
                 known_names.insert(binding.name.clone());
             }
             Item::Type(r#type) => {
-                // Register the type name for forward references
                 known_names.insert(r#type.name.clone());
-                // Register variant constructor names
+
                 for variant in &r#type.variants {
                     known_names.insert(variant.name.clone());
                 }
@@ -201,7 +171,7 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
             }
             Item::Type(r#type) => {
                 check_field_uniqueness("type", &r#type.name, &r#type.fields)?;
-                // Special-case Message type: force data field to Any
+
                 if r#type.name == "Message" {
                     for field in &r#type.fields {
                         if field.name == "data" {
@@ -212,17 +182,12 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                         }
                     }
                 }
-                
-                // Handle enum (sum type) variants - register constructors
+
                 if !r#type.variants.is_empty() {
-                    // T2.1: Register generic type parameters in TypeEnv
                     let has_type_params = !r#type.type_params.is_empty();
                     if has_type_params {
-                        types.register_generic_type(
-                            r#type.name.clone(),
-                            r#type.param_names(),
-                        );
-                        // T2.4: Register trait bounds for each type parameter
+                        types.register_generic_type(r#type.name.clone(), r#type.param_names());
+
                         for tp in &r#type.type_params {
                             if !tp.bounds.is_empty() {
                                 types.register_type_param_bounds(
@@ -231,18 +196,21 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                                     tp.bounds.clone(),
                                 );
                             }
+                            if tp.is_const {
+                                types.register_const_param(&r#type.name, &tp.name);
+                            }
                         }
                     }
-                    
-                    // Register the enum type itself as an ADT
-                    types.insert(r#type.name.clone(), TypeId::Adt(r#type.name.clone(), vec![]));
-                    
-                    // Register each variant constructor
+
+                    types.insert(
+                        r#type.name.clone(),
+                        TypeId::Adt(r#type.name.clone(), vec![]),
+                    );
+
                     for variant in &r#type.variants {
                         let ctor_name = variant.name.clone();
                         let adt_type = TypeId::Adt(r#type.name.clone(), vec![]);
-                        
-                        // Detect constructor name collisions (S3)
+
                         if let Some(other_enum) = constructor_owners.get(&ctor_name) {
                             if other_enum != &r#type.name {
                                 return Err(Diagnostic::new(
@@ -255,44 +223,37 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                             }
                         }
                         constructor_owners.insert(ctor_name.clone(), r#type.name.clone());
-                        
-                        // T2.2: For generic enums, register constructors for let-polymorphism
-                        // instead of a fixed monomorphic type. Each call site will get fresh vars.
+
                         if has_type_params {
                             types.register_generic_constructor(
                                 ctor_name.clone(),
                                 r#type.name.clone(),
-                                r#type.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                                r#type
+                                    .type_params
+                                    .iter()
+                                    .map(|tp| tp.name.clone())
+                                    .collect(),
                                 variant.fields.len(),
                             );
                         }
-                        
+
                         if variant.fields.is_empty() {
-                            // Nullary constructor - register as an ADT value (not a function)
-                            // so that `None` can be used directly without calling it
-                            types.insert(
-                                ctor_name.clone(),
-                                adt_type,
-                            );
+                            types.insert(ctor_name.clone(), adt_type);
                         } else {
-                            // Constructor with fields - register as a function returning the ADT
-                            let param_types: Vec<TypeId> = variant.fields.iter()
+                            let param_types: Vec<TypeId> = variant
+                                .fields
+                                .iter()
                                 .map(|_| TypeId::Primitive(Primitive::Any))
                                 .collect();
                             let return_type = Box::new(adt_type);
-                            
-                            types.insert(
-                                ctor_name.clone(),
-                                TypeId::Func(param_types, return_type),
-                            );
+
+                            types.insert(ctor_name.clone(), TypeId::Func(param_types, return_type));
                         }
-                        
-                        // Also add to known_names so constructor calls are recognized
+
                         known_names.insert(ctor_name);
                     }
                 }
-                
-                // Track type field names for member access type inference (TS-4)
+
                 {
                     let names: Vec<String> = r#type.fields.iter().map(|f| f.name.clone()).collect();
                     for (i, field) in r#type.fields.iter().enumerate() {
@@ -301,12 +262,10 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     store_field_names.insert(r#type.name.clone(), names);
                 }
 
-                // Scope-check type method bodies
                 for method in &r#type.methods {
                     check_method_with_fields(method, &r#type.fields, &known_names)?;
                 }
-                
-                // Save type definition for codegen
+
                 type_defs.push(r#type);
             }
             Item::Store(store) => {
@@ -314,37 +273,41 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                 check_field_uniqueness(kind, &store.name, &store.fields)?;
                 if store.is_actor {
                     types.insert(store.name.clone(), TypeId::Primitive(Primitive::Actor));
-                    // Validate actor message handlers
+
                     for method in &store.methods {
-                        if method.kind == crate::ast::FunctionKind::ActorMessage && method.params.len() > 1 {
+                        if method.kind == crate::ast::FunctionKind::ActorMessage
+                            && method.params.len() > 1
+                        {
                             return Err(Diagnostic::new(
                                 format!(
                                     "actor message handler `@{}` has {} parameters, but handlers can have at most 1 (message payload)",
-                                    method.name, method.params.len()
+                                    method.name,
+                                    method.params.len()
                                 ),
                                 method.span,
                             ));
                         }
                     }
-                    // R2.7: Store handler names for typed message validation
-                    let handlers: Vec<String> = store.methods.iter()
+
+                    let handlers: Vec<String> = store
+                        .methods
+                        .iter()
                         .filter(|m| m.kind == crate::ast::FunctionKind::ActorMessage)
                         .map(|m| m.name.clone())
                         .collect();
                     actor_handler_names.insert(store.name.clone(), handlers);
-                    // R2.7: Store message type annotation if present
+
                     if let Some(ref msg_type) = store.message_type {
                         actor_message_types.insert(store.name.clone(), msg_type.clone());
                     }
                 } else {
-                    // Non-actor store: register constructor make_StoreName() -> Store(name)
                     let ctor_name = format!("make_{}", store.name);
                     types.insert(
                         ctor_name,
                         TypeId::Func(vec![], Box::new(TypeId::Store(store.name.clone()))),
                     );
                 }
-                // Track store field names for member access type inference (TS-4)
+
                 {
                     let names: Vec<String> = store.fields.iter().map(|f| f.name.clone()).collect();
                     for (i, field) in store.fields.iter().enumerate() {
@@ -353,7 +316,6 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     store_field_names.insert(store.name.clone(), names);
                 }
 
-                // Scope-check store method bodies
                 for method in &store.methods {
                     check_method_with_fields(method, &store.fields, &known_names)?;
                 }
@@ -361,18 +323,17 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
             }
             Item::Taxonomy(_) => {}
             Item::ErrorDefinition(error_def) => {
-                // Register the error hierarchy in the known names
                 register_error_definitions(&error_def, "", &mut known_names);
-                // Store the error definition for codegen
+
                 error_defs.push(error_def);
             }
             Item::TraitDefinition(trait_def) => {
-                // Register trait name
                 known_names.insert(trait_def.name.clone());
-                // Register trait methods in the type environment
+
                 for method in &trait_def.methods {
-                    // Trait methods are functions that can be called
-                    let param_types: Vec<TypeId> = method.params.iter()
+                    let param_types: Vec<TypeId> = method
+                        .params
+                        .iter()
                         .map(|_| TypeId::Primitive(Primitive::Any))
                         .collect();
                     types.insert(
@@ -380,20 +341,18 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                         TypeId::Func(param_types, Box::new(TypeId::Primitive(Primitive::Any))),
                     );
                 }
-                // Store trait definitions for method resolution and validation
+
                 trait_defs.push(trait_def);
             }
             Item::Extension(ext) => {
-                // S4.5: Merge extension methods into the target type/store.
-                // Extension methods have lower priority — only add if not already defined.
                 let target = &ext.target_type;
                 let mut merged = false;
 
-                // Try to merge into a store definition
                 for store in stores.iter_mut() {
                     if store.name == *target {
                         for method in &ext.methods {
-                            let already_exists = store.methods.iter().any(|m| m.name == method.name);
+                            let already_exists =
+                                store.methods.iter().any(|m| m.name == method.name);
                             if !already_exists {
                                 let mut m = method.clone();
                                 m.kind = FunctionKind::Method;
@@ -405,12 +364,12 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     }
                 }
 
-                // Try to merge into a type definition
                 if !merged {
                     for type_def in type_defs.iter_mut() {
                         if type_def.name == *target {
                             for method in &ext.methods {
-                                let already_exists = type_def.methods.iter().any(|m| m.name == method.name);
+                                let already_exists =
+                                    type_def.methods.iter().any(|m| m.name == method.name);
                                 if !already_exists {
                                     let mut m = method.clone();
                                     m.kind = FunctionKind::Method;
@@ -423,16 +382,20 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     }
                 }
 
-                // For built-in types (String, List, Map, Int, Float, Bool),
-                // create a synthetic store entry so codegen registers the methods.
                 if !merged {
-                    let builtin_types = ["String", "List", "Map", "Int", "Float", "Bool", "Number", "Bytes"];
+                    let builtin_types = [
+                        "String", "List", "Map", "Int", "Float", "Bool", "Number", "Bytes",
+                    ];
                     if builtin_types.contains(&target.as_str()) {
-                        let methods: Vec<Function> = ext.methods.iter().map(|m| {
-                            let mut func = m.clone();
-                            func.kind = FunctionKind::Method;
-                            func
-                        }).collect();
+                        let methods: Vec<Function> = ext
+                            .methods
+                            .iter()
+                            .map(|m| {
+                                let mut func = m.clone();
+                                func.kind = FunctionKind::Method;
+                                func
+                            })
+                            .collect();
                         let synthetic = crate::ast::StoreDefinition {
                             name: target.clone(),
                             with_traits: vec![],
@@ -448,21 +411,23 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
                     }
                 }
 
-                // If target type not found, silently skip (warning deferred)
-                if !merged {
-                    // Store for later warning (after warnings vec is initialized)
-                    // For now, silently ignore — the type may be from a module
-                }
+                if !merged {}
             }
         }
     }
     let mut constraints = ConstraintSet::default();
     let mut graph = TypeGraph::default();
-    // T4.4: Collect branch type pairs for If/elif/else to check consistency post-solving
-    let mut branch_type_hints: Vec<(Vec<TypeId>, Span)> = Vec::new();
-    collect_program_constraints(&globals, &functions, &mut constraints, &mut types, &mut graph, &mut branch_type_hints);
 
-    // T2.4: Build trait registry from type/store definitions and trait definitions
+    let mut branch_type_hints: Vec<(Vec<TypeId>, Span)> = Vec::new();
+    collect_program_constraints(
+        &globals,
+        &functions,
+        &mut constraints,
+        &mut types,
+        &mut graph,
+        &mut branch_type_hints,
+    );
+
     let mut trait_registry = TraitRegistry::new();
     for td in &type_defs {
         for trait_name in &td.with_traits {
@@ -478,43 +443,66 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         trait_registry.register_super_traits(&trd.name, trd.required_traits.clone());
     }
 
-    if let Err(errors) = crate::types::solve_constraints(&constraints, &mut graph, &trait_registry) {
-        // T4.1 + T4.2: Emit one diagnostic per type error with provenance.
+    if let Err(errors) = crate::types::solve_constraints(&constraints, &mut graph, &trait_registry)
+    {
         let first = &errors[0];
         let mut msg = format!("type inference failed: {}", first.message);
-        // T4.2: Append provenance info if available
+
         if let Some(ref origin) = first.expected_origin {
-            msg.push_str(&format!("\n  {} inferred from: {}",
-                first.expected.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
-                origin.description));
+            msg.push_str(&format!(
+                "\n  {} inferred from: {}",
+                first
+                    .expected
+                    .as_ref()
+                    .map(|t| crate::types::format_type(t))
+                    .unwrap_or_default(),
+                origin.description
+            ));
         }
         if let Some(ref origin) = first.found_origin {
-            msg.push_str(&format!("\n  {} required by: {}",
-                first.found.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
-                origin.description));
+            msg.push_str(&format!(
+                "\n  {} required by: {}",
+                first
+                    .found
+                    .as_ref()
+                    .map(|t| crate::types::format_type(t))
+                    .unwrap_or_default(),
+                origin.description
+            ));
         }
         let mut primary = Diagnostic::new(msg, first.span);
-        // Attach remaining errors as related diagnostics
+
         for error in errors.iter().skip(1) {
             let mut related_msg = error.message.clone();
             if let Some(ref origin) = error.expected_origin {
-                related_msg.push_str(&format!("\n  {} inferred from: {}",
-                    error.expected.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
-                    origin.description));
+                related_msg.push_str(&format!(
+                    "\n  {} inferred from: {}",
+                    error
+                        .expected
+                        .as_ref()
+                        .map(|t| crate::types::format_type(t))
+                        .unwrap_or_default(),
+                    origin.description
+                ));
             }
             if let Some(ref origin) = error.found_origin {
-                related_msg.push_str(&format!("\n  {} required by: {}",
-                    error.found.as_ref().map(|t| crate::types::format_type(t)).unwrap_or_default(),
-                    origin.description));
+                related_msg.push_str(&format!(
+                    "\n  {} required by: {}",
+                    error
+                        .found
+                        .as_ref()
+                        .map(|t| crate::types::format_type(t))
+                        .unwrap_or_default(),
+                    origin.description
+                ));
             }
-            primary.related.push(Diagnostic::new(
-                related_msg,
-                error.span,
-            ));
+            primary
+                .related
+                .push(Diagnostic::new(related_msg, error.span));
         }
         return Err(primary);
     }
-    // Resolve types after solving for easier diagnostics downstream.
+
     let mut resolved = TypeEnv::default();
     for (name, ty) in types.iter_all() {
         let mut g = graph.clone();
@@ -524,11 +512,8 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
 
     let (usage, mutability, allocation) = infer_mutability_and_usage(&globals, &functions);
 
-    // Collect warnings for unhandled error values
     let mut warnings = Vec::new();
 
-    // T1.1/T1.5: Warn on remaining Unknown types after solving.
-    // Skip internal names (prefixed with $, $$, or containing ::) and builtins.
     for (name, ty) in resolved.iter_all() {
         if ty.contains_unknown()
             && !name.starts_with('$')
@@ -536,69 +521,67 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
             && !is_builtin_name(&name)
         {
             warnings.push(Diagnostic::categorized_warning(
-                format!("type of `{}` could not be fully inferred (contains Unknown)", name),
+                format!(
+                    "type of `{}` could not be fully inferred (contains Unknown)",
+                    name
+                ),
                 Span::new(0, 0),
                 WarningCategory::General,
             ));
         }
     }
 
-    // Check match exhaustiveness after type definitions are collected (TS-9: warnings, not errors)
     check_all_match_exhaustiveness(&globals, &functions, &type_defs, &mut warnings);
     check_unhandled_errors(&globals, &functions, &mut warnings);
-    // T3.4: Error type exhaustiveness — warn when error types may not be fully handled
+
     check_error_type_exhaustiveness(&functions, &mut warnings);
-    // T3.5: Dead code detection — warn on statements after return/break/continue
+
     check_dead_code(&functions, &mut warnings);
-    // T3.2: Definite assignment analysis — warn on variables that may be uninitialized
+
     check_definite_assignment(&functions, &mut warnings);
-    // T4.4: Check branch type consistency for if/elif/else
+
     check_branch_type_consistency(&branch_type_hints, &mut graph, &mut warnings);
 
-    // CC5.2/S6: Check member access validity on known store/type fields
     check_member_access_validity(&globals, &functions, &store_field_names, &mut warnings);
 
-    // T3.3: Nullability tracking — warn on functions that may return none on some paths
     check_nullability_returns(&functions, &mut warnings);
 
-    // Inject default trait method bodies into types/stores that don't override them
     inject_trait_default_methods(&mut type_defs, &mut stores, &trait_defs);
 
-    // Validate trait implementations
     validate_trait_implementations(&type_defs, &stores, &trait_defs, &mut warnings)?;
 
-    // R2.7: Validate typed actor_send calls — warn when handler name doesn't match known handlers
-    validate_typed_actor_sends(&functions, &globals, &actor_handler_names, &actor_message_types, &mut warnings);
+    validate_typed_actor_sends(
+        &functions,
+        &globals,
+        &actor_handler_names,
+        &actor_message_types,
+        &mut warnings,
+    );
 
-    // T2.5: Collect monomorphization table — walk all resolved types and collect
-    // concrete instantiations of generic types (ADTs with non-empty type args).
     let mut monomorphizations: HashMap<String, Vec<Vec<TypeId>>> = HashMap::new();
     for (_name, ty) in resolved.iter_all() {
         collect_monomorphizations(&ty, &mut monomorphizations);
     }
 
-    // C2.4: Identify bindings with List[Number] type for unboxed list specialization.
     let mut unboxed_number_lists = HashSet::new();
     for (name, ty) in resolved.iter_all() {
         if let TypeId::List(elem) = &ty {
-            if matches!(elem.as_ref(), TypeId::Primitive(crate::types::core::Primitive::Int) | TypeId::Primitive(crate::types::core::Primitive::Float)) {
+            if matches!(
+                elem.as_ref(),
+                TypeId::Primitive(crate::types::core::Primitive::Int)
+                    | TypeId::Primitive(crate::types::core::Primitive::Float)
+            ) {
                 unboxed_number_lists.insert(name.to_string());
             }
         }
     }
 
-    // C2.5: Build store field index maps and identify specialized stores.
-    // All stores with known fields are eligible for struct-layout unless they
-    // use dynamic features (not tracked yet — conservatively mark all as eligible).
     let mut store_field_indices = HashMap::new();
     let mut specialized_stores = HashSet::new();
     for (store_name, fields) in &store_field_names {
         specialized_stores.insert(store_name.clone());
         for (idx, field_name) in fields.iter().enumerate() {
-            store_field_indices.insert(
-                (store_name.clone(), field_name.clone()),
-                idx as u32,
-            );
+            store_field_indices.insert((store_name.clone(), field_name.clone()), idx as u32);
         }
     }
 
@@ -629,19 +612,14 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     })
 }
 
-/// T2.5: Recursively collect concrete type instantiations for monomorphization.
-/// Walks a type tree and records every ADT with non-empty, fully-concrete type args.
-fn collect_monomorphizations(
-    ty: &TypeId,
-    table: &mut HashMap<String, Vec<Vec<TypeId>>>,
-) {
+fn collect_monomorphizations(ty: &TypeId, table: &mut HashMap<String, Vec<Vec<TypeId>>>) {
     match ty {
         TypeId::Adt(name, args) if !args.is_empty() && args.iter().all(|a| a.is_concrete()) => {
             let entry = table.entry(name.clone()).or_default();
             if !entry.iter().any(|existing| existing == args) {
                 entry.push(args.clone());
             }
-            // Also recurse into type args (they may contain nested generics)
+
             for arg in args {
                 collect_monomorphizations(arg, table);
             }
@@ -666,26 +644,19 @@ fn collect_monomorphizations(
     }
 }
 
-/// Inject default trait method bodies into types/stores that don't override them.
-/// This ensures codegen can compile trait default methods as regular methods
-/// on the type/store, without needing any trait-specific codegen logic.
 fn inject_trait_default_methods(
     type_defs: &mut [crate::ast::TypeDefinition],
     stores: &mut [crate::ast::StoreDefinition],
     trait_defs: &[TraitDefinition],
 ) {
-    let trait_map: HashMap<&str, &TraitDefinition> = trait_defs
-        .iter()
-        .map(|t| (t.name.as_str(), t))
-        .collect();
+    let trait_map: HashMap<&str, &TraitDefinition> =
+        trait_defs.iter().map(|t| (t.name.as_str(), t)).collect();
 
-    // Inject into type definitions
     for type_def in type_defs.iter_mut() {
         for trait_name in &type_def.with_traits {
             if let Some(trait_def) = trait_map.get(trait_name.as_str()) {
                 for method in &trait_def.methods {
                     if let Some(ref body) = method.body {
-                        // Only inject if the type doesn't already have this method
                         let already_has = type_def.methods.iter().any(|m| m.name == method.name);
                         if !already_has {
                             type_def.methods.push(crate::ast::Function {
@@ -702,7 +673,6 @@ fn inject_trait_default_methods(
         }
     }
 
-    // Inject into store definitions
     for store in stores.iter_mut() {
         for trait_name in &store.with_traits {
             if let Some(trait_def) = trait_map.get(trait_name.as_str()) {
@@ -725,33 +695,23 @@ fn inject_trait_default_methods(
     }
 }
 
-/// Validate trait implementations for types and stores
-/// - Check that all declared traits exist
-/// - Check that trait dependencies are satisfied  
-/// - Check that required methods are implemented
 fn validate_trait_implementations(
     type_defs: &[crate::ast::TypeDefinition],
     stores: &[crate::ast::StoreDefinition],
     trait_defs: &[TraitDefinition],
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<(), Diagnostic> {
-    // Build a map of trait name -> trait definition
-    let trait_map: HashMap<&str, &TraitDefinition> = trait_defs
-        .iter()
-        .map(|t| (t.name.as_str(), t))
-        .collect();
-    
-    // Validate type implementations
+    let trait_map: HashMap<&str, &TraitDefinition> =
+        trait_defs.iter().map(|t| (t.name.as_str(), t)).collect();
+
     for type_def in type_defs {
         validate_type_traits(type_def, &trait_map, warnings)?;
     }
-    
-    // Validate store implementations
+
     for store in stores {
         validate_store_traits(store, &trait_map, warnings)?;
     }
-    
-    // Validate trait dependencies (within trait definitions themselves)
+
     for trait_def in trait_defs {
         for required in &trait_def.required_traits {
             if !trait_map.contains_key(required.as_str()) {
@@ -765,18 +725,16 @@ fn validate_trait_implementations(
             }
         }
     }
-    
+
     Ok(())
 }
 
-/// Validate trait implementations for a type definition
 fn validate_type_traits(
     type_def: &crate::ast::TypeDefinition,
     trait_map: &HashMap<&str, &TraitDefinition>,
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<(), Diagnostic> {
     for trait_name in &type_def.with_traits {
-        // Check trait exists
         let Some(trait_def) = trait_map.get(trait_name.as_str()) else {
             return Err(Diagnostic::new(
                 format!(
@@ -786,8 +744,7 @@ fn validate_type_traits(
                 type_def.span,
             ));
         };
-        
-        // Check trait dependencies are satisfied
+
         for required in &trait_def.required_traits {
             if !type_def.with_traits.contains(required) {
                 return Err(Diagnostic::new(
@@ -799,16 +756,11 @@ fn validate_type_traits(
                 ));
             }
         }
-        
-        // Check required methods are implemented
-        let type_method_names: HashSet<&str> = type_def
-            .methods
-            .iter()
-            .map(|m| m.name.as_str())
-            .collect();
-        
+
+        let type_method_names: HashSet<&str> =
+            type_def.methods.iter().map(|m| m.name.as_str()).collect();
+
         for method in &trait_def.methods {
-            // Methods without a body are required
             if method.body.is_none() && !type_method_names.contains(method.name.as_str()) {
                 return Err(Diagnostic::new(
                     format!(
@@ -818,8 +770,7 @@ fn validate_type_traits(
                     type_def.span,
                 ));
             }
-            
-            // Warn if a method shadows a default implementation
+
             if method.body.is_some() && type_method_names.contains(method.name.as_str()) {
                 warnings.push(Diagnostic::new(
                     format!(
@@ -831,20 +782,18 @@ fn validate_type_traits(
             }
         }
     }
-    
+
     Ok(())
 }
 
-/// Validate trait implementations for a store definition
 fn validate_store_traits(
     store: &crate::ast::StoreDefinition,
     trait_map: &HashMap<&str, &TraitDefinition>,
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<(), Diagnostic> {
     let kind = if store.is_actor { "actor" } else { "store" };
-    
+
     for trait_name in &store.with_traits {
-        // Check trait exists
         let Some(trait_def) = trait_map.get(trait_name.as_str()) else {
             return Err(Diagnostic::new(
                 format!(
@@ -854,8 +803,7 @@ fn validate_store_traits(
                 store.span,
             ));
         };
-        
-        // Check trait dependencies are satisfied
+
         for required in &trait_def.required_traits {
             if !store.with_traits.contains(required) {
                 return Err(Diagnostic::new(
@@ -867,16 +815,11 @@ fn validate_store_traits(
                 ));
             }
         }
-        
-        // Check required methods are implemented
-        let store_method_names: HashSet<&str> = store
-            .methods
-            .iter()
-            .map(|m| m.name.as_str())
-            .collect();
-        
+
+        let store_method_names: HashSet<&str> =
+            store.methods.iter().map(|m| m.name.as_str()).collect();
+
         for method in &trait_def.methods {
-            // Methods without a body are required
             if method.body.is_none() && !store_method_names.contains(method.name.as_str()) {
                 return Err(Diagnostic::new(
                     format!(
@@ -886,8 +829,7 @@ fn validate_store_traits(
                     store.span,
                 ));
             }
-            
-            // Warn if a method shadows a default implementation
+
             if method.body.is_some() && store_method_names.contains(method.name.as_str()) {
                 warnings.push(Diagnostic::new(
                     format!(
@@ -899,7 +841,7 @@ fn validate_store_traits(
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -938,47 +880,66 @@ fn collect_function_constraints(
         types.insert(param.name.clone(), ty.clone());
         params_tys.push(ty);
     }
-    // Create a return-type TypeVar. Each `return expr` in the body will constrain
-    // this to equal the expression's type, so the function's return type is correctly
-    // inferred even when the body ends with a `return` statement (which has no
-    // trailing block expression).
+
     let return_ty = TypeId::TypeVar(graph.fresh());
-    let body_ty = collect_block_constraints(&function.body, constraints, types, graph, Some(&return_ty), branch_type_hints);
-    // If the body has a trailing expression, use its type; otherwise use the
-    // return-type TypeVar (which was constrained by any `return` statements).
+    let body_ty = collect_block_constraints(
+        &function.body,
+        constraints,
+        types,
+        graph,
+        Some(&return_ty),
+        branch_type_hints,
+    );
+
     let fn_return = if function.body.value.is_some() {
         body_ty
     } else if has_return_statements(&function.body) {
         return_ty
     } else {
-        body_ty // Unit
+        body_ty
     };
     let fn_ty = TypeId::Func(params_tys, Box::new(fn_return));
     types.insert(function.name.clone(), fn_ty);
 }
 
-/// Check whether a block (or its nested blocks) contains any Return statements.
 fn has_return_statements(block: &Block) -> bool {
     for stmt in &block.statements {
         match stmt {
             crate::ast::Statement::Return(_, _) => return true,
-            crate::ast::Statement::If { body, elif_branches, else_body, .. } => {
-                if has_return_statements(body) { return true; }
+            crate::ast::Statement::If {
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
+                if has_return_statements(body) {
+                    return true;
+                }
                 for (_, blk) in elif_branches {
-                    if has_return_statements(blk) { return true; }
+                    if has_return_statements(blk) {
+                        return true;
+                    }
                 }
                 if let Some(eb) = else_body {
-                    if has_return_statements(eb) { return true; }
+                    if has_return_statements(eb) {
+                        return true;
+                    }
                 }
             }
             crate::ast::Statement::While { body, .. } => {
-                if has_return_statements(body) { return true; }
+                if has_return_statements(body) {
+                    return true;
+                }
             }
             crate::ast::Statement::For { body, .. } => {
-                if has_return_statements(body) { return true; }
+                if has_return_statements(body) {
+                    return true;
+                }
             }
             crate::ast::Statement::ForRange { body, .. } => {
-                if has_return_statements(body) { return true; }
+                if has_return_statements(body) {
+                    return true;
+                }
             }
             _ => {}
         }
@@ -1000,7 +961,11 @@ fn collect_block_constraints(
                 let rhs_ty = collect_constraints_expr(&binding.value, constraints, types, graph);
                 if let Some(ann) = &binding.type_annotation {
                     let ann_ty = type_from_annotation(ann);
-                    constraints.push(ConstraintKind::EqualAt(rhs_ty.clone(), ann_ty.clone(), binding.span));
+                    constraints.push(ConstraintKind::EqualAt(
+                        rhs_ty.clone(),
+                        ann_ty.clone(),
+                        binding.span,
+                    ));
                     types.insert(binding.name.clone(), ann_ty);
                 } else {
                     types.insert(binding.name.clone(), rhs_ty.clone());
@@ -1011,61 +976,151 @@ fn collect_block_constraints(
             }
             crate::ast::Statement::Return(expr, span) => {
                 let ret_expr_ty = collect_constraints_expr(expr, constraints, types, graph);
-                // Constrain the return expression type to match the function return type
+
                 if let Some(ret_ty) = return_ty {
                     constraints.push(ConstraintKind::EqualAt(ret_expr_ty, ret_ty.clone(), *span));
                 }
             }
-            crate::ast::Statement::If { condition, body, elif_branches, else_body, span } => {
+            crate::ast::Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                span,
+            } => {
                 let _ = collect_constraints_expr(condition, constraints, types, graph);
-                let body_ty = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
-                // T4.4: Collect branch types for consistency check
+                let body_ty = collect_block_constraints(
+                    body,
+                    constraints,
+                    types,
+                    graph,
+                    return_ty,
+                    branch_type_hints,
+                );
+
                 if else_body.is_some() {
                     let mut branch_tys = vec![body_ty];
                     for (cond, blk) in elif_branches {
                         let _ = collect_constraints_expr(cond, constraints, types, graph);
-                        let blk_ty = collect_block_constraints(blk, constraints, types, graph, return_ty, branch_type_hints);
+                        let blk_ty = collect_block_constraints(
+                            blk,
+                            constraints,
+                            types,
+                            graph,
+                            return_ty,
+                            branch_type_hints,
+                        );
                         branch_tys.push(blk_ty);
                     }
                     if let Some(else_blk) = else_body {
-                        let else_ty = collect_block_constraints(else_blk, constraints, types, graph, return_ty, branch_type_hints);
+                        let else_ty = collect_block_constraints(
+                            else_blk,
+                            constraints,
+                            types,
+                            graph,
+                            return_ty,
+                            branch_type_hints,
+                        );
                         branch_tys.push(else_ty);
                     }
                     branch_type_hints.push((branch_tys, *span));
                 } else {
                     for (cond, blk) in elif_branches {
                         let _ = collect_constraints_expr(cond, constraints, types, graph);
-                        let _ = collect_block_constraints(blk, constraints, types, graph, return_ty, branch_type_hints);
+                        let _ = collect_block_constraints(
+                            blk,
+                            constraints,
+                            types,
+                            graph,
+                            return_ty,
+                            branch_type_hints,
+                        );
                     }
                 }
             }
-            crate::ast::Statement::While { condition, body, .. } => {
+            crate::ast::Statement::While {
+                condition, body, ..
+            } => {
                 let _ = collect_constraints_expr(condition, constraints, types, graph);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
+                let _ = collect_block_constraints(
+                    body,
+                    constraints,
+                    types,
+                    graph,
+                    return_ty,
+                    branch_type_hints,
+                );
             }
-            crate::ast::Statement::For { variable, iterable, body, span } => {
+            crate::ast::Statement::For {
+                variable,
+                iterable,
+                body,
+                span,
+            } => {
                 let iterable_ty = collect_constraints_expr(iterable, constraints, types, graph);
                 let elem_ty = TypeId::TypeVar(graph.fresh());
-                constraints.push(ConstraintKind::IterableAt(iterable_ty, elem_ty.clone(), *span));
+                constraints.push(ConstraintKind::IterableAt(
+                    iterable_ty,
+                    elem_ty.clone(),
+                    *span,
+                ));
                 types.insert(variable.clone(), elem_ty);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
+                let _ = collect_block_constraints(
+                    body,
+                    constraints,
+                    types,
+                    graph,
+                    return_ty,
+                    branch_type_hints,
+                );
             }
-            crate::ast::Statement::ForKV { key_var, value_var, iterable, body, span } => {
+            crate::ast::Statement::ForKV {
+                key_var,
+                value_var,
+                iterable,
+                body,
+                span,
+            } => {
                 let iterable_ty = collect_constraints_expr(iterable, constraints, types, graph);
                 let elem_ty = TypeId::TypeVar(graph.fresh());
-                constraints.push(ConstraintKind::IterableAt(iterable_ty, elem_ty.clone(), *span));
+                constraints.push(ConstraintKind::IterableAt(
+                    iterable_ty,
+                    elem_ty.clone(),
+                    *span,
+                ));
                 types.insert(key_var.clone(), elem_ty.clone());
                 types.insert(value_var.clone(), elem_ty);
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
+                let _ = collect_block_constraints(
+                    body,
+                    constraints,
+                    types,
+                    graph,
+                    return_ty,
+                    branch_type_hints,
+                );
             }
-            crate::ast::Statement::ForRange { variable, start, end, step, body, .. } => {
+            crate::ast::Statement::ForRange {
+                variable,
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
                 let _ = collect_constraints_expr(start, constraints, types, graph);
                 let _ = collect_constraints_expr(end, constraints, types, graph);
                 if let Some(s) = step {
                     let _ = collect_constraints_expr(s, constraints, types, graph);
                 }
                 types.insert(variable.clone(), TypeId::Primitive(Primitive::Float));
-                let _ = collect_block_constraints(body, constraints, types, graph, return_ty, branch_type_hints);
+                let _ = collect_block_constraints(
+                    body,
+                    constraints,
+                    types,
+                    graph,
+                    return_ty,
+                    branch_type_hints,
+                );
             }
             crate::ast::Statement::Break(_) | crate::ast::Statement::Continue(_) => {}
             crate::ast::Statement::FieldAssign { target, value, .. } => {
@@ -1098,7 +1153,7 @@ fn collect_constraints_expr(
         Expression::String(_, _) => TypeId::Primitive(Primitive::String),
         Expression::Bytes(_, _) => TypeId::Primitive(Primitive::Bytes),
         Expression::Unit => TypeId::Primitive(Primitive::Unit),
-        Expression::None(_) => TypeId::Primitive(Primitive::None),  // none is absent (distinct from Unit)
+        Expression::None(_) => TypeId::Primitive(Primitive::None),
         Expression::InlineAsm { .. } => TypeId::Unknown,
         Expression::PtrLoad { .. } => TypeId::Unknown,
         Expression::Unsafe { .. } => TypeId::Unknown,
@@ -1107,37 +1162,36 @@ fn collect_constraints_expr(
             inner_ty
         }
         Expression::Identifier(name, span) => {
-            // T2.2: Let-polymorphism for generic constructors.
-            // Each use of a generic constructor (e.g., None, Some) gets fresh type vars.
-            if let Some((enum_name, type_params, field_count)) = types.get_generic_constructor(name).cloned() {
-                // Create fresh type variables for each type parameter
-                let fresh_args: Vec<TypeId> = type_params.iter()
+            if let Some((enum_name, type_params, field_count)) =
+                types.get_generic_constructor(name).cloned()
+            {
+                let fresh_args: Vec<TypeId> = type_params
+                    .iter()
                     .map(|_| TypeId::TypeVar(graph.fresh()))
                     .collect();
-                // T2.4: Emit HasTrait constraints for bounded type parameters
+
                 for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter()) {
                     if let Some(bounds) = types.get_type_param_bounds(&enum_name, param_name) {
                         for bound in bounds.clone() {
-                            constraints.push(ConstraintKind::HasTrait(fresh_ty.clone(), bound, *span));
+                            constraints.push(ConstraintKind::HasTrait(
+                                fresh_ty.clone(),
+                                bound,
+                                *span,
+                            ));
                         }
                     }
                 }
                 let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
                 if field_count == 0 {
-                    // Nullary constructor: return ADT directly
                     adt_ty
                 } else {
-                    // N-ary constructor: return Func(fresh_vars...) -> ADT[fresh_vars...]
                     let param_types: Vec<TypeId> = (0..field_count)
                         .map(|_| TypeId::TypeVar(graph.fresh()))
                         .collect();
                     TypeId::Func(param_types, Box::new(adt_ty))
                 }
             } else {
-                types
-                    .get(name)
-                    .cloned()
-                    .unwrap_or(TypeId::Unknown)
+                types.get(name).cloned().unwrap_or(TypeId::Unknown)
             }
         }
         Expression::Placeholder(id, _) => TypeId::Placeholder(*id),
@@ -1147,7 +1201,6 @@ fn collect_constraints_expr(
             for item in items {
                 let ty = collect_constraints_expr(item, constraints, types, graph);
                 if matches!(item, Expression::Spread(..)) {
-                    // S2.6: Spread element has list type — constrain it to [elem_ty]
                     constraints.push(ConstraintKind::EqualAt(
                         TypeId::List(Box::new(elem_ty.clone())),
                         ty,
@@ -1160,39 +1213,37 @@ fn collect_constraints_expr(
             TypeId::List(Box::new(elem_ty))
         }
         Expression::Map(entries, span) => {
-            // Maps in Coral are heterogeneous at runtime (all values are tagged Value*).
-            // We still enforce homogeneous keys for lookup semantics, but values can differ.
             let key_ty = TypeId::TypeVar(graph.fresh());
             for (k, v) in entries {
                 let kt = collect_constraints_expr(k, constraints, types, graph);
-                // Collect constraints from value expressions but don't unify them
                 let _vt = collect_constraints_expr(v, constraints, types, graph);
                 constraints.push(ConstraintKind::EqualAt(key_ty.clone(), kt, *span));
             }
-            // Value type is Any since maps are heterogeneous
-            TypeId::Map(Box::new(key_ty), Box::new(TypeId::Primitive(Primitive::Any)))
+
+            TypeId::Map(
+                Box::new(key_ty),
+                Box::new(TypeId::Primitive(Primitive::Any)),
+            )
         }
-        Expression::Binary { op, left, right, span } => {
+        Expression::Binary {
+            op,
+            left,
+            right,
+            span,
+        } => {
             let l = collect_constraints_expr(left, constraints, types, graph);
             let r = collect_constraints_expr(right, constraints, types, graph);
             match op {
-                crate::ast::BinaryOp::Add => {
-                    // Add is polymorphic:
-                    // - String + anything = String (concatenation with auto-conversion)
-                    // - Numeric + Numeric = Numeric (arithmetic)
-                    // We check this at runtime via value_add, so don't constrain equal types.
-                    // The result type depends on operands - if either is String, result is String.
-                    match (&l, &r) {
-                        (TypeId::Primitive(Primitive::String), _) | (_, TypeId::Primitive(Primitive::String)) => {
-                            TypeId::Primitive(Primitive::String)
-                        }
-                        _ => {
-                            // For non-string cases, require same types
-                            constraints.push(ConstraintKind::EqualAt(l.clone(), r.clone(), *span));
-                            l
-                        }
+                crate::ast::BinaryOp::Add => match (&l, &r) {
+                    (TypeId::Primitive(Primitive::String), _)
+                    | (_, TypeId::Primitive(Primitive::String)) => {
+                        TypeId::Primitive(Primitive::String)
                     }
-                }
+                    _ => {
+                        constraints.push(ConstraintKind::EqualAt(l.clone(), r.clone(), *span));
+                        l
+                    }
+                },
                 crate::ast::BinaryOp::Sub
                 | crate::ast::BinaryOp::Mul
                 | crate::ast::BinaryOp::Div
@@ -1212,8 +1263,7 @@ fn collect_constraints_expr(
                     constraints.push(ConstraintKind::BooleanAt(r.clone(), *span));
                     TypeId::Primitive(Primitive::Bool)
                 }
-                crate::ast::BinaryOp::Equals
-                | crate::ast::BinaryOp::NotEquals => {
+                crate::ast::BinaryOp::Equals | crate::ast::BinaryOp::NotEquals => {
                     constraints.push(ConstraintKind::EqualAt(l.clone(), r.clone(), *span));
                     TypeId::Primitive(Primitive::Bool)
                 }
@@ -1244,46 +1294,48 @@ fn collect_constraints_expr(
                 }
             }
         }
-        Expression::Call { callee, args, span, .. } => {
-            // Special-case: if callee is a Member expression with a known method name,
-            // bypass the CallableAt constraint (which would fail because e.g. "length" 
-            // returns Int, not a callable type). Instead, directly return the method's
-            // result type. This fixes `log(s.length())` and similar nested method calls.
-            // S4.4: Return precise types for chainable methods to enable method chaining.
-            if let Expression::Member { target, property, .. } = callee.as_ref() {
+        Expression::Call {
+            callee, args, span, ..
+        } => {
+            if let Expression::Member {
+                target, property, ..
+            } = callee.as_ref()
+            {
                 let target_ty = collect_constraints_expr(target, constraints, types, graph);
-                // Collect arg constraints regardless
+
                 for arg in args {
                     collect_constraints_expr(arg, constraints, types, graph);
                 }
                 match property.as_str() {
-                    // Int-returning methods
-                    "length" | "count" | "size" | "index_of" => return TypeId::Primitive(Primitive::Int),
-                    // Bool-returning methods
+                    "length" | "count" | "size" | "index_of" => {
+                        return TypeId::Primitive(Primitive::Int);
+                    }
+
                     "err" | "equals" | "not_equals" | "contains" | "any" | "all"
-                    | "starts_with" | "ends_with" | "is_empty" => return TypeId::Primitive(Primitive::Bool),
-                    // String-returning methods (chainable on strings)
-                    "trim" | "lower" | "upper" | "strip" | "lstrip" | "rstrip"
-                    | "replace" | "pad_left" | "pad_right" | "reverse" | "repeat"
-                    | "to_string" | "join" | "slice" | "substr" | "char_at"
-                    | "concat" => return TypeId::Primitive(Primitive::String),
-                    // List-returning methods (chainable on lists)
-                    "split" | "map" | "filter" | "sort" | "keys" | "values"
-                    | "find_all" | "chars" | "lines" | "bytes" => {
+                    | "starts_with" | "ends_with" | "is_empty" => {
+                        return TypeId::Primitive(Primitive::Bool);
+                    }
+
+                    "trim" | "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "replace"
+                    | "pad_left" | "pad_right" | "reverse" | "repeat" | "to_string" | "join"
+                    | "slice" | "substr" | "char_at" | "concat" => {
+                        return TypeId::Primitive(Primitive::String);
+                    }
+
+                    "split" | "map" | "filter" | "sort" | "keys" | "values" | "find_all"
+                    | "chars" | "lines" | "bytes" => {
                         return TypeId::List(Box::new(TypeId::Unknown));
                     }
-                    // Methods that return same type as target (preserve chain type)
+
                     "push" | "pop" | "append" | "remove" | "insert" | "clear" => {
                         return target_ty;
                     }
-                    // Unknown-returning (unresolvable without more context)
-                    "get" | "set" | "at" | "reduce" | "find" | "not" | "iter"
-                    | "or" | "unwrap_or" | "first" | "last" => {
+
+                    "get" | "set" | "at" | "reduce" | "find" | "not" | "iter" | "or"
+                    | "unwrap_or" | "first" | "last" => {
                         return TypeId::Unknown;
                     }
-                    _ => {
-                        // Not a known built-in method — fall through to normal Call handling
-                    }
+                    _ => {}
                 }
             }
             let callee_ty = collect_constraints_expr(callee, constraints, types, graph);
@@ -1292,87 +1344,100 @@ fn collect_constraints_expr(
                 arg_tys.push(collect_constraints_expr(arg, constraints, types, graph));
             }
             let result_ty = TypeId::TypeVar(graph.fresh());
-            constraints.push(ConstraintKind::CallableAt(callee_ty.clone(), arg_tys.clone(), result_ty.clone(), *span));
+            constraints.push(ConstraintKind::CallableAt(
+                callee_ty.clone(),
+                arg_tys.clone(),
+                result_ty.clone(),
+                *span,
+            ));
             result_ty
         }
-        Expression::Index { target, index, span: _ } => {
+        Expression::Index {
+            target,
+            index,
+            span: _,
+        } => {
             let target_ty = collect_constraints_expr(target, constraints, types, graph);
             let _index_ty = collect_constraints_expr(index, constraints, types, graph);
-            // Index returns element type for lists, value type for maps
+
             match &target_ty {
                 TypeId::List(elem) => *elem.clone(),
                 TypeId::Map(_, val) => *val.clone(),
                 _ => TypeId::Unknown,
             }
         }
-        Expression::Slice { target, start, end, .. } => {
+        Expression::Slice {
+            target, start, end, ..
+        } => {
             let target_ty = collect_constraints_expr(target, constraints, types, graph);
             let _start_ty = collect_constraints_expr(start, constraints, types, graph);
             let _end_ty = collect_constraints_expr(end, constraints, types, graph);
-            // Slice returns the same collection type
+
             target_ty
         }
-        Expression::Member { target, property, span } => {
+        Expression::Member {
+            target,
+            property,
+            span,
+        } => {
             let target_ty = collect_constraints_expr(target, constraints, types, graph);
             match property.as_str() {
-                // Properties that return Int on any collection
                 "length" | "count" | "size" => TypeId::Primitive(Primitive::Int),
-                
-                // .err property returns Bool - checks if value is an error
+
                 "err" => TypeId::Primitive(Primitive::Bool),
-                
-                // Methods on collections - these are callable, not field accesses.
-                // Return a function type that will be checked by Callable constraint
-                // when used in a Call expression. For bare method access (unusual),
-                // just return Unknown to avoid false unification.
-                // S4.4: Include all known method names to prevent false map-constraint fallthrough.
-                "push" | "pop" | "get" | "set" | "append" | "remove" | "insert" 
-                | "contains" | "keys" | "values" | "clear" | "join"
-                | "map" | "filter" | "reduce" | "find" | "any" | "all" | "sort"
-                | "equals" | "not_equals" | "not" | "iter"
-                | "split" | "trim" | "lower" | "upper" | "strip" | "lstrip" | "rstrip"
-                | "replace" | "pad_left" | "pad_right" | "reverse" | "repeat"
-                | "starts_with" | "ends_with" | "index_of" | "is_empty"
-                | "to_string" | "concat" | "chars" | "lines" | "bytes"
-                | "slice" | "substr" | "char_at" | "find_all"
-                | "or" | "unwrap_or" | "first" | "last" | "at" => {
-                    // Don't constrain target type - let the Call expression handle it
-                    TypeId::Unknown
-                }
-                
-                _ => {
-                    // For Any/Unknown targets (e.g. store instances, unresolved types),
-                    // don't constrain - the method/field access will be resolved at codegen time.
-                    // Also for TypeVars that might resolve to Any.
-                    // For other targets, treat as map lookup with string key.
-                    match &target_ty {
-                        TypeId::Primitive(Primitive::Any) | TypeId::Unknown | TypeId::TypeVar(_) => TypeId::Unknown,
-                        _ => {
-                            let val_ty = TypeId::TypeVar(graph.fresh());
-                            let map_ty = TypeId::Map(Box::new(TypeId::Primitive(Primitive::String)), Box::new(val_ty.clone()));
-                            constraints.push(ConstraintKind::EqualAt(target_ty, map_ty, *span));
-                            val_ty
-                        }
+
+                "push" | "pop" | "get" | "set" | "append" | "remove" | "insert" | "contains"
+                | "keys" | "values" | "clear" | "join" | "map" | "filter" | "reduce" | "find"
+                | "any" | "all" | "sort" | "equals" | "not_equals" | "not" | "iter" | "split"
+                | "trim" | "lower" | "upper" | "strip" | "lstrip" | "rstrip" | "replace"
+                | "pad_left" | "pad_right" | "reverse" | "repeat" | "starts_with" | "ends_with"
+                | "index_of" | "is_empty" | "to_string" | "concat" | "chars" | "lines"
+                | "bytes" | "slice" | "substr" | "char_at" | "find_all" | "or" | "unwrap_or"
+                | "first" | "last" | "at" => TypeId::Unknown,
+
+                _ => match &target_ty {
+                    TypeId::Primitive(Primitive::Any) | TypeId::Unknown | TypeId::TypeVar(_) => {
+                        TypeId::Unknown
                     }
-                }
+                    _ => {
+                        let val_ty = TypeId::TypeVar(graph.fresh());
+                        let map_ty = TypeId::Map(
+                            Box::new(TypeId::Primitive(Primitive::String)),
+                            Box::new(val_ty.clone()),
+                        );
+                        constraints.push(ConstraintKind::EqualAt(target_ty, map_ty, *span));
+                        val_ty
+                    }
+                },
             }
         }
-        Expression::Ternary { condition, then_branch, else_branch, span } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => {
             let cond_ty = collect_constraints_expr(condition, constraints, types, graph);
             let then_ty = collect_constraints_expr(then_branch, constraints, types, graph);
             let else_ty = collect_constraints_expr(else_branch, constraints, types, graph);
             constraints.push(ConstraintKind::BooleanAt(cond_ty, *span));
-            constraints.push(ConstraintKind::EqualAt(then_ty.clone(), else_ty.clone(), *span));
+            constraints.push(ConstraintKind::EqualAt(
+                then_ty.clone(),
+                else_ty.clone(),
+                *span,
+            ));
             then_ty
         }
         Expression::Match(match_expr) => {
             let match_span = match_expr.span;
-            let scrutinee_ty = collect_constraints_expr(&match_expr.value, constraints, types, graph);
+            let scrutinee_ty =
+                collect_constraints_expr(&match_expr.value, constraints, types, graph);
             let mut arm_tys = Vec::new();
             for arm in &match_expr.arms {
                 match &arm.pattern {
                     crate::ast::MatchPattern::Integer(_) => {
-                        constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                        constraints
+                            .push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
                     }
                     crate::ast::MatchPattern::Bool(_) => {
                         constraints.push(ConstraintKind::EqualAt(
@@ -1382,7 +1447,11 @@ fn collect_constraints_expr(
                         ));
                     }
                     crate::ast::MatchPattern::String(_) => {
-                        constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), TypeId::Primitive(Primitive::String), match_span));
+                        constraints.push(ConstraintKind::EqualAt(
+                            scrutinee_ty.clone(),
+                            TypeId::Primitive(Primitive::String),
+                            match_span,
+                        ));
                     }
                     crate::ast::MatchPattern::List(patterns) => {
                         let elem_ty = if patterns.is_empty() {
@@ -1395,7 +1464,7 @@ fn collect_constraints_expr(
                             TypeId::List(Box::new(elem_ty.clone())),
                             match_span,
                         ));
-                        // S3.4: Recurse into list sub-patterns for bindings
+
                         for pat in patterns {
                             collect_pattern_bindings(pat, &elem_ty, types);
                         }
@@ -1403,19 +1472,30 @@ fn collect_constraints_expr(
                     crate::ast::MatchPattern::Identifier(name) => {
                         types.insert(name.clone(), scrutinee_ty.clone());
                     }
-                    crate::ast::MatchPattern::Constructor { name, fields, span: _ } => {
-                        // T2.2: Let-polymorphism for generic constructors in match patterns.
-                        // If the constructor belongs to a generic enum, instantiate fresh type vars
-                        // and unify the fields with those vars.
-                        if let Some((enum_name, type_params, _field_count)) = types.get_generic_constructor(name).cloned() {
-                            let fresh_args: Vec<TypeId> = type_params.iter()
+                    crate::ast::MatchPattern::Constructor {
+                        name,
+                        fields,
+                        span: _,
+                    } => {
+                        if let Some((enum_name, type_params, _field_count)) =
+                            types.get_generic_constructor(name).cloned()
+                        {
+                            let fresh_args: Vec<TypeId> = type_params
+                                .iter()
                                 .map(|_| TypeId::TypeVar(graph.fresh()))
                                 .collect();
-                            // T2.4: Emit HasTrait constraints for bounded type parameters
-                            for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter()) {
-                                if let Some(bounds) = types.get_type_param_bounds(&enum_name, param_name) {
+
+                            for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter())
+                            {
+                                if let Some(bounds) =
+                                    types.get_type_param_bounds(&enum_name, param_name)
+                                {
                                     for bound in bounds.clone() {
-                                        constraints.push(ConstraintKind::HasTrait(fresh_ty.clone(), bound, match_span));
+                                        constraints.push(ConstraintKind::HasTrait(
+                                            fresh_ty.clone(),
+                                            bound,
+                                            match_span,
+                                        ));
                                     }
                                 }
                             }
@@ -1425,24 +1505,23 @@ fn collect_constraints_expr(
                                 adt_ty,
                                 match_span,
                             ));
-                            // Bind pattern fields to fresh type vars
+
                             for pat in fields {
                                 let field_ty = TypeId::TypeVar(graph.fresh());
                                 collect_pattern_bindings(pat, &field_ty, types);
                             }
                         } else {
-                            // Non-generic constructor: original behavior
-                            // T3.1: Extract constructor parameter types for field narrowing.
-                            let ctor_param_types: Option<Vec<TypeId>> = types.get(name).and_then(|ctor_ty| {
-                                match ctor_ty {
+                            let ctor_param_types: Option<Vec<TypeId>> =
+                                types.get(name).and_then(|ctor_ty| match ctor_ty {
                                     TypeId::Func(param_types, _) => Some(param_types.clone()),
                                     _ => None,
-                                }
-                            });
+                                });
 
                             if let Some(ctor_ty) = types.get(name) {
                                 let adt_ty = match ctor_ty {
-                                    TypeId::Adt(adt_name, args) => TypeId::Adt(adt_name.clone(), args.clone()),
+                                    TypeId::Adt(adt_name, args) => {
+                                        TypeId::Adt(adt_name.clone(), args.clone())
+                                    }
                                     TypeId::Func(_, ret) => (**ret).clone(),
                                     _ => TypeId::Primitive(Primitive::Any),
                                 };
@@ -1452,44 +1531,50 @@ fn collect_constraints_expr(
                                     match_span,
                                 ));
                             }
-                            // T3.1: Bind field variables to constructor parameter types
-                            // (narrowed types) instead of Any when the constructor signature is known.
+
                             if let Some(ref param_types) = ctor_param_types {
                                 for (i, pat) in fields.iter().enumerate() {
-                                    let field_ty = param_types.get(i)
+                                    let field_ty = param_types
+                                        .get(i)
                                         .cloned()
                                         .unwrap_or(TypeId::Primitive(Primitive::Any));
                                     collect_pattern_bindings(pat, &field_ty, types);
                                 }
                             } else {
                                 for pat in fields {
-                                    collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                    collect_pattern_bindings(
+                                        pat,
+                                        &TypeId::Primitive(Primitive::Any),
+                                        types,
+                                    );
                                 }
                             }
                         }
                     }
-                    crate::ast::MatchPattern::Wildcard(_) => {
-                        // Wildcard matches anything, no type constraints
-                    }
+                    crate::ast::MatchPattern::Wildcard(_) => {}
                     crate::ast::MatchPattern::Range { .. } => {
-                        // S3.5: Range pattern constrains scrutinee to numeric
-                        constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                        constraints
+                            .push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
                     }
                     crate::ast::MatchPattern::RangeBinding { name, .. } => {
-                        // S3.5: Range binding — numeric constraint + bind name
-                        constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                        constraints
+                            .push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
                         types.insert(name.clone(), scrutinee_ty.clone());
                     }
                     crate::ast::MatchPattern::Rest(name, _) => {
-                        // S3.4: Rest pattern binds remaining list elements
-                        types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
+                        types.insert(
+                            name.clone(),
+                            TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))),
+                        );
                     }
                     crate::ast::MatchPattern::Or(alternatives) => {
-                        // Or-pattern: collect constraints from each alternative
                         for alt in alternatives {
                             match alt {
                                 crate::ast::MatchPattern::Integer(_) => {
-                                    constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                                    constraints.push(ConstraintKind::NumericAt(
+                                        scrutinee_ty.clone(),
+                                        match_span,
+                                    ));
                                 }
                                 crate::ast::MatchPattern::Bool(_) => {
                                     constraints.push(ConstraintKind::EqualAt(
@@ -1499,53 +1584,84 @@ fn collect_constraints_expr(
                                     ));
                                 }
                                 crate::ast::MatchPattern::String(_) => {
-                                    constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), TypeId::Primitive(Primitive::String), match_span));
+                                    constraints.push(ConstraintKind::EqualAt(
+                                        scrutinee_ty.clone(),
+                                        TypeId::Primitive(Primitive::String),
+                                        match_span,
+                                    ));
                                 }
                                 crate::ast::MatchPattern::Identifier(name) => {
                                     types.insert(name.clone(), scrutinee_ty.clone());
                                 }
                                 crate::ast::MatchPattern::Constructor { name, fields, .. } => {
-                                    if let Some((enum_name, type_params, _field_count)) = types.get_generic_constructor(name).cloned() {
-                                        let fresh_args: Vec<TypeId> = type_params.iter()
+                                    if let Some((enum_name, type_params, _field_count)) =
+                                        types.get_generic_constructor(name).cloned()
+                                    {
+                                        let fresh_args: Vec<TypeId> = type_params
+                                            .iter()
                                             .map(|_| TypeId::TypeVar(graph.fresh()))
                                             .collect();
-                                        // T2.4: Emit HasTrait constraints for bounded type parameters
-                                        for (param_name, fresh_ty) in type_params.iter().zip(fresh_args.iter()) {
-                                            if let Some(bounds) = types.get_type_param_bounds(&enum_name, param_name) {
+
+                                        for (param_name, fresh_ty) in
+                                            type_params.iter().zip(fresh_args.iter())
+                                        {
+                                            if let Some(bounds) =
+                                                types.get_type_param_bounds(&enum_name, param_name)
+                                            {
                                                 for bound in bounds.clone() {
-                                                    constraints.push(ConstraintKind::HasTrait(fresh_ty.clone(), bound, match_span));
+                                                    constraints.push(ConstraintKind::HasTrait(
+                                                        fresh_ty.clone(),
+                                                        bound,
+                                                        match_span,
+                                                    ));
                                                 }
                                             }
                                         }
-                                        let adt_ty = TypeId::Adt(enum_name.clone(), fresh_args.clone());
-                                        constraints.push(ConstraintKind::EqualAt(scrutinee_ty.clone(), adt_ty, match_span));
+                                        let adt_ty =
+                                            TypeId::Adt(enum_name.clone(), fresh_args.clone());
+                                        constraints.push(ConstraintKind::EqualAt(
+                                            scrutinee_ty.clone(),
+                                            adt_ty,
+                                            match_span,
+                                        ));
                                     }
-                                    // T3.1: Narrow or-pattern constructor fields too
-                                    let ctor_param_types: Option<Vec<TypeId>> = types.get(name).and_then(|ctor_ty| {
-                                        match ctor_ty {
-                                            TypeId::Func(param_types, _) => Some(param_types.clone()),
+
+                                    let ctor_param_types: Option<Vec<TypeId>> =
+                                        types.get(name).and_then(|ctor_ty| match ctor_ty {
+                                            TypeId::Func(param_types, _) => {
+                                                Some(param_types.clone())
+                                            }
                                             _ => None,
-                                        }
-                                    });
+                                        });
                                     if let Some(ref param_types) = ctor_param_types {
                                         for (i, pat) in fields.iter().enumerate() {
-                                            let field_ty = param_types.get(i)
+                                            let field_ty = param_types
+                                                .get(i)
                                                 .cloned()
                                                 .unwrap_or(TypeId::Primitive(Primitive::Any));
                                             collect_pattern_bindings(pat, &field_ty, types);
                                         }
                                     } else {
                                         for pat in fields {
-                                            collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
+                                            collect_pattern_bindings(
+                                                pat,
+                                                &TypeId::Primitive(Primitive::Any),
+                                                types,
+                                            );
                                         }
                                     }
                                 }
                                 crate::ast::MatchPattern::Range { .. } => {
-                                    // S3.5: Range in or-pattern constrains scrutinee to numeric
-                                    constraints.push(ConstraintKind::NumericAt(scrutinee_ty.clone(), match_span));
+                                    constraints.push(ConstraintKind::NumericAt(
+                                        scrutinee_ty.clone(),
+                                        match_span,
+                                    ));
                                 }
                                 crate::ast::MatchPattern::Rest(name, _) => {
-                                    types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
+                                    types.insert(
+                                        name.clone(),
+                                        TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))),
+                                    );
                                 }
                                 crate::ast::MatchPattern::List(patterns) => {
                                     let elem_ty = TypeId::Primitive(Primitive::Any);
@@ -1563,15 +1679,29 @@ fn collect_constraints_expr(
                         }
                     }
                 }
-                // S3.2: Collect constraints from guard expression
+
                 if let Some(guard) = &arm.guard {
                     collect_constraints_expr(guard, constraints, types, graph);
                 }
-                let arm_ty = collect_block_constraints(&arm.body, constraints, types, graph, None, &mut Vec::new());
+                let arm_ty = collect_block_constraints(
+                    &arm.body,
+                    constraints,
+                    types,
+                    graph,
+                    None,
+                    &mut Vec::new(),
+                );
                 arm_tys.push(arm_ty);
             }
             if let Some(default) = &match_expr.default {
-                arm_tys.push(collect_block_constraints(default, constraints, types, graph, None, &mut Vec::new()));
+                arm_tys.push(collect_block_constraints(
+                    default,
+                    constraints,
+                    types,
+                    graph,
+                    None,
+                    &mut Vec::new(),
+                ));
             }
             arm_tys
                 .into_iter()
@@ -1581,7 +1711,9 @@ fn collect_constraints_expr(
                 })
                 .unwrap_or(TypeId::Primitive(Primitive::Unit))
         }
-        Expression::Throw { value, .. } => collect_constraints_expr(value, constraints, types, graph),
+        Expression::Throw { value, .. } => {
+            collect_constraints_expr(value, constraints, types, graph)
+        }
         Expression::Lambda { params, body, .. } => {
             let mut param_tys = Vec::new();
             let mut shadow = types.clone();
@@ -1595,64 +1727,69 @@ fn collect_constraints_expr(
             }
             let mut nested_graph = graph.clone();
             let mut nested_constraints = ConstraintSet::default();
-            let body_ty = collect_block_constraints(body, &mut nested_constraints, &mut shadow, &mut nested_graph, None, &mut Vec::new());
-            constraints.constraints.extend(nested_constraints.constraints);
+            let body_ty = collect_block_constraints(
+                body,
+                &mut nested_constraints,
+                &mut shadow,
+                &mut nested_graph,
+                None,
+                &mut Vec::new(),
+            );
+            constraints
+                .constraints
+                .extend(nested_constraints.constraints);
             TypeId::Func(param_tys, Box::new(body_ty))
         }
-        Expression::Pipeline { left, right, span } => {
-            // Pipeline `a ~ f(args)` desugars to `f(a, args)`
-            // Handle the right side based on its form:
-            match right.as_ref() {
-                Expression::Call { callee, args, span: call_span, .. } => {
-                    // a ~ f(args) desugars to f(a, args)
-                    // Build a desugared call with left prepended to args
-                    let mut full_args = vec![*left.clone()];
-                    full_args.extend(args.clone());
-                    let desugared = Expression::Call {
-                        callee: callee.clone(),
-                        args: full_args,
-                        arg_names: vec![],
-                        span: *call_span,
-                    };
-                    collect_constraints_expr(&desugared, constraints, types, graph)
-                }
-                Expression::Identifier(_name, _id_span) => {
-                    // a ~ f desugars to f(a)
-                    let desugared = Expression::Call {
-                        callee: right.clone(),
-                        args: vec![*left.clone()],
-                        arg_names: vec![],
-                        span: *span,
-                    };
-                    collect_constraints_expr(&desugared, constraints, types, graph)
-                }
-                _ => {
-                    // CC5.2/S8: For any other expression on the right, treat as callable
-                    // with left as argument — emit proper callable constraint
-                    let left_ty = collect_constraints_expr(left, constraints, types, graph);
-                    let right_ty = collect_constraints_expr(right, constraints, types, graph);
-                    let result_ty = TypeId::TypeVar(graph.fresh());
-                    constraints.push(ConstraintKind::CallableAt(
-                        right_ty,
-                        vec![left_ty],
-                        result_ty.clone(),
-                        *span,
-                    ));
-                    result_ty
-                }
+        Expression::Pipeline { left, right, span } => match right.as_ref() {
+            Expression::Call {
+                callee,
+                args,
+                span: call_span,
+                ..
+            } => {
+                let mut full_args = vec![*left.clone()];
+                full_args.extend(args.clone());
+                let desugared = Expression::Call {
+                    callee: callee.clone(),
+                    args: full_args,
+                    arg_names: vec![],
+                    span: *call_span,
+                };
+                collect_constraints_expr(&desugared, constraints, types, graph)
             }
-        }
-        Expression::ErrorValue { path, .. } => {
-            // T3.4: Error values carry their taxonomy type.
-            // `err Foo:Bar:Baz` → Error(["Foo", "Bar", "Baz"])
-            TypeId::Error(path.clone())
-        }
+            Expression::Identifier(_name, _id_span) => {
+                let desugared = Expression::Call {
+                    callee: right.clone(),
+                    args: vec![*left.clone()],
+                    arg_names: vec![],
+                    span: *span,
+                };
+                collect_constraints_expr(&desugared, constraints, types, graph)
+            }
+            _ => {
+                let left_ty = collect_constraints_expr(left, constraints, types, graph);
+                let right_ty = collect_constraints_expr(right, constraints, types, graph);
+                let result_ty = TypeId::TypeVar(graph.fresh());
+                constraints.push(ConstraintKind::CallableAt(
+                    right_ty,
+                    vec![left_ty],
+                    result_ty.clone(),
+                    *span,
+                ));
+                result_ty
+            }
+        },
+        Expression::ErrorValue { path, .. } => TypeId::Error(path.clone()),
         Expression::ErrorPropagate { expr, .. } => {
-            // The type of error propagation is the type of the inner expression
-            // (when it's not an error). The propagation itself may return early.
             collect_constraints_expr(expr, constraints, types, graph)
         }
-        Expression::ListComprehension { body, var, iterable, condition, span } => {
+        Expression::ListComprehension {
+            body,
+            var,
+            iterable,
+            condition,
+            span,
+        } => {
             let iter_ty = collect_constraints_expr(iterable, constraints, types, graph);
             let elem_ty = TypeId::TypeVar(graph.fresh());
             constraints.push(ConstraintKind::EqualAt(
@@ -1660,14 +1797,23 @@ fn collect_constraints_expr(
                 iter_ty,
                 *span,
             ));
+            types.push_scope();
             types.insert(var.clone(), elem_ty);
             if let Some(cond) = condition {
                 collect_constraints_expr(cond, constraints, types, graph);
             }
             let body_ty = collect_constraints_expr(body, constraints, types, graph);
+            types.pop_scope();
             TypeId::List(Box::new(body_ty))
         }
-        Expression::MapComprehension { key, value, var, iterable, condition, span } => {
+        Expression::MapComprehension {
+            key,
+            value,
+            var,
+            iterable,
+            condition,
+            span,
+        } => {
             let iter_ty = collect_constraints_expr(iterable, constraints, types, graph);
             let elem_ty = TypeId::TypeVar(graph.fresh());
             constraints.push(ConstraintKind::EqualAt(
@@ -1675,47 +1821,50 @@ fn collect_constraints_expr(
                 iter_ty,
                 *span,
             ));
+            types.push_scope();
             types.insert(var.clone(), elem_ty);
             if let Some(cond) = condition {
                 collect_constraints_expr(cond, constraints, types, graph);
             }
             let key_ty = collect_constraints_expr(key, constraints, types, graph);
             let _val_ty = collect_constraints_expr(value, constraints, types, graph);
-            TypeId::Map(Box::new(key_ty), Box::new(TypeId::Primitive(Primitive::Any)))
+            types.pop_scope();
+            TypeId::Map(
+                Box::new(key_ty),
+                Box::new(TypeId::Primitive(Primitive::Any)),
+            )
         }
-    }    
+    }
 }
 
-/// Recursively collect identifier bindings from a pattern.
 fn collect_pattern_bindings(pattern: &crate::ast::MatchPattern, ty: &TypeId, types: &mut TypeEnv) {
     match pattern {
         crate::ast::MatchPattern::Identifier(name) => {
             types.insert(name.clone(), ty.clone());
         }
         crate::ast::MatchPattern::Constructor { fields, .. } => {
-            // Constructor fields are dynamically typed at runtime (Any)
             for pat in fields {
                 collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
             }
         }
-        // Literal patterns don't introduce bindings
+
         crate::ast::MatchPattern::Or(alternatives) => {
             for alt in alternatives {
                 collect_pattern_bindings(alt, ty, types);
             }
         }
         crate::ast::MatchPattern::List(patterns) => {
-            // S3.4: Recurse into list sub-patterns
             for pat in patterns {
                 collect_pattern_bindings(pat, &TypeId::Primitive(Primitive::Any), types);
             }
         }
         crate::ast::MatchPattern::Rest(name, _) => {
-            // S3.4: Rest captures remaining elements as a list
-            types.insert(name.clone(), TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))));
+            types.insert(
+                name.clone(),
+                TypeId::List(Box::new(TypeId::Primitive(Primitive::Any))),
+            );
         }
         crate::ast::MatchPattern::RangeBinding { name, .. } => {
-            // S3.5: Range binding introduces a numeric binding
             types.insert(name.clone(), ty.clone());
         }
         crate::ast::MatchPattern::Integer(_)
@@ -1730,7 +1879,7 @@ fn type_from_annotation(ann: &crate::ast::TypeAnnotation) -> TypeId {
     if ann.segments.is_empty() {
         return TypeId::Unknown;
     }
-    
+
     let base_type = match ann.segments[0].as_str() {
         "Int" => TypeId::Primitive(Primitive::Int),
         "Float" => TypeId::Primitive(Primitive::Float),
@@ -1740,48 +1889,45 @@ fn type_from_annotation(ann: &crate::ast::TypeAnnotation) -> TypeId {
         "Unit" => TypeId::Primitive(Primitive::Unit),
         "Any" => TypeId::Primitive(Primitive::Any),
         "Actor" => TypeId::Primitive(Primitive::Actor),
-        // Low-level types used in extern declarations - treat as Any.
-        // TODO: Add proper low-level type support.
-        "usize" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64"
-        | "i8" | "i16" | "i32" | "i64" | "isize" => TypeId::Primitive(Primitive::Any),
-        // Handle generic types
+
+        "usize" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64"
+        | "isize" => TypeId::Primitive(Primitive::Any),
+
         "List" => {
             if ann.type_args.len() == 1 {
                 let elem_type = type_from_annotation(&ann.type_args[0]);
                 TypeId::List(Box::new(elem_type))
             } else {
-                // List with wrong number of type arguments - default to List[Any]
                 TypeId::List(Box::new(TypeId::Primitive(Primitive::Any)))
             }
-        },
+        }
         "Map" => {
             if ann.type_args.len() == 2 {
                 let key_type = type_from_annotation(&ann.type_args[0]);
                 let value_type = type_from_annotation(&ann.type_args[1]);
                 TypeId::Map(Box::new(key_type), Box::new(value_type))
             } else {
-                // Map with wrong number of type arguments - default to Map[Any, Any]
                 TypeId::Map(
-                    Box::new(TypeId::Primitive(Primitive::Any)), 
-                    Box::new(TypeId::Primitive(Primitive::Any))
+                    Box::new(TypeId::Primitive(Primitive::Any)),
+                    Box::new(TypeId::Primitive(Primitive::Any)),
                 )
             }
-        },
-        // Unknown type annotations are permissive.
-        // T2.3: Handle user-defined generic types like Option[Int], Result[T, E], etc.
+        }
+
         name => {
             if !ann.type_args.is_empty() {
-                let type_args: Vec<TypeId> = ann.type_args.iter()
+                let type_args: Vec<TypeId> = ann
+                    .type_args
+                    .iter()
                     .map(|a| type_from_annotation(a))
                     .collect();
                 TypeId::Adt(name.to_string(), type_args)
             } else {
-                // Could be a non-generic ADT or truly unknown
                 TypeId::Adt(name.to_string(), vec![])
             }
-        },
+        }
     };
-    
+
     base_type
 }
 
@@ -1789,43 +1935,57 @@ fn check_function(function: &Function, known_names: &HashSet<String>) -> Result<
     check_method_with_fields(function, &[], known_names)
 }
 
-/// Like check_function, but also declares type/store fields in scope so method
-/// bodies can reference them as bare identifiers (e.g. `name` instead of `self.name`).
-fn check_method_with_fields(function: &Function, fields: &[crate::ast::Field], known_names: &HashSet<String>) -> Result<(), Diagnostic> {
+fn check_method_with_fields(
+    function: &Function,
+    fields: &[crate::ast::Field],
+    known_names: &HashSet<String>,
+) -> Result<(), Diagnostic> {
     validate_parameter_defaults(&function.params)?;
     let mut scopes = ScopeStack::new();
     scopes.push();
-    // Declare 'self' in scope for methods
+
     if !fields.is_empty() {
         scopes.declare("self".to_string(), function.span);
     }
-    // Declare fields so method bodies can reference them
+
     for field in fields {
         scopes.declare(field.name.clone(), field.span);
     }
     for param in &function.params {
         if let Some(previous) = scopes.lookup(&param.name) {
-            return Err(duplicate_symbol("parameter", &param.name, param.span, previous));
+            return Err(duplicate_symbol(
+                "parameter",
+                &param.name,
+                param.span,
+                previous,
+            ));
         }
         scopes.declare(param.name.clone(), param.span);
     }
     check_block(&function.body, &mut scopes, known_names)
 }
 
-fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<String>) -> Result<(), Diagnostic> {
+fn check_block(
+    block: &Block,
+    scopes: &mut ScopeStack,
+    known_names: &HashSet<String>,
+) -> Result<(), Diagnostic> {
     scopes.push();
     for statement in &block.statements {
         match statement {
             Statement::Binding(binding) => {
-                // Allow rebinding — `is` creates a new binding that shadows any previous one.
-                // This enables patterns like `x is x + 1` in loops and `x is 10` then `x is 20`.
-                // The alloca-based codegen properly handles rebinding at the LLVM level.
                 scopes.declare(binding.name.clone(), binding.span);
                 check_expression(&binding.value, scopes, known_names)?;
             }
             Statement::Expression(expr) => check_expression(expr, scopes, known_names)?,
             Statement::Return(expr, _) => check_expression(expr, scopes, known_names)?,
-            Statement::If { condition, body, elif_branches, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 check_expression(condition, scopes, known_names)?;
                 check_block(body, scopes, known_names)?;
                 for (elif_cond, elif_body) in elif_branches {
@@ -1836,18 +1996,31 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
                     check_block(else_body, scopes, known_names)?;
                 }
             }
-            Statement::While { condition, body, .. } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 check_expression(condition, scopes, known_names)?;
                 check_block(body, scopes, known_names)?;
             }
-            Statement::For { variable, iterable, body, span } => {
+            Statement::For {
+                variable,
+                iterable,
+                body,
+                span,
+            } => {
                 check_expression(iterable, scopes, known_names)?;
                 scopes.push();
                 scopes.declare(variable.clone(), *span);
                 check_block(body, scopes, known_names)?;
                 scopes.pop();
             }
-            Statement::ForKV { key_var, value_var, iterable, body, span } => {
+            Statement::ForKV {
+                key_var,
+                value_var,
+                iterable,
+                body,
+                span,
+            } => {
                 check_expression(iterable, scopes, known_names)?;
                 scopes.push();
                 scopes.declare(key_var.clone(), *span);
@@ -1855,7 +2028,14 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
                 check_block(body, scopes, known_names)?;
                 scopes.pop();
             }
-            Statement::ForRange { variable, start, end, step, body, span } => {
+            Statement::ForRange {
+                variable,
+                start,
+                end,
+                step,
+                body,
+                span,
+            } => {
                 check_expression(start, scopes, known_names)?;
                 check_expression(end, scopes, known_names)?;
                 if let Some(s) = step {
@@ -1871,7 +2051,11 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
                 check_expression(target, scopes, known_names)?;
                 check_expression(value, scopes, known_names)?;
             }
-            Statement::PatternBinding { pattern, value, span } => {
+            Statement::PatternBinding {
+                pattern,
+                value,
+                span,
+            } => {
                 check_expression(value, scopes, known_names)?;
                 declare_pattern_scope_names(pattern, scopes, *span);
             }
@@ -1884,8 +2068,11 @@ fn check_block(block: &Block, scopes: &mut ScopeStack, known_names: &HashSet<Str
     Ok(())
 }
 
-/// Declare variable names introduced by a destructuring pattern into the scope stack.
-fn declare_pattern_scope_names(pattern: &crate::ast::MatchPattern, scopes: &mut ScopeStack, span: Span) {
+fn declare_pattern_scope_names(
+    pattern: &crate::ast::MatchPattern,
+    scopes: &mut ScopeStack,
+    span: Span,
+) {
     match pattern {
         crate::ast::MatchPattern::Identifier(name) => {
             scopes.declare(name.clone(), span);
@@ -1919,7 +2106,11 @@ fn declare_pattern_scope_names(pattern: &crate::ast::MatchPattern, scopes: &mut 
     }
 }
 
-fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions: &HashSet<String>) -> Result<(), Diagnostic> {
+fn check_expression(
+    expr: &Expression,
+    scopes: &mut ScopeStack,
+    known_functions: &HashSet<String>,
+) -> Result<(), Diagnostic> {
     match expr {
         Expression::Binary { left, right, .. } => {
             check_expression(left, scopes, known_functions)?;
@@ -1949,7 +2140,9 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
             check_expression(target, scopes, known_functions)?;
             check_expression(index, scopes, known_functions)?;
         }
-        Expression::Slice { target, start, end, .. } => {
+        Expression::Slice {
+            target, start, end, ..
+        } => {
             check_expression(target, scopes, known_functions)?;
             check_expression(start, scopes, known_functions)?;
             check_expression(end, scopes, known_functions)?;
@@ -1968,29 +2161,32 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
             check_expression(left, scopes, known_functions)?;
             check_expression(right, scopes, known_functions)?;
         }
-        Expression::ErrorValue { .. } => {
-            // Error values are always valid - the error path is checked at definition time
-        }
+        Expression::ErrorValue { .. } => {}
         Expression::ErrorPropagate { expr, .. } => {
-            // Check the inner expression
             check_expression(expr, scopes, known_functions)?;
         }
-        Expression::Match(match_expr) => check_match_expression(match_expr, scopes, known_functions)?,
+        Expression::Match(match_expr) => {
+            check_match_expression(match_expr, scopes, known_functions)?
+        }
         Expression::Throw { value, .. } => check_expression(value, scopes, known_functions)?,
-        Expression::Lambda { params, body, .. } => check_lambda(params, body, scopes, known_functions)?,
+        Expression::Lambda { params, body, .. } => {
+            check_lambda(params, body, scopes, known_functions)?
+        }
         Expression::Identifier(name, span) => {
-            // Check if identifier is defined in scope, known functions, or is a builtin
             if scopes.lookup(name).is_none()
                 && !known_functions.contains(name)
                 && !is_builtin_name(name)
             {
-                return Err(Diagnostic::new(
-                    format!("undefined name `{}`", name),
-                    *span,
-                ));
+                return Err(Diagnostic::new(format!("undefined name `{}`", name), *span));
             }
         }
-        Expression::ListComprehension { body, var, iterable, condition, .. } => {
+        Expression::ListComprehension {
+            body,
+            var,
+            iterable,
+            condition,
+            ..
+        } => {
             check_expression(iterable, scopes, known_functions)?;
             scopes.push();
             scopes.declare(var.clone(), iterable.span());
@@ -2000,7 +2196,14 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
             }
             scopes.pop();
         }
-        Expression::MapComprehension { key, value, var, iterable, condition, .. } => {
+        Expression::MapComprehension {
+            key,
+            value,
+            var,
+            iterable,
+            condition,
+            ..
+        } => {
             check_expression(iterable, scopes, known_functions)?;
             scopes.push();
             scopes.declare(var.clone(), iterable.span());
@@ -2027,127 +2230,85 @@ fn check_expression(expr: &Expression, scopes: &mut ScopeStack, known_functions:
     Ok(())
 }
 
-/// Check if a name is a builtin (log, io namespace, runtime functions, etc.)
+/// All built-in names recognized by the Coral runtime.
+const BUILTIN_NAMES: &[&str] = &[
+    "log", "io", "self", "true", "false",
+    "bit_and", "bit_or", "bit_xor", "bit_not", "bit_shl", "bit_shr",
+    "length", "push", "pop", "get", "set", "keys", "values",
+    "abs", "sqrt", "floor", "ceil", "round",
+    "sin", "cos", "tan", "ln", "log10", "exp",
+    "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+    "trunc", "sign", "signum", "deg_to_rad", "rad_to_deg",
+    "min", "max", "pow",
+    "is_number", "is_string", "is_bool", "is_list", "is_map",
+    "concat", "split", "join", "trim", "to_string",
+    "string_slice", "slice", "string_char_at", "char_at",
+    "string_index_of", "index_of", "string_split", "string_to_chars", "chars",
+    "string_starts_with", "starts_with", "string_ends_with", "ends_with",
+    "string_trim", "string_to_upper", "to_upper", "string_to_lower", "to_lower",
+    "string_replace", "replace", "string_contains", "contains",
+    "string_parse_number", "parse_number", "number_to_string", "string_length",
+    "bytes_length", "bytes_get", "bytes_set", "bytes_from_string", "to_bytes",
+    "bytes_to_string", "bytes_slice",
+    "fs_read", "fs_write", "fs_exists", "fs_append",
+    "fs_read_dir", "read_dir", "fs_mkdir", "mkdir",
+    "fs_delete", "delete", "fs_is_dir", "is_dir",
+    "process_args", "args", "process_exit", "exit",
+    "env_get", "env_set", "stdin_read_line", "read_line",
+    "list_contains", "list_index_of", "list_reverse", "list_slice",
+    "list_sort", "list_join", "list_concat",
+    "map_remove", "map_values", "map_keys", "map_entries", "entries",
+    "map_has_key", "has_key", "map_merge", "merge",
+    "type_of", "is_err", "is_ok", "is_absent",
+    "error_name", "error_code",
+    "ord", "string_ord", "chr", "string_chr", "string_compare", "strcmp",
+    "actor_spawn", "actor_send", "actor_stop", "actor_self",
+    "actor_monitor", "monitor", "actor_demonitor", "demonitor",
+    "actor_graceful_stop", "graceful_stop",
+    "json_parse", "json_serialize", "json_stringify", "json_serialize_pretty",
+    "time_now", "time_timestamp", "time_format_iso",
+    "time_year", "time_month", "time_day",
+    "time_hour", "time_minute", "time_second", "time_sleep",
+    "random", "random_int", "random_seed",
+    "string_lines", "sort_natural", "list_sort_natural",
+    "bytes_from_hex", "bytes_contains", "bytes_find",
+    "base64_encode", "base64_decode", "hex_encode", "hex_decode",
+    "tcp_listen", "tcp_accept", "tcp_connect", "tcp_read", "tcp_write", "tcp_close",
+    "http_get", "http_post", "http_request",
+    "value_retain", "value_release", "heap_alloc", "heap_free",
+    "range",
+    "sb_new", "sb_push", "sb_finish", "sb_len",
+    "string_join_list", "join_list", "string_repeat", "repeat_string",
+    "string_reverse", "reverse_string", "value_to_string",
+    "stderr_write", "eprint",
+    "fs_size", "file_size", "fs_rename", "fs_copy",
+    "fs_mkdirs", "make_dirs", "fs_temp_dir", "temp_dir",
+    "process_exec", "exec", "process_cwd", "cwd",
+    "process_chdir", "chdir", "process_pid",
+    "process_hostname", "hostname",
+    "path_normalize", "normalize", "path_resolve", "resolve",
+    "path_is_absolute", "is_absolute", "path_parent", "path_stem", "stem",
+    "regex_match", "regex_find", "regex_find_all", "regex_replace", "regex_split",
+    "inspect", "debug_inspect", "time_ns", "debug_time_ns",
+];
+
 fn is_builtin_name(name: &str) -> bool {
-    matches!(name, 
-        // Core builtins
-        "log" | "io" | "self" | "true" | "false" |
-        // Bit operations (intrinsics)
-        "bit_and" | "bit_or" | "bit_xor" | "bit_not" | "bit_shl" | "bit_shr" |
-        // Standard functions mapped to runtime
-        "length" | "push" | "pop" | "get" | "set" | "keys" | "values" |
-        // Math operations
-        "abs" | "sqrt" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan" |
-        "ln" | "log10" | "exp" | "asin" | "acos" | "atan" | "atan2" |
-        "sinh" | "cosh" | "tanh" | "trunc" | "sign" | "signum" |
-        "deg_to_rad" | "rad_to_deg" | "min" | "max" | "pow" |
-        // Type checks
-        "is_number" | "is_string" | "is_bool" | "is_list" | "is_map" |
-        // String operations  
-        "concat" | "split" | "join" | "trim" | "to_string" |
-        "string_slice" | "slice" | "string_char_at" | "char_at" |
-        "string_index_of" | "index_of" | "string_split" |
-        "string_to_chars" | "chars" | "string_starts_with" | "starts_with" |
-        "string_ends_with" | "ends_with" | "string_trim" |
-        "string_to_upper" | "to_upper" | "string_to_lower" | "to_lower" |
-        "string_replace" | "replace" | "string_contains" | "contains" |
-        "string_parse_number" | "parse_number" | "number_to_string" |
-        "string_length" |
-        // Bytes operations
-        "bytes_length" | "bytes_get" | "bytes_set" |
-        "bytes_from_string" | "to_bytes" | "bytes_to_string" | "bytes_slice" |
-        // File I/O operations (runtime FFI)
-        "fs_read" | "fs_write" | "fs_exists" |
-        "fs_append" | "fs_read_dir" | "read_dir" |
-        "fs_mkdir" | "mkdir" | "fs_delete" | "delete" | "fs_is_dir" | "is_dir" |
-        // Process and environment
-        "process_args" | "args" | "process_exit" | "exit" |
-        "env_get" | "env_set" |
-        // I/O
-        "stdin_read_line" | "read_line" |
-        // List operations
-        "list_contains" | "list_index_of" | "list_reverse" | "list_slice" |
-        "list_sort" | "list_join" | "list_concat" |
-        // Map operations
-        "map_remove" | "map_values" | "map_keys" | "map_entries" | "entries" |
-        "map_has_key" | "has_key" | "map_merge" | "merge" |
-        // Type introspection
-        "type_of" |
-        // Error handling builtins
-        "is_err" | "is_ok" | "is_absent" | "error_name" | "error_code" |
-        // Character operations
-        "ord" | "string_ord" | "chr" | "string_chr" | "string_compare" | "strcmp" |
-        // Actor operations (runtime FFI)
-        "actor_spawn" | "actor_send" | "actor_stop" | "actor_self" |
-        "actor_monitor" | "monitor" | "actor_demonitor" | "demonitor" |
-        "actor_graceful_stop" | "graceful_stop" |
-        // JSON operations
-        "json_parse" | "json_serialize" | "json_stringify" | "json_serialize_pretty" |
-        // Time operations
-        "time_now" | "time_timestamp" | "time_format_iso" |
-        "time_year" | "time_month" | "time_day" |
-        "time_hour" | "time_minute" | "time_second" |
-        // Sleep (L2.3)
-        "time_sleep" |
-        // Random operations (L2.1)
-        "random" | "random_int" | "random_seed" |
-        // String extended
-        "string_lines" |
-        // Sort operations
-        "sort_natural" | "list_sort_natural" |
-        // Bytes extended
-        "bytes_from_hex" | "bytes_contains" | "bytes_find" |
-        // Encoding operations
-        "base64_encode" | "base64_decode" |
-        "hex_encode" | "hex_decode" |
-        // TCP networking
-        "tcp_listen" | "tcp_accept" | "tcp_connect" |
-        "tcp_read" | "tcp_write" | "tcp_close" |
-        // HTTP client (L3.1)
-        "http_get" | "http_post" | "http_request" |
-        // Memory operations (runtime FFI)
-        "value_retain" | "value_release" | "heap_alloc" | "heap_free" |
-        // Range helper
-        "range" |
-        // StringBuilder / optimized string ops (L1.1)
-        "sb_new" | "sb_push" | "sb_finish" | "sb_len" |
-        "string_join_list" | "join_list" |
-        "string_repeat" | "repeat_string" |
-        "string_reverse" | "reverse_string" |
-        "value_to_string" |
-        // L2.4: std.io enhancements
-        "stderr_write" | "eprint" |
-        "fs_size" | "file_size" |
-        "fs_rename" | "fs_copy" |
-        "fs_mkdirs" | "make_dirs" |
-        "fs_temp_dir" | "temp_dir" |
-        // L2.5: std.process enhancements
-        "process_exec" | "exec" |
-        "process_cwd" | "cwd" |
-        "process_chdir" | "chdir" |
-        "process_pid" |
-        "process_hostname" | "hostname" |
-        // L4.2: std.path operations
-        "path_normalize" | "normalize" |
-        "path_resolve" | "resolve" |
-        "path_is_absolute" | "is_absolute" |
-        "path_parent" |
-        "path_stem" | "stem" |
-        // Regex operations (L2.2)
-        "regex_match" | "regex_find" | "regex_find_all" |
-        "regex_replace" | "regex_split" |
-        // Debug introspection (L4.1)
-        "inspect" | "debug_inspect" | "time_ns" | "debug_time_ns"
-    )
+    use std::sync::OnceLock;
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    let set = SET.get_or_init(|| BUILTIN_NAMES.iter().copied().collect());
+    set.contains(name)
 }
 
-fn check_match_expression(expr: &MatchExpression, scopes: &mut ScopeStack, known_names: &HashSet<String>) -> Result<(), Diagnostic> {
+fn check_match_expression(
+    expr: &MatchExpression,
+    scopes: &mut ScopeStack,
+    known_names: &HashSet<String>,
+) -> Result<(), Diagnostic> {
     check_expression(&expr.value, scopes, known_names)?;
     for arm in &expr.arms {
-        // Match arms can introduce bindings via patterns
         scopes.push();
         declare_pattern_bindings(&arm.pattern, scopes, arm.body.span);
-        // S3.2: Check guard expression in the arm's scope (pattern vars available)
+
         if let Some(guard) = &arm.guard {
             check_expression(guard, scopes, known_names)?;
         }
@@ -2160,26 +2321,27 @@ fn check_match_expression(expr: &MatchExpression, scopes: &mut ScopeStack, known
     Ok(())
 }
 
-/// Declare bindings from a pattern into the scope
-fn declare_pattern_bindings(pattern: &crate::ast::MatchPattern, scopes: &mut ScopeStack, span: crate::span::Span) {
+fn declare_pattern_bindings(
+    pattern: &crate::ast::MatchPattern,
+    scopes: &mut ScopeStack,
+    span: crate::span::Span,
+) {
     match pattern {
         crate::ast::MatchPattern::Identifier(name) => {
             scopes.declare(name.clone(), span);
         }
         crate::ast::MatchPattern::Constructor { fields, .. } => {
-            // Constructor patterns may have nested bindings in fields
             for field_pattern in fields {
                 declare_pattern_bindings(field_pattern, scopes, span);
             }
         }
-        // Other patterns don't introduce bindings
+
         crate::ast::MatchPattern::Or(alternatives) => {
             for alt in alternatives {
                 declare_pattern_bindings(alt, scopes, span);
             }
         }
         crate::ast::MatchPattern::List(patterns) => {
-            // S3.4: Recurse into list sub-patterns
             for field_pattern in patterns {
                 declare_pattern_bindings(field_pattern, scopes, span);
             }
@@ -2198,23 +2360,25 @@ fn declare_pattern_bindings(pattern: &crate::ast::MatchPattern, scopes: &mut Sco
     }
 }
 
-/// Build a mapping from constructor name to (enum_name, all_variant_names)
-fn build_constructor_map(type_defs: &[crate::ast::TypeDefinition]) -> HashMap<String, (String, Vec<String>)> {
+fn build_constructor_map(
+    type_defs: &[crate::ast::TypeDefinition],
+) -> HashMap<String, (String, Vec<String>)> {
     let mut map = HashMap::new();
     for typedef in type_defs {
         if !typedef.variants.is_empty() {
-            let variant_names: Vec<String> = typedef.variants.iter()
-                .map(|v| v.name.clone())
-                .collect();
+            let variant_names: Vec<String> =
+                typedef.variants.iter().map(|v| v.name.clone()).collect();
             for variant in &typedef.variants {
-                map.insert(variant.name.clone(), (typedef.name.clone(), variant_names.clone()));
+                map.insert(
+                    variant.name.clone(),
+                    (typedef.name.clone(), variant_names.clone()),
+                );
             }
         }
     }
     map
 }
 
-/// Check all match expressions in the program for exhaustiveness
 fn check_all_match_exhaustiveness(
     globals: &[Binding],
     functions: &[Function],
@@ -2222,18 +2386,22 @@ fn check_all_match_exhaustiveness(
     warnings: &mut Vec<Diagnostic>,
 ) {
     let ctor_map = build_constructor_map(type_defs);
-    // Also build a map from enum name → list of variant names (for nested checking)
-    let enum_variants: HashMap<String, Vec<String>> = type_defs.iter()
+
+    let enum_variants: HashMap<String, Vec<String>> = type_defs
+        .iter()
         .filter(|td| !td.variants.is_empty())
-        .map(|td| (td.name.clone(), td.variants.iter().map(|v| v.name.clone()).collect()))
+        .map(|td| {
+            (
+                td.name.clone(),
+                td.variants.iter().map(|v| v.name.clone()).collect(),
+            )
+        })
         .collect();
-    
-    // Check globals
+
     for binding in globals {
         check_expr_match_exhaustiveness(&binding.value, &ctor_map, &enum_variants, warnings);
     }
-    
-    // Check functions
+
     for function in functions {
         check_block_match_exhaustiveness(&function.body, &ctor_map, &enum_variants, warnings);
     }
@@ -2256,7 +2424,13 @@ fn check_block_match_exhaustiveness(
             Statement::Return(expr, _) => {
                 check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
             }
-            Statement::If { condition, body, elif_branches, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
                 check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
                 for (cond, blk) in elif_branches {
@@ -2267,7 +2441,9 @@ fn check_block_match_exhaustiveness(
                     check_block_match_exhaustiveness(else_blk, ctor_map, enum_variants, warnings);
                 }
             }
-            Statement::While { condition, body, .. } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
                 check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
             }
@@ -2279,7 +2455,13 @@ fn check_block_match_exhaustiveness(
                 check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
                 check_block_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
             }
-            Statement::ForRange { start, end, step, body, .. } => {
+            Statement::ForRange {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
                 check_expr_match_exhaustiveness(start, ctor_map, enum_variants, warnings);
                 check_expr_match_exhaustiveness(end, ctor_map, enum_variants, warnings);
                 if let Some(s) = step {
@@ -2342,18 +2524,24 @@ fn check_expr_match_exhaustiveness(
             check_expr_match_exhaustiveness(target, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(index, ctor_map, enum_variants, warnings);
         }
-        Expression::Slice { target, start, end, .. } => {
+        Expression::Slice {
+            target, start, end, ..
+        } => {
             check_expr_match_exhaustiveness(target, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(start, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(end, ctor_map, enum_variants, warnings);
         }
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             check_expr_match_exhaustiveness(condition, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(then_branch, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(else_branch, ctor_map, enum_variants, warnings);
         }
         Expression::Match(match_expr) => {
-            // Recursively check the matched value and arm bodies
             check_expr_match_exhaustiveness(&match_expr.value, ctor_map, enum_variants, warnings);
             for arm in &match_expr.arms {
                 check_block_match_exhaustiveness(&arm.body, ctor_map, enum_variants, warnings);
@@ -2361,9 +2549,9 @@ fn check_expr_match_exhaustiveness(
             if let Some(default) = &match_expr.default {
                 check_block_match_exhaustiveness(default, ctor_map, enum_variants, warnings);
             }
-            
-            // Now check exhaustiveness (emits warnings)
+
             check_single_match_exhaustiveness(match_expr, ctor_map, enum_variants, warnings);
+            check_overlapping_patterns(match_expr, warnings);
         }
         Expression::Throw { value, .. } => {
             check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
@@ -2375,20 +2563,29 @@ fn check_expr_match_exhaustiveness(
             check_expr_match_exhaustiveness(left, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(right, ctor_map, enum_variants, warnings);
         }
-        Expression::ErrorValue { .. } => {
-            // Error values don't contain sub-expressions
-        }
+        Expression::ErrorValue { .. } => {}
         Expression::ErrorPropagate { expr, .. } => {
             check_expr_match_exhaustiveness(expr, ctor_map, enum_variants, warnings);
         }
-        Expression::ListComprehension { body, iterable, condition, .. } => {
+        Expression::ListComprehension {
+            body,
+            iterable,
+            condition,
+            ..
+        } => {
             check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(body, ctor_map, enum_variants, warnings);
             if let Some(cond) = condition {
                 check_expr_match_exhaustiveness(cond, ctor_map, enum_variants, warnings);
             }
         }
-        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+        Expression::MapComprehension {
+            key,
+            value,
+            iterable,
+            condition,
+            ..
+        } => {
             check_expr_match_exhaustiveness(iterable, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(key, ctor_map, enum_variants, warnings);
             check_expr_match_exhaustiveness(value, ctor_map, enum_variants, warnings);
@@ -2396,7 +2593,7 @@ fn check_expr_match_exhaustiveness(
                 check_expr_match_exhaustiveness(cond, ctor_map, enum_variants, warnings);
             }
         }
-        // Other expressions don't contain sub-expressions or match
+
         Expression::Identifier(_, _)
         | Expression::String(_, _)
         | Expression::Bytes(_, _)
@@ -2413,8 +2610,6 @@ fn check_expr_match_exhaustiveness(
     }
 }
 
-/// Recursively collect constructor names, wildcards, and identifiers from a pattern
-/// for exhaustiveness checking.  Handles Or-patterns by recursing into alternatives.
 fn collect_pattern_ctors_for_exhaustiveness(
     pattern: &crate::ast::MatchPattern,
     matched_ctors: &mut HashSet<String>,
@@ -2433,160 +2628,209 @@ fn collect_pattern_ctors_for_exhaustiveness(
         }
         crate::ast::MatchPattern::Or(alternatives) => {
             for alt in alternatives {
-                collect_pattern_ctors_for_exhaustiveness(alt, matched_ctors, has_wildcard, has_identifier_catch_all);
+                collect_pattern_ctors_for_exhaustiveness(
+                    alt,
+                    matched_ctors,
+                    has_wildcard,
+                    has_identifier_catch_all,
+                );
             }
         }
-        // Literals don't help with enum exhaustiveness
+
         _ => {}
     }
 }
 
-/// Check a single match expression for exhaustiveness (TS-9: warnings + nested ADT checking)
+fn pattern_key(pattern: &crate::ast::MatchPattern) -> Option<String> {
+    match pattern {
+        crate::ast::MatchPattern::Integer(n) => Some(format!("int:{}", n)),
+        crate::ast::MatchPattern::Bool(b) => Some(format!("bool:{}", b)),
+        crate::ast::MatchPattern::String(s) => Some(format!("str:{}", s)),
+        crate::ast::MatchPattern::Constructor { name, fields, .. } if fields.is_empty() => {
+            Some(format!("ctor:{}", name))
+        }
+        _ => None,
+    }
+}
+
+fn check_overlapping_patterns(
+    match_expr: &MatchExpression,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for (i, arm) in match_expr.arms.iter().enumerate() {
+        let keys = collect_pattern_keys(&arm.pattern);
+        for key in keys {
+            if !seen.insert(key.clone()) {
+                // Found a duplicate pattern in a later arm
+                warnings.push(
+                    Diagnostic::warning(
+                        format!("unreachable pattern in match arm {}: pattern already matched by a previous arm", i + 1),
+                        match_expr.span,
+                    )
+                    .with_help("Remove the duplicate arm or use a guard to distinguish it."),
+                );
+                break; // One warning per arm is enough
+            }
+        }
+    }
+}
+
+fn collect_pattern_keys(pattern: &crate::ast::MatchPattern) -> Vec<String> {
+    match pattern {
+        crate::ast::MatchPattern::Or(alternatives) => {
+            alternatives.iter().filter_map(|p| pattern_key(p)).collect()
+        }
+        _ => pattern_key(pattern).into_iter().collect(),
+    }
+}
+
 fn check_single_match_exhaustiveness(
     match_expr: &MatchExpression,
     ctor_map: &HashMap<String, (String, Vec<String>)>,
     enum_variants: &HashMap<String, Vec<String>>,
     warnings: &mut Vec<Diagnostic>,
 ) {
-    // If there's a default block, the match is exhaustive
     if match_expr.default.is_some() {
         return;
     }
-    
-    // Collect all matched constructors and check for wildcards
+
     let mut matched_ctors: HashSet<String> = HashSet::new();
     let mut has_wildcard = false;
     let mut has_identifier_catch_all = false;
-    
+
     for arm in &match_expr.arms {
-        collect_pattern_ctors_for_exhaustiveness(&arm.pattern, &mut matched_ctors, &mut has_wildcard, &mut has_identifier_catch_all);
+        // Arms with guards are not guaranteed to match, skip for exhaustiveness
+        if arm.guard.is_some() {
+            continue;
+        }
+        collect_pattern_ctors_for_exhaustiveness(
+            &arm.pattern,
+            &mut matched_ctors,
+            &mut has_wildcard,
+            &mut has_identifier_catch_all,
+        );
     }
-    
-    // If there's a wildcard or identifier catch-all, match is exhaustive
+
     if has_wildcard || has_identifier_catch_all {
         return;
     }
-    
-    // If no constructor patterns, we can't determine exhaustiveness 
-    // (matching on literals or unknown types)
+
     if matched_ctors.is_empty() {
         return;
     }
-    
-    // Find the enum these constructors belong to
-    // All constructors should belong to the same enum for a well-typed match
-    // Safe: we checked !matched_ctors.is_empty() above
-    let first_ctor = matched_ctors.iter().next()
+
+    let first_ctor = matched_ctors
+        .iter()
+        .next()
         .expect("matched_ctors must be non-empty after is_empty check");
     if let Some((enum_name, all_variants)) = ctor_map.get(first_ctor) {
-        // Check that all matched constructors belong to the same enum
         for ctor in &matched_ctors {
             if let Some((other_enum, _)) = ctor_map.get(ctor) {
                 if other_enum != enum_name {
-                    // Mixed enum types - this is a type error, but we let type checker handle it
                     return;
                 }
             }
         }
-        
-        // Check which variants are missing at the top level
-        let missing: Vec<&String> = all_variants.iter()
+
+        let missing: Vec<&String> = all_variants
+            .iter()
             .filter(|v| !matched_ctors.contains(*v))
             .collect();
-        
+
         if !missing.is_empty() {
-            let missing_list = missing.iter()
+            let missing_list = missing
+                .iter()
                 .map(|s| format!("`{}`", s))
                 .collect::<Vec<_>>()
                 .join(", ");
-            
+
             warnings.push(
                 Diagnostic::new(
-                    format!("non-exhaustive match: missing pattern(s) for {}", missing_list),
+                    format!(
+                        "non-exhaustive match: missing pattern(s) for {}",
+                        missing_list
+                    ),
                     match_expr.span,
-                ).with_help(
-                    "add arm(s) for the missing variant(s) or add a default arm".to_string()
                 )
+                .with_help(
+                    "add arm(s) for the missing variant(s) or add a default arm".to_string(),
+                ),
             );
-            return; // Don't check nested if top-level is already non-exhaustive
+            return;
         }
-        
-        // TS-9: Check nested pattern exhaustiveness for each constructor
-        // Group arms by their top-level constructor, then check sub-patterns
-        check_nested_exhaustiveness(&match_expr.arms, ctor_map, enum_variants, match_expr.span, warnings);
+
+        check_nested_exhaustiveness(
+            &match_expr.arms,
+            ctor_map,
+            enum_variants,
+            match_expr.span,
+            warnings,
+        );
     }
 }
 
-/// TS-9: Check nested pattern exhaustiveness within each constructor group.
-/// For example, in `match x` with arms `Some(Some(v)) ? ...` and `Some(None) ? ...` and `None ? ...`,
-/// the `Some` arms have sub-patterns on an inner `Option` type; we check those are exhaustive.
 fn check_nested_exhaustiveness(
     arms: &[crate::ast::MatchArm],
     ctor_map: &HashMap<String, (String, Vec<String>)>,
-    enum_variants: &HashMap<String, Vec<String>>,
+    _enum_variants: &HashMap<String, Vec<String>>,
     span: Span,
     warnings: &mut Vec<Diagnostic>,
 ) {
-    // Group arms by top-level constructor name
     let mut groups: HashMap<String, Vec<&[crate::ast::MatchPattern]>> = HashMap::new();
-    
+
     for arm in arms {
         if let crate::ast::MatchPattern::Constructor { name, fields, .. } = &arm.pattern {
             groups.entry(name.clone()).or_default().push(fields);
         }
     }
-    
-    // For each constructor group, check sub-pattern exhaustiveness at each field position
+
     for (ctor_name, field_groups) in &groups {
         if field_groups.is_empty() {
             continue;
         }
-        
-        // Determine how many fields this constructor has
+
         let max_fields = field_groups.iter().map(|f| f.len()).max().unwrap_or(0);
-        
+
         for field_idx in 0..max_fields {
-            // Collect the sub-patterns at this field position
             let mut sub_ctors: HashSet<String> = HashSet::new();
             let mut has_catch_all = false;
-            
+
             for fields in field_groups {
                 if field_idx < fields.len() {
                     match &fields[field_idx] {
                         crate::ast::MatchPattern::Constructor { name, .. } => {
                             sub_ctors.insert(name.clone());
                         }
-                        crate::ast::MatchPattern::Identifier(_) | crate::ast::MatchPattern::Wildcard(_) => {
+                        crate::ast::MatchPattern::Identifier(_)
+                        | crate::ast::MatchPattern::Wildcard(_) => {
                             has_catch_all = true;
                         }
-                        _ => {
-                            // Literal patterns don't contribute to constructor exhaustiveness
-                        }
+                        _ => {}
                     }
                 } else {
-                    // If this arm has fewer fields, it implicitly catches all
                     has_catch_all = true;
                 }
             }
-            
-            // If there's a catch-all, this position is exhaustive
+
             if has_catch_all || sub_ctors.is_empty() {
                 continue;
             }
-            
-            // All sub-patterns are constructors — check if they cover all variants of their enum
+
             let first_sub = sub_ctors.iter().next().unwrap();
             if let Some((sub_enum_name, sub_all_variants)) = ctor_map.get(first_sub) {
-                let sub_missing: Vec<&String> = sub_all_variants.iter()
+                let sub_missing: Vec<&String> = sub_all_variants
+                    .iter()
                     .filter(|v| !sub_ctors.contains(*v))
                     .collect();
-                
+
                 if !sub_missing.is_empty() {
-                    let missing_list = sub_missing.iter()
+                    let missing_list = sub_missing
+                        .iter()
                         .map(|s| format!("`{}`", s))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    
+
                     warnings.push(
                         Diagnostic::new(
                             format!(
@@ -2605,30 +2849,42 @@ fn check_nested_exhaustiveness(
     }
 }
 
-fn check_field_uniqueness(owner_kind: &str, owner_name: &str, fields: &[Field]) -> Result<(), Diagnostic> {
+fn check_field_uniqueness(
+    owner_kind: &str,
+    owner_name: &str,
+    fields: &[Field],
+) -> Result<(), Diagnostic> {
     let mut seen = HashMap::new();
     for field in fields {
         if let Some(previous) = seen.insert(field.name.clone(), field.span) {
-            return Err(
-                Diagnostic::new(
-                    format!("duplicate field `{}.{}`", owner_name, field.name),
-                    field.span,
-                )
-                .with_help(format!(
-                    "previous {} field defined at {}",
-                    owner_kind, previous
-                )),
-            );
+            return Err(Diagnostic::new(
+                format!("duplicate field `{}.{}`", owner_name, field.name),
+                field.span,
+            )
+            .with_help(format!(
+                "previous {} field defined at {}",
+                owner_kind, previous
+            )));
         }
     }
     Ok(())
 }
 
-fn check_lambda(params: &[Parameter], body: &Block, scopes: &mut ScopeStack, known_names: &HashSet<String>) -> Result<(), Diagnostic> {
+fn check_lambda(
+    params: &[Parameter],
+    body: &Block,
+    scopes: &mut ScopeStack,
+    known_names: &HashSet<String>,
+) -> Result<(), Diagnostic> {
     scopes.push();
     for param in params {
         if let Some(previous) = scopes.lookup(&param.name) {
-            return Err(duplicate_symbol("parameter", &param.name, param.span, previous));
+            return Err(duplicate_symbol(
+                "parameter",
+                &param.name,
+                param.span,
+                previous,
+            ));
         }
         scopes.declare(param.name.clone(), param.span);
         if let Some(default) = &param.default {
@@ -2677,17 +2933,14 @@ fn infer_mutability_and_usage(
         };
 
         let strategy = if usage.closure_captures > 0 {
-            // Captured by closure: must be heap-allocated (outlives scope)
             AllocationStrategy::Heap
         } else if usage.mutations > 0 {
             AllocationStrategy::Heap
         } else if usage.returned > 0 && usage.escapes == usage.returned {
-            // Only escapes via return, never mutated — SharedCow candidate
             AllocationStrategy::SharedCow
         } else if usage.escapes > 0 {
             AllocationStrategy::SharedCow
         } else {
-            // No escapes, no mutations — stack is safe
             AllocationStrategy::Stack
         };
 
@@ -2695,7 +2948,13 @@ fn infer_mutability_and_usage(
         alloc.insert(name.clone(), strategy);
     }
 
-    (UsageMetrics { symbols: tracker.usage }, mut_env, alloc)
+    (
+        UsageMetrics {
+            symbols: tracker.usage,
+        },
+        mut_env,
+        alloc,
+    )
 }
 
 #[derive(Default)]
@@ -2731,7 +2990,7 @@ impl UsageTracker {
     fn capture(&mut self, name: &str) {
         let entry = self.usage.entry(name.to_string()).or_default();
         entry.closure_captures += 1;
-        // Closure captures are a form of escape
+
         entry.escapes += 1;
     }
 
@@ -2756,7 +3015,13 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
                     mark_returns(expr, tracker);
                 }
             }
-            Statement::If { condition, body, elif_branches, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 visit_expression(condition, tracker);
                 visit_block(body, tracker, mark_returns_as_escape);
                 for (cond, blk) in elif_branches {
@@ -2767,22 +3032,42 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
                     visit_block(else_blk, tracker, mark_returns_as_escape);
                 }
             }
-            Statement::While { condition, body, .. } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 visit_expression(condition, tracker);
                 visit_block(body, tracker, mark_returns_as_escape);
             }
-            Statement::For { iterable, body, variable, .. } => {
+            Statement::For {
+                iterable,
+                body,
+                variable,
+                ..
+            } => {
                 visit_expression(iterable, tracker);
                 tracker.touch(variable);
                 visit_block(body, tracker, mark_returns_as_escape);
             }
-            Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+            Statement::ForKV {
+                key_var,
+                value_var,
+                iterable,
+                body,
+                ..
+            } => {
                 visit_expression(iterable, tracker);
                 tracker.touch(key_var);
                 tracker.touch(value_var);
                 visit_block(body, tracker, mark_returns_as_escape);
             }
-            Statement::ForRange { start, end, step, body, variable, .. } => {
+            Statement::ForRange {
+                start,
+                end,
+                step,
+                body,
+                variable,
+                ..
+            } => {
                 visit_expression(start, tracker);
                 visit_expression(end, tracker);
                 if let Some(s) = step {
@@ -2810,7 +3095,6 @@ fn visit_block(block: &Block, tracker: &mut UsageTracker, mark_returns_as_escape
     }
 }
 
-/// Touch variable names introduced by a destructuring pattern in the usage tracker.
 fn touch_pattern_names(pattern: &crate::ast::MatchPattern, tracker: &mut UsageTracker) {
     match pattern {
         crate::ast::MatchPattern::Identifier(name) => {
@@ -2879,7 +3163,9 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
             visit_expression(target, tracker);
             visit_expression(index, tracker);
         }
-        Expression::Slice { target, start, end, .. } => {
+        Expression::Slice {
+            target, start, end, ..
+        } => {
             visit_expression(target, tracker);
             visit_expression(start, tracker);
             visit_expression(end, tracker);
@@ -2889,7 +3175,10 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
             if let Expression::Identifier(name, _) = callee.as_ref() {
                 tracker.call(name);
             }
-            if let Expression::Member { target, property, .. } = callee.as_ref() {
+            if let Expression::Member {
+                target, property, ..
+            } = callee.as_ref()
+            {
                 visit_expression(target, tracker);
                 if MUTATING_METHODS.contains(&property.as_str()) {
                     if let Some(id) = identifier_name(target) {
@@ -2902,7 +3191,12 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
                 mark_escapes(arg, tracker);
             }
         }
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             visit_expression(condition, tracker);
             visit_expression(then_branch, tracker);
             visit_expression(else_branch, tracker);
@@ -2925,16 +3219,15 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
             for p in params {
                 tracker.touch(&p.name);
             }
-            // Scan the lambda body for free variables (captures from outer scope)
+
             let mut lambda_tracker = UsageTracker::default();
             visit_block(body, &mut lambda_tracker, false);
             for name in lambda_tracker.usage.keys() {
                 if !param_names.contains(name) {
-                    // This identifier references an outer variable — it's captured
                     tracker.capture(name);
                 }
             }
-            // Also do the normal visit so all reads/mutations are recorded
+
             visit_block(body, tracker, false);
         }
         Expression::Pipeline { left, right, .. } => {
@@ -2944,7 +3237,13 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
         Expression::ErrorValue { .. } => {}
         Expression::ErrorPropagate { expr, .. } => visit_expression(expr, tracker),
         Expression::InlineAsm { .. } | Expression::PtrLoad { .. } | Expression::Unsafe { .. } => {}
-        Expression::ListComprehension { body, var, iterable, condition, .. } => {
+        Expression::ListComprehension {
+            body,
+            var,
+            iterable,
+            condition,
+            ..
+        } => {
             visit_expression(iterable, tracker);
             tracker.touch(var);
             visit_expression(body, tracker);
@@ -2952,7 +3251,14 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
                 visit_expression(cond, tracker);
             }
         }
-        Expression::MapComprehension { key, value, var, iterable, condition, .. } => {
+        Expression::MapComprehension {
+            key,
+            value,
+            var,
+            iterable,
+            condition,
+            ..
+        } => {
             visit_expression(iterable, tracker);
             tracker.touch(var);
             visit_expression(key, tracker);
@@ -2967,7 +3273,7 @@ fn visit_expression(expr: &Expression, tracker: &mut UsageTracker) {
 fn mark_returns(expr: &Expression, tracker: &mut UsageTracker) {
     match expr {
         Expression::Identifier(name, _) => tracker.mark_returned(name),
-        // Compound expressions: recurse into constituents
+
         Expression::List(items, _) => {
             for item in items {
                 mark_returns(item, tracker);
@@ -2979,12 +3285,16 @@ fn mark_returns(expr: &Expression, tracker: &mut UsageTracker) {
                 mark_returns(v, tracker);
             }
         }
-        Expression::Ternary { condition: _, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition: _,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             mark_returns(then_branch, tracker);
             mark_returns(else_branch, tracker);
         }
         _ => {
-            // For other expressions, fall back to general escape marking
             mark_escapes(expr, tracker);
         }
     }
@@ -3021,12 +3331,19 @@ fn mark_escapes(expr: &Expression, tracker: &mut UsageTracker) {
             mark_escapes(target, tracker);
             mark_escapes(index, tracker);
         }
-        Expression::Slice { target, start, end, .. } => {
+        Expression::Slice {
+            target, start, end, ..
+        } => {
             mark_escapes(target, tracker);
             mark_escapes(start, tracker);
             mark_escapes(end, tracker);
         }
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             mark_escapes(condition, tracker);
             mark_escapes(then_branch, tracker);
             mark_escapes(else_branch, tracker);
@@ -3064,14 +3381,25 @@ fn mark_escapes(expr: &Expression, tracker: &mut UsageTracker) {
         }
         Expression::ErrorValue { .. } => {}
         Expression::ErrorPropagate { expr, .. } => mark_escapes(expr, tracker),
-        Expression::ListComprehension { body, iterable, condition, .. } => {
+        Expression::ListComprehension {
+            body,
+            iterable,
+            condition,
+            ..
+        } => {
             mark_escapes(iterable, tracker);
             mark_escapes(body, tracker);
             if let Some(cond) = condition {
                 mark_escapes(cond, tracker);
             }
         }
-        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+        Expression::MapComprehension {
+            key,
+            value,
+            iterable,
+            condition,
+            ..
+        } => {
             mark_escapes(iterable, tracker);
             mark_escapes(key, tracker);
             mark_escapes(value, tracker);
@@ -3103,15 +3431,7 @@ fn identifier_name(expr: &Expression) -> Option<&str> {
 }
 
 const MUTATING_METHODS: [&str; 9] = [
-    "push",
-    "pop",
-    "append",
-    "insert",
-    "remove",
-    "clear",
-    "update",
-    "set",
-    "add_item",
+    "push", "pop", "append", "insert", "remove", "clear", "update", "set", "add_item",
 ];
 
 fn validate_parameter_defaults(params: &[Parameter]) -> Result<(), Diagnostic> {
@@ -3152,10 +3472,8 @@ fn find_forbidden_identifier(
             .get(name)
             .copied()
             .map(|later_span| (name.clone(), *span, later_span)),
-        Expression::Binary { left, right, .. } => {
-            find_forbidden_identifier(left, forbidden)
-                .or_else(|| find_forbidden_identifier(right, forbidden))
-        }
+        Expression::Binary { left, right, .. } => find_forbidden_identifier(left, forbidden)
+            .or_else(|| find_forbidden_identifier(right, forbidden)),
         Expression::Unary { expr, .. } => find_forbidden_identifier(expr, forbidden),
         Expression::Spread(inner, _) => find_forbidden_identifier(inner, forbidden),
         Expression::List(items, _) => items
@@ -3166,17 +3484,18 @@ fn find_forbidden_identifier(
                 .or_else(|| find_forbidden_identifier(value, forbidden))
         }),
         Expression::Call { callee, args, .. } => find_forbidden_identifier(callee, forbidden)
-            .or_else(|| args.iter().find_map(|arg| find_forbidden_identifier(arg, forbidden))),
+            .or_else(|| {
+                args.iter()
+                    .find_map(|arg| find_forbidden_identifier(arg, forbidden))
+            }),
         Expression::Member { target, .. } => find_forbidden_identifier(target, forbidden),
-        Expression::Index { target, index, .. } => {
-            find_forbidden_identifier(target, forbidden)
-                .or_else(|| find_forbidden_identifier(index, forbidden))
-        }
-        Expression::Slice { target, start, end, .. } => {
-            find_forbidden_identifier(target, forbidden)
-                .or_else(|| find_forbidden_identifier(start, forbidden))
-                .or_else(|| find_forbidden_identifier(end, forbidden))
-        }
+        Expression::Index { target, index, .. } => find_forbidden_identifier(target, forbidden)
+            .or_else(|| find_forbidden_identifier(index, forbidden)),
+        Expression::Slice {
+            target, start, end, ..
+        } => find_forbidden_identifier(target, forbidden)
+            .or_else(|| find_forbidden_identifier(start, forbidden))
+            .or_else(|| find_forbidden_identifier(end, forbidden)),
         Expression::Ternary {
             condition,
             then_branch,
@@ -3188,23 +3507,36 @@ fn find_forbidden_identifier(
         Expression::Match(match_expr) => find_in_match(match_expr, forbidden),
         Expression::Throw { value, .. } => find_forbidden_identifier(value, forbidden),
         Expression::Lambda { body, .. } => find_in_block(body, forbidden),
-        Expression::Pipeline { left, right, .. } => {
-            find_forbidden_identifier(left, forbidden)
-                .or_else(|| find_forbidden_identifier(right, forbidden))
-        }
+        Expression::Pipeline { left, right, .. } => find_forbidden_identifier(left, forbidden)
+            .or_else(|| find_forbidden_identifier(right, forbidden)),
         Expression::ErrorValue { .. } => None,
         Expression::ErrorPropagate { expr, .. } => find_forbidden_identifier(expr, forbidden),
-        Expression::ListComprehension { body, iterable, condition, .. } => {
-            find_forbidden_identifier(iterable, forbidden)
-                .or_else(|| find_forbidden_identifier(body, forbidden))
-                .or_else(|| condition.as_ref().and_then(|c| find_forbidden_identifier(c, forbidden)))
-        }
-        Expression::MapComprehension { key, value, iterable, condition, .. } => {
-            find_forbidden_identifier(iterable, forbidden)
-                .or_else(|| find_forbidden_identifier(key, forbidden))
-                .or_else(|| find_forbidden_identifier(value, forbidden))
-                .or_else(|| condition.as_ref().and_then(|c| find_forbidden_identifier(c, forbidden)))
-        }
+        Expression::ListComprehension {
+            body,
+            iterable,
+            condition,
+            ..
+        } => find_forbidden_identifier(iterable, forbidden)
+            .or_else(|| find_forbidden_identifier(body, forbidden))
+            .or_else(|| {
+                condition
+                    .as_ref()
+                    .and_then(|c| find_forbidden_identifier(c, forbidden))
+            }),
+        Expression::MapComprehension {
+            key,
+            value,
+            iterable,
+            condition,
+            ..
+        } => find_forbidden_identifier(iterable, forbidden)
+            .or_else(|| find_forbidden_identifier(key, forbidden))
+            .or_else(|| find_forbidden_identifier(value, forbidden))
+            .or_else(|| {
+                condition
+                    .as_ref()
+                    .and_then(|c| find_forbidden_identifier(c, forbidden))
+            }),
         Expression::String(_, _)
         | Expression::Bytes(_, _)
         | Expression::Bool(_, _)
@@ -3231,13 +3563,15 @@ fn find_in_match(
                 .iter()
                 .find_map(|arm| find_in_block(&arm.body, forbidden))
         })
-        .or_else(|| match_expr.default.as_ref().and_then(|block| find_in_block(block, forbidden)))
+        .or_else(|| {
+            match_expr
+                .default
+                .as_ref()
+                .and_then(|block| find_in_block(block, forbidden))
+        })
 }
 
-fn find_in_block(
-    block: &Block,
-    forbidden: &HashMap<String, Span>,
-) -> Option<(String, Span, Span)> {
+fn find_in_block(block: &Block, forbidden: &HashMap<String, Span>) -> Option<(String, Span, Span)> {
     for statement in &block.statements {
         if let Some(hit) = find_in_statement(statement, forbidden) {
             return Some(hit);
@@ -3257,41 +3591,52 @@ fn find_in_statement(
         Statement::Binding(binding) => find_forbidden_identifier(&binding.value, forbidden),
         Statement::Expression(expr) => find_forbidden_identifier(expr, forbidden),
         Statement::Return(expr, _) => find_forbidden_identifier(expr, forbidden),
-        Statement::If { condition, body, elif_branches, else_body, .. } => {
-            find_forbidden_identifier(condition, forbidden)
-                .or_else(|| find_in_block(body, forbidden))
-                .or_else(|| elif_branches.iter().find_map(|(cond, blk)| {
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => find_forbidden_identifier(condition, forbidden)
+            .or_else(|| find_in_block(body, forbidden))
+            .or_else(|| {
+                elif_branches.iter().find_map(|(cond, blk)| {
                     find_forbidden_identifier(cond, forbidden)
                         .or_else(|| find_in_block(blk, forbidden))
-                }))
-                .or_else(|| else_body.as_ref().and_then(|blk| find_in_block(blk, forbidden)))
-        }
-        Statement::While { condition, body, .. } => {
-            find_forbidden_identifier(condition, forbidden)
-                .or_else(|| find_in_block(body, forbidden))
-        }
-        Statement::For { iterable, body, .. } => {
-            find_forbidden_identifier(iterable, forbidden)
-                .or_else(|| find_in_block(body, forbidden))
-        }
-        Statement::ForKV { iterable, body, .. } => {
-            find_forbidden_identifier(iterable, forbidden)
-                .or_else(|| find_in_block(body, forbidden))
-        }
-        Statement::ForRange { start, end, step, body, .. } => {
-            find_forbidden_identifier(start, forbidden)
-                .or_else(|| find_forbidden_identifier(end, forbidden))
-                .or_else(|| step.as_ref().and_then(|s| find_forbidden_identifier(s, forbidden)))
-                .or_else(|| find_in_block(body, forbidden))
-        }
+                })
+            })
+            .or_else(|| {
+                else_body
+                    .as_ref()
+                    .and_then(|blk| find_in_block(blk, forbidden))
+            }),
+        Statement::While {
+            condition, body, ..
+        } => find_forbidden_identifier(condition, forbidden)
+            .or_else(|| find_in_block(body, forbidden)),
+        Statement::For { iterable, body, .. } => find_forbidden_identifier(iterable, forbidden)
+            .or_else(|| find_in_block(body, forbidden)),
+        Statement::ForKV { iterable, body, .. } => find_forbidden_identifier(iterable, forbidden)
+            .or_else(|| find_in_block(body, forbidden)),
+        Statement::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => find_forbidden_identifier(start, forbidden)
+            .or_else(|| find_forbidden_identifier(end, forbidden))
+            .or_else(|| {
+                step.as_ref()
+                    .and_then(|s| find_forbidden_identifier(s, forbidden))
+            })
+            .or_else(|| find_in_block(body, forbidden)),
         Statement::Break(_) | Statement::Continue(_) => None,
         Statement::FieldAssign { target, value, .. } => {
             find_forbidden_identifier(target, forbidden)
                 .or_else(|| find_forbidden_identifier(value, forbidden))
         }
-        Statement::PatternBinding { value, .. } => {
-            find_forbidden_identifier(value, forbidden)
-        }
+        Statement::PatternBinding { value, .. } => find_forbidden_identifier(value, forbidden),
     }
 }
 
@@ -3330,51 +3675,46 @@ pub fn synthetic_span() -> Span {
     Span::new(0, 0)
 }
 
-/// Check for unhandled error values at top-level (globals) and function bodies.
-/// Emits warnings when error values are assigned to variables but never handled.
 fn check_unhandled_errors(
     globals: &[Binding],
     functions: &[Function],
     warnings: &mut Vec<Diagnostic>,
 ) {
-    // Check top-level globals - warn if an expression produces an error value and is not used
     for binding in globals {
-        // Check if the binding's value is an error expression that might be ignored
         if let Some(warning) = check_expr_may_produce_unhandled_error(&binding.value) {
             warnings.push(warning);
         }
     }
-    
-    // Check function bodies for ignored error values
+
     for function in functions {
         check_block_for_unhandled_errors(&function.body, warnings);
     }
 }
 
-/// Check if an expression directly produces an error that's not handled.
 fn check_expr_may_produce_unhandled_error(expr: &Expression) -> Option<Diagnostic> {
     match expr {
-        // Direct error value that's not being used in a conditional or propagated
-        Expression::ErrorValue { span, path } => {
-            Some(Diagnostic::new(
-                format!("error value `err {}` is created but may not be handled", path.join(":")),
+        Expression::ErrorValue { span, path } => Some(
+            Diagnostic::new(
+                format!(
+                    "error value `err {}` is created but may not be handled",
+                    path.join(":")
+                ),
                 *span,
-            ).with_help("consider returning this error or handling it with a conditional"))
-        }
+            )
+            .with_help("consider returning this error or handling it with a conditional"),
+        ),
         _ => None,
     }
 }
 
-/// Check a block for statements that might silently ignore errors.
 fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic>) {
     for statement in &block.statements {
         match statement {
             Statement::Expression(expr) => {
-                // A standalone expression statement that's an error value is suspicious
                 if let Some(warning) = check_expr_may_produce_unhandled_error(expr) {
                     warnings.push(warning);
                 }
-                // Also recurse into nested blocks (lambdas, match expressions, etc.)
+
                 check_expr_nested_blocks(expr, warnings);
             }
             Statement::Binding(binding) => {
@@ -3383,7 +3723,13 @@ fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic
             Statement::Return(expr, _) => {
                 check_expr_nested_blocks(expr, warnings);
             }
-            Statement::If { condition, body, elif_branches, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 check_expr_nested_blocks(condition, warnings);
                 check_block_for_unhandled_errors(body, warnings);
                 for (cond, blk) in elif_branches {
@@ -3394,7 +3740,9 @@ fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic
                     check_block_for_unhandled_errors(else_blk, warnings);
                 }
             }
-            Statement::While { condition, body, .. } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 check_expr_nested_blocks(condition, warnings);
                 check_block_for_unhandled_errors(body, warnings);
             }
@@ -3406,7 +3754,13 @@ fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic
                 check_expr_nested_blocks(iterable, warnings);
                 check_block_for_unhandled_errors(body, warnings);
             }
-            Statement::ForRange { start, end, step, body, .. } => {
+            Statement::ForRange {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
                 check_expr_nested_blocks(start, warnings);
                 check_expr_nested_blocks(end, warnings);
                 if let Some(s) = step {
@@ -3423,14 +3777,12 @@ fn check_block_for_unhandled_errors(block: &Block, warnings: &mut Vec<Diagnostic
             }
         }
     }
-    
-    // Check the final value expression if any
+
     if let Some(value) = &block.value {
         check_expr_nested_blocks(value, warnings);
     }
 }
 
-/// Recursively check nested blocks in expressions for unhandled errors.
 fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
     match expr {
         Expression::Lambda { body, .. } => {
@@ -3444,7 +3796,11 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
                 check_block_for_unhandled_errors(default, warnings);
             }
         }
-        Expression::Ternary { then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => {
             check_expr_nested_blocks(then_branch, warnings);
             check_expr_nested_blocks(else_branch, warnings);
         }
@@ -3478,7 +3834,9 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
             check_expr_nested_blocks(target, warnings);
             check_expr_nested_blocks(index, warnings);
         }
-        Expression::Slice { target, start, end, .. } => {
+        Expression::Slice {
+            target, start, end, ..
+        } => {
             check_expr_nested_blocks(target, warnings);
             check_expr_nested_blocks(start, warnings);
             check_expr_nested_blocks(end, warnings);
@@ -3497,7 +3855,7 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
         Expression::Unsafe { block, .. } => {
             check_block_for_unhandled_errors(block, warnings);
         }
-        // Leaf expressions that don't contain nested blocks
+
         Expression::Unit
         | Expression::None(_)
         | Expression::Identifier(_, _)
@@ -3512,14 +3870,25 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
         | Expression::Throw { .. }
         | Expression::InlineAsm { .. }
         | Expression::PtrLoad { .. } => {}
-        Expression::ListComprehension { body, iterable, condition, .. } => {
+        Expression::ListComprehension {
+            body,
+            iterable,
+            condition,
+            ..
+        } => {
             check_expr_nested_blocks(iterable, warnings);
             check_expr_nested_blocks(body, warnings);
             if let Some(cond) = condition {
                 check_expr_nested_blocks(cond, warnings);
             }
         }
-        Expression::MapComprehension { key, value, iterable, condition, .. } => {
+        Expression::MapComprehension {
+            key,
+            value,
+            iterable,
+            condition,
+            ..
+        } => {
             check_expr_nested_blocks(iterable, warnings);
             check_expr_nested_blocks(key, warnings);
             check_expr_nested_blocks(value, warnings);
@@ -3530,10 +3899,6 @@ fn check_expr_nested_blocks(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
     }
 }
 
-// ── T3.4: Error type exhaustiveness checking ───────────────────────────────
-
-/// Collect all error types that a function may return (from return statements
-/// and trailing expressions containing ErrorValue nodes).
 fn collect_error_types_from_block(block: &Block, error_types: &mut Vec<(Vec<String>, Span)>) {
     for statement in &block.statements {
         match statement {
@@ -3541,14 +3906,17 @@ fn collect_error_types_from_block(block: &Block, error_types: &mut Vec<(Vec<Stri
                 collect_error_types_from_expr(expr, error_types);
             }
             Statement::Expression(expr) => {
-                // Only look at tail expressions (last in block) or nested blocks
                 collect_error_types_from_expr_nested(expr, error_types);
             }
             Statement::Binding(binding) => {
-                // Check if the value is an error-producing expression that flows through
                 collect_error_types_from_expr_nested(&binding.value, error_types);
             }
-            Statement::If { body, elif_branches, else_body, .. } => {
+            Statement::If {
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 collect_error_types_from_block(body, error_types);
                 for (_, blk) in elif_branches {
                     collect_error_types_from_block(blk, error_types);
@@ -3557,7 +3925,9 @@ fn collect_error_types_from_block(block: &Block, error_types: &mut Vec<(Vec<Stri
                     collect_error_types_from_block(else_blk, error_types);
                 }
             }
-            Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForKV { body, .. } => {
+            Statement::While { body, .. }
+            | Statement::For { body, .. }
+            | Statement::ForKV { body, .. } => {
                 collect_error_types_from_block(body, error_types);
             }
             Statement::ForRange { body, .. } => {
@@ -3568,7 +3938,6 @@ fn collect_error_types_from_block(block: &Block, error_types: &mut Vec<(Vec<Stri
     }
 }
 
-/// Collect error types from an expression (direct ErrorValue or propagated).
 fn collect_error_types_from_expr(expr: &Expression, error_types: &mut Vec<(Vec<String>, Span)>) {
     match expr {
         Expression::ErrorValue { path, span } => {
@@ -3576,7 +3945,11 @@ fn collect_error_types_from_expr(expr: &Expression, error_types: &mut Vec<(Vec<S
                 error_types.push((path.clone(), *span));
             }
         }
-        Expression::Ternary { then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => {
             collect_error_types_from_expr(then_branch, error_types);
             collect_error_types_from_expr(else_branch, error_types);
         }
@@ -3584,8 +3957,10 @@ fn collect_error_types_from_expr(expr: &Expression, error_types: &mut Vec<(Vec<S
     }
 }
 
-/// Recurse into nested blocks looking for error returns.
-fn collect_error_types_from_expr_nested(expr: &Expression, error_types: &mut Vec<(Vec<String>, Span)>) {
+fn collect_error_types_from_expr_nested(
+    expr: &Expression,
+    error_types: &mut Vec<(Vec<String>, Span)>,
+) {
     match expr {
         Expression::Lambda { body, .. } => {
             collect_error_types_from_block(body, error_types);
@@ -3602,7 +3977,6 @@ fn collect_error_types_from_expr_nested(expr: &Expression, error_types: &mut Vec
     }
 }
 
-/// Collect error type patterns handled in match expressions within a function.
 fn collect_handled_error_types_from_block(block: &Block, handled: &mut Vec<Vec<String>>) {
     for statement in &block.statements {
         match statement {
@@ -3612,7 +3986,13 @@ fn collect_handled_error_types_from_block(block: &Block, handled: &mut Vec<Vec<S
             Statement::Binding(binding) => {
                 collect_handled_error_types_from_expr(&binding.value, handled);
             }
-            Statement::If { condition, body, elif_branches, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 collect_handled_error_types_from_expr(condition, handled);
                 collect_handled_error_types_from_block(body, handled);
                 for (cond, blk) in elif_branches {
@@ -3623,7 +4003,9 @@ fn collect_handled_error_types_from_block(block: &Block, handled: &mut Vec<Vec<S
                     collect_handled_error_types_from_block(else_blk, handled);
                 }
             }
-            Statement::While { body, .. } | Statement::For { body, .. } | Statement::ForKV { body, .. } => {
+            Statement::While { body, .. }
+            | Statement::For { body, .. }
+            | Statement::ForKV { body, .. } => {
                 collect_handled_error_types_from_block(body, handled);
             }
             Statement::ForRange { body, .. } => {
@@ -3637,26 +4019,20 @@ fn collect_handled_error_types_from_block(block: &Block, handled: &mut Vec<Vec<S
     }
 }
 
-/// Look for match arms that handle error patterns (Constructor patterns like Err(e)).
 fn collect_handled_error_types_from_expr(expr: &Expression, handled: &mut Vec<Vec<String>>) {
     match expr {
         Expression::Match(m) => {
             for arm in &m.arms {
-                // Check if the pattern is a constructor that looks like an error handler
                 match &arm.pattern {
                     MatchPattern::Constructor { name, .. } => {
-                        // Patterns like Err(e) or specific error names
                         if name == "Err" || name.starts_with("Error") {
                             handled.push(vec![name.clone()]);
                         }
                     }
                     MatchPattern::Identifier(name) => {
-                        // A bare identifier pattern — could be matching an error value
-                        // We track it as a potential error handler
                         handled.push(vec![name.clone()]);
                     }
                     MatchPattern::Wildcard(_) => {
-                        // Wildcard catches all — mark as handling all errors
                         handled.push(vec!["*".to_string()]);
                     }
                     _ => {}
@@ -3664,7 +4040,6 @@ fn collect_handled_error_types_from_expr(expr: &Expression, handled: &mut Vec<Ve
                 collect_handled_error_types_from_block(&arm.body, handled);
             }
             if m.default.is_some() {
-                // Default arm catches all unmatched patterns
                 handled.push(vec!["*".to_string()]);
             }
             if let Some(default) = &m.default {
@@ -3674,21 +4049,13 @@ fn collect_handled_error_types_from_expr(expr: &Expression, handled: &mut Vec<Ve
         Expression::Lambda { body, .. } => {
             collect_handled_error_types_from_block(body, handled);
         }
-        Expression::ErrorPropagate { .. } => {
-            // Error propagation counts as "handled" — it re-raises to caller
-        }
+        Expression::ErrorPropagate { .. } => {}
         _ => {}
     }
 }
 
-/// T3.4: Check that functions which can produce errors have those errors
-/// handled (or at least documented) at call sites.
-fn check_error_type_exhaustiveness(
-    functions: &[Function],
-    warnings: &mut Vec<Diagnostic>,
-) {
+fn check_error_type_exhaustiveness(functions: &[Function], warnings: &mut Vec<Diagnostic>) {
     for function in functions {
-        // Collect error types this function can produce
         let mut produced_errors: Vec<(Vec<String>, Span)> = Vec::new();
         collect_error_types_from_block(&function.body, &mut produced_errors);
 
@@ -3696,24 +4063,18 @@ fn check_error_type_exhaustiveness(
             continue;
         }
 
-        // Deduplicate error types
         let mut seen = std::collections::HashSet::new();
         produced_errors.retain(|(path, _)| seen.insert(path.clone()));
 
-        // Collect error types handled within this function
         let mut handled_errors: Vec<Vec<String>> = Vec::new();
         collect_handled_error_types_from_block(&function.body, &mut handled_errors);
 
-        // Check each produced error type against handled ones
         for (error_path, span) in &produced_errors {
-            let is_handled = handled_errors.iter().any(|handled| {
-                // Exact match or prefix match (handling a parent category handles children)
-                error_path == handled || error_path.starts_with(handled.as_slice())
-            });
+            let is_handled = handled_errors
+                .iter()
+                .any(|handled| error_path == handled || error_path.starts_with(handled.as_slice()));
 
             if !is_handled {
-                // Only warn if the error is produced in a non-return context
-                // (returning errors is the expected way to propagate them)
                 let in_return = function.body.statements.iter().any(|s| {
                     if let Statement::Return(expr, _) = s {
                         contains_error_path(expr, error_path)
@@ -3722,33 +4083,34 @@ fn check_error_type_exhaustiveness(
                     }
                 });
                 if !in_return {
-                    warnings.push(Diagnostic::new(
-                        format!(
-                            "error type `err {}` may not be exhaustively handled",
-                            error_path.join(":")
-                        ),
-                        *span,
-                    ).with_help("consider matching on error types or propagating with `!`"));
+                    warnings.push(
+                        Diagnostic::new(
+                            format!(
+                                "error type `err {}` may not be exhaustively handled",
+                                error_path.join(":")
+                            ),
+                            *span,
+                        )
+                        .with_help("consider matching on error types or propagating with `!`"),
+                    );
                 }
             }
         }
     }
 }
 
-/// Check if an expression contains a specific error path.
 fn contains_error_path(expr: &Expression, target: &[String]) -> bool {
     match expr {
         Expression::ErrorValue { path, .. } => path == target,
-        Expression::Ternary { then_branch, else_branch, .. } => {
-            contains_error_path(then_branch, target) || contains_error_path(else_branch, target)
-        }
+        Expression::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => contains_error_path(then_branch, target) || contains_error_path(else_branch, target),
         _ => false,
     }
 }
 
-// ── T3.5: Dead code detection ──────────────────────────────────────────────
-
-/// Get the span of a statement (for warning locations).
 fn statement_span(stmt: &Statement) -> Span {
     match stmt {
         Statement::Binding(b) => b.value.span(),
@@ -3766,8 +4128,6 @@ fn statement_span(stmt: &Statement) -> Span {
     }
 }
 
-/// T4.4: Check that if/elif/else branches return consistent types.
-/// Emits warnings (not errors) when branch types differ.
 fn check_branch_type_consistency(
     branch_type_hints: &[(Vec<TypeId>, Span)],
     graph: &mut TypeGraph,
@@ -3778,13 +4138,12 @@ fn check_branch_type_consistency(
         if branch_tys.len() < 2 {
             continue;
         }
-        // Resolve all branch types
+
         let resolved: Vec<TypeId> = branch_tys
             .iter()
             .map(|ty| resolve(ty.clone(), graph))
             .collect();
 
-        // Check if all resolved types are the same (ignoring Unknown/Any/None)
         let first = &resolved[0];
         let mut mismatch = false;
         for ty in &resolved[1..] {
@@ -3795,10 +4154,7 @@ fn check_branch_type_consistency(
         }
 
         if mismatch {
-            let type_names: Vec<String> = resolved
-                .iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
+            let type_names: Vec<String> = resolved.iter().map(|t| format!("{:?}", t)).collect();
             warnings.push(
                 Diagnostic::categorized_warning(
                     format!(
@@ -3814,36 +4170,23 @@ fn check_branch_type_consistency(
     }
 }
 
-/// Check if two types are compatible for branch consistency.
-/// Permissive: Unknown, Any, None are compatible with anything.
-/// TypeVars are compatible with anything (not yet resolved).
 fn types_compatible_for_branch(a: &TypeId, b: &TypeId) -> bool {
     use crate::types::core::Primitive;
     match (a, b) {
-        // Wildcard types are always compatible
         (TypeId::Unknown, _) | (_, TypeId::Unknown) => true,
         (TypeId::Primitive(Primitive::Any), _) | (_, TypeId::Primitive(Primitive::Any)) => true,
         (TypeId::Primitive(Primitive::None), _) | (_, TypeId::Primitive(Primitive::None)) => true,
         (TypeId::TypeVar(_), _) | (_, TypeId::TypeVar(_)) => true,
-        // Int and Float are compatible (numeric promotion)
+
         (TypeId::Primitive(Primitive::Int), TypeId::Primitive(Primitive::Float)) => true,
         (TypeId::Primitive(Primitive::Float), TypeId::Primitive(Primitive::Int)) => true,
-        // Same type
+
         _ => a == b,
     }
 }
 
-// ====================== T3.3: Nullability Tracking ======================
-
-/// Check functions whose return paths include both `none` and a non-none type.
-/// Emits a warning when a function may implicitly return `none` alongside a
-/// concrete type, indicating potential nullability issues.
-fn check_nullability_returns(
-    functions: &[Function],
-    warnings: &mut Vec<Diagnostic>,
-) {
+fn check_nullability_returns(functions: &[Function], warnings: &mut Vec<Diagnostic>) {
     for function in functions {
-        // Skip main — it's entry point, no meaningful return
         if function.name == "main" {
             continue;
         }
@@ -3851,7 +4194,6 @@ fn check_nullability_returns(
         let mut has_value_return = false;
         let mut none_span: Option<Span> = None;
 
-        // Check trailing block value
         if let Some(ref val) = function.body.value {
             if expr_is_none(val) {
                 has_none_return = true;
@@ -3861,7 +4203,6 @@ fn check_nullability_returns(
             }
         }
 
-        // Walk body for return statements
         collect_return_nullability(
             &function.body,
             &mut has_none_return,
@@ -3869,8 +4210,6 @@ fn check_nullability_returns(
             &mut none_span,
         );
 
-        // If function has no explicit returns and no trailing value, it returns
-        // unit implicitly — that's fine, not a nullability issue.
         if has_none_return && has_value_return {
             let span = none_span.unwrap_or(function.span);
             warnings.push(
@@ -3888,8 +4227,6 @@ fn check_nullability_returns(
     }
 }
 
-/// Walk a block's statements recursively to find return statements and
-/// classify them as none-returning or value-returning.
 fn collect_return_nullability(
     block: &Block,
     has_none: &mut bool,
@@ -3908,7 +4245,12 @@ fn collect_return_nullability(
                     *has_value = true;
                 }
             }
-            crate::ast::Statement::If { body, elif_branches, else_body, .. } => {
+            crate::ast::Statement::If {
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 collect_return_nullability(body, has_none, has_value, none_span);
                 for (_, blk) in elif_branches {
                     collect_return_nullability(blk, has_none, has_value, none_span);
@@ -3931,22 +4273,14 @@ fn collect_return_nullability(
     }
 }
 
-/// Check if an expression is the `none` literal.
 fn expr_is_none(expr: &Expression) -> bool {
     matches!(expr, Expression::None(_))
 }
 
-// ====================== T3.2: Definite Assignment Analysis ======================
-
-/// Check function bodies for variables that may be used before being
-/// definitely assigned on all execution paths.
-fn check_definite_assignment(
-    functions: &[Function],
-    warnings: &mut Vec<Diagnostic>,
-) {
+fn check_definite_assignment(functions: &[Function], warnings: &mut Vec<Diagnostic>) {
     for function in functions {
         let mut definitely_assigned: HashSet<String> = HashSet::new();
-        // Parameters are always assigned
+
         for param in &function.params {
             definitely_assigned.insert(param.name.clone());
         }
@@ -3954,12 +4288,7 @@ fn check_definite_assignment(
     }
 }
 
-/// Walk a block collecting definite assignments and checking uses.
-fn da_check_block(
-    block: &Block,
-    assigned: &mut HashSet<String>,
-    warnings: &mut Vec<Diagnostic>,
-) {
+fn da_check_block(block: &Block, assigned: &mut HashSet<String>, warnings: &mut Vec<Diagnostic>) {
     for stmt in &block.statements {
         da_check_statement(stmt, assigned, warnings);
     }
@@ -3975,9 +4304,8 @@ fn da_check_statement(
 ) {
     match stmt {
         Statement::Binding(binding) => {
-            // Check the RHS for uses first
             da_check_expression_uses(&binding.value, assigned, warnings);
-            // Then mark the LHS as assigned
+
             assigned.insert(binding.name.clone());
         }
         Statement::Expression(expr) => {
@@ -3986,9 +4314,15 @@ fn da_check_statement(
         Statement::Return(expr, _) => {
             da_check_expression_uses(expr, assigned, warnings);
         }
-        Statement::If { condition, body, elif_branches, else_body, .. } => {
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
             da_check_expression_uses(condition, assigned, warnings);
-            // Compute names assigned in each branch
+
             let mut then_assigned = assigned.clone();
             da_check_block(body, &mut then_assigned, warnings);
 
@@ -4007,8 +4341,6 @@ fn da_check_statement(
                 da_check_block(else_body, &mut else_assigned, warnings);
                 all_branches_assigned.push(else_assigned);
 
-                // Only if all branches (including else) exist:
-                // intersect to find names assigned on ALL paths
                 if !all_branches_assigned.is_empty() {
                     let intersection: HashSet<String> = all_branches_assigned[0]
                         .iter()
@@ -4018,16 +4350,26 @@ fn da_check_statement(
                     *assigned = intersection;
                 }
             }
-            // Without else: no new names are definitely assigned
         }
-        Statement::For { variable, iterable, body, .. } => {
+        Statement::For {
+            variable,
+            iterable,
+            body,
+            ..
+        } => {
             da_check_expression_uses(iterable, assigned, warnings);
             let mut loop_assigned = assigned.clone();
             loop_assigned.insert(variable.clone());
             da_check_block(body, &mut loop_assigned, warnings);
-            // After for: loop variable is not definitely assigned (loop may not execute)
         }
-        Statement::ForRange { variable, start, end, step, body, .. } => {
+        Statement::ForRange {
+            variable,
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
             da_check_expression_uses(start, assigned, warnings);
             da_check_expression_uses(end, assigned, warnings);
             if let Some(s) = step {
@@ -4037,14 +4379,22 @@ fn da_check_statement(
             loop_assigned.insert(variable.clone());
             da_check_block(body, &mut loop_assigned, warnings);
         }
-        Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+        Statement::ForKV {
+            key_var,
+            value_var,
+            iterable,
+            body,
+            ..
+        } => {
             da_check_expression_uses(iterable, assigned, warnings);
             let mut loop_assigned = assigned.clone();
             loop_assigned.insert(key_var.clone());
             loop_assigned.insert(value_var.clone());
             da_check_block(body, &mut loop_assigned, warnings);
         }
-        Statement::While { condition, body, .. } => {
+        Statement::While {
+            condition, body, ..
+        } => {
             da_check_expression_uses(condition, assigned, warnings);
             let mut loop_assigned = assigned.clone();
             da_check_block(body, &mut loop_assigned, warnings);
@@ -4060,7 +4410,6 @@ fn da_check_statement(
     }
 }
 
-/// Check an expression for uses of potentially-uninitialized variables.
 fn da_check_expression_uses(
     expr: &Expression,
     assigned: &HashSet<String>,
@@ -4068,7 +4417,6 @@ fn da_check_expression_uses(
 ) {
     match expr {
         Expression::Identifier(name, span) => {
-            // Only warn for simple lowercase names (not builtins, not type constructors)
             if !assigned.contains(name)
                 && !is_builtin_name(name)
                 && !name.is_empty()
@@ -4097,7 +4445,12 @@ fn da_check_expression_uses(
                 da_check_expression_uses(arg, assigned, warnings);
             }
         }
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             da_check_expression_uses(condition, assigned, warnings);
             da_check_expression_uses(then_branch, assigned, warnings);
             da_check_expression_uses(else_branch, assigned, warnings);
@@ -4116,24 +4469,17 @@ fn da_check_expression_uses(
                 da_check_expression_uses(v, assigned, warnings);
             }
         }
-        Expression::Lambda { .. } => {
-            // Lambdas capture their own scope — skip deep analysis
-        }
+        Expression::Lambda { .. } => {}
         _ => {}
     }
 }
 
-/// Check all function bodies for dead code after unconditional terminators.
-fn check_dead_code(
-    functions: &[Function],
-    warnings: &mut Vec<Diagnostic>,
-) {
+fn check_dead_code(functions: &[Function], warnings: &mut Vec<Diagnostic>) {
     for function in functions {
         check_block_for_dead_code(&function.body, warnings);
     }
 }
 
-/// Walk a block and warn on statements that follow an unconditional Return, Break, or Continue.
 fn check_block_for_dead_code(block: &Block, warnings: &mut Vec<Diagnostic>) {
     let mut terminated = false;
     let mut terminator_kind: &str = "";
@@ -4148,7 +4494,7 @@ fn check_block_for_dead_code(block: &Block, warnings: &mut Vec<Diagnostic>) {
                 )
                 .with_help("consider removing the unreachable statements"),
             );
-            // Only warn once per block — stop after first unreachable statement
+
             break;
         }
 
@@ -4168,18 +4514,21 @@ fn check_block_for_dead_code(block: &Block, warnings: &mut Vec<Diagnostic>) {
             _ => {}
         }
 
-        // Recurse into nested blocks
         check_statement_nested_blocks_for_dead_code(statement, warnings);
     }
 }
 
-/// Recurse into nested blocks within a statement to detect dead code.
 fn check_statement_nested_blocks_for_dead_code(
     statement: &Statement,
     warnings: &mut Vec<Diagnostic>,
 ) {
     match statement {
-        Statement::If { body, elif_branches, else_body, .. } => {
+        Statement::If {
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
             check_block_for_dead_code(body, warnings);
             for (_, blk) in elif_branches {
                 check_block_for_dead_code(blk, warnings);
@@ -4204,7 +4553,6 @@ fn check_statement_nested_blocks_for_dead_code(
     }
 }
 
-/// Check expressions that contain nested blocks (match, lambda) for dead code.
 fn check_expr_for_dead_code(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
     match expr {
         Expression::Match(match_expr) => {
@@ -4219,50 +4567,108 @@ fn check_expr_for_dead_code(expr: &Expression, warnings: &mut Vec<Diagnostic>) {
     }
 }
 
-/// CC5.2/S6: Check member accesses on store/type instances for validity.
-/// If a member access targets a known store constructor and the property
-/// is not a known field, emit a warning.
 fn check_member_access_validity(
     globals: &[Binding],
     functions: &[Function],
     store_field_names: &HashMap<String, Vec<String>>,
     warnings: &mut Vec<Diagnostic>,
 ) {
-    // Known method names that apply to all values — don't warn on these
     static UNIVERSAL_MEMBERS: &[&str] = &[
-        "length", "count", "size", "err", "push", "pop", "get", "set",
-        "append", "remove", "insert", "contains", "keys", "values", "clear",
-        "join", "map", "filter", "reduce", "find", "any", "all", "sort",
-        "equals", "not_equals", "not", "iter", "to_string", "type",
-        "trim", "split", "starts_with", "ends_with", "replace", "to_upper",
-        "to_lower", "chars", "bytes", "slice", "reverse", "flat_map",
-        "enumerate", "zip", "take", "skip", "head", "tail", "last",
-        "is_empty", "has_key", "entries",
+        "length",
+        "count",
+        "size",
+        "err",
+        "push",
+        "pop",
+        "get",
+        "set",
+        "append",
+        "remove",
+        "insert",
+        "contains",
+        "keys",
+        "values",
+        "clear",
+        "join",
+        "map",
+        "filter",
+        "reduce",
+        "find",
+        "any",
+        "all",
+        "sort",
+        "equals",
+        "not_equals",
+        "not",
+        "iter",
+        "to_string",
+        "type",
+        "trim",
+        "split",
+        "starts_with",
+        "ends_with",
+        "replace",
+        "to_upper",
+        "to_lower",
+        "chars",
+        "bytes",
+        "slice",
+        "reverse",
+        "flat_map",
+        "enumerate",
+        "zip",
+        "take",
+        "skip",
+        "head",
+        "tail",
+        "last",
+        "is_empty",
+        "has_key",
+        "entries",
     ];
 
-    // Track variable name → store type name
     let mut var_types: HashMap<String, String> = HashMap::new();
 
     for binding in globals {
         if let Some(store_name) = extract_store_type(&binding.value, store_field_names) {
             var_types.insert(binding.name.clone(), store_name);
         }
-        check_member_access_in_expr(&binding.value, store_field_names, UNIVERSAL_MEMBERS, &var_types, warnings);
+        check_member_access_in_expr(
+            &binding.value,
+            store_field_names,
+            UNIVERSAL_MEMBERS,
+            &var_types,
+            warnings,
+        );
     }
     for func in functions {
         let mut local_var_types = var_types.clone();
         for stmt in &func.body.statements {
             collect_store_bindings(stmt, store_field_names, &mut local_var_types);
-            check_member_access_in_statement(stmt, store_field_names, UNIVERSAL_MEMBERS, &local_var_types, warnings);
+            check_member_access_in_statement(
+                stmt,
+                store_field_names,
+                UNIVERSAL_MEMBERS,
+                &local_var_types,
+                warnings,
+            );
         }
         if let Some(ref val_expr) = func.body.value {
-            check_member_access_in_expr(val_expr, store_field_names, UNIVERSAL_MEMBERS, &local_var_types, warnings);
+            check_member_access_in_expr(
+                val_expr,
+                store_field_names,
+                UNIVERSAL_MEMBERS,
+                &local_var_types,
+                warnings,
+            );
         }
     }
 }
 
-/// If an expression is a call to `make_StoreName()`, return the store name.
-fn extract_store_type(expr: &Expression, store_field_names: &HashMap<String, Vec<String>>) -> Option<String> {
+fn extract_store_type(
+    expr: &Expression,
+    store_field_names: &HashMap<String, Vec<String>>,
+) -> Option<String> {
     if let Expression::Call { callee, .. } = expr {
         if let Expression::Identifier(name, _) = callee.as_ref() {
             let type_name = name.strip_prefix("make_")?;
@@ -4274,7 +4680,6 @@ fn extract_store_type(expr: &Expression, store_field_names: &HashMap<String, Vec
     None
 }
 
-/// Scan a statement for bindings to store constructors.
 fn collect_store_bindings(
     stmt: &Statement,
     store_field_names: &HashMap<String, Vec<String>>,
@@ -4299,38 +4704,150 @@ fn check_member_access_in_statement(
             check_member_access_in_expr(expr, store_field_names, universal, var_types, warnings);
         }
         Statement::Binding(binding) => {
-            check_member_access_in_expr(&binding.value, store_field_names, universal, var_types, warnings);
+            check_member_access_in_expr(
+                &binding.value,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
         }
-        Statement::If { condition, body, elif_branches, else_body, .. } => {
-            check_member_access_in_expr(condition, store_field_names, universal, var_types, warnings);
-            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
-            if let Some(ref v) = body.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
+            check_member_access_in_expr(
+                condition,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
+            for s in &body.statements {
+                check_member_access_in_statement(
+                    s,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+            }
+            if let Some(ref v) = body.value {
+                check_member_access_in_expr(v, store_field_names, universal, var_types, warnings);
+            }
             for (cond, block) in elif_branches {
-                check_member_access_in_expr(cond, store_field_names, universal, var_types, warnings);
-                for s in &block.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
-                if let Some(ref v) = block.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+                check_member_access_in_expr(
+                    cond,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+                for s in &block.statements {
+                    check_member_access_in_statement(
+                        s,
+                        store_field_names,
+                        universal,
+                        var_types,
+                        warnings,
+                    );
+                }
+                if let Some(ref v) = block.value {
+                    check_member_access_in_expr(
+                        v,
+                        store_field_names,
+                        universal,
+                        var_types,
+                        warnings,
+                    );
+                }
             }
             if let Some(block) = else_body {
-                for s in &block.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
-                if let Some(ref v) = block.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+                for s in &block.statements {
+                    check_member_access_in_statement(
+                        s,
+                        store_field_names,
+                        universal,
+                        var_types,
+                        warnings,
+                    );
+                }
+                if let Some(ref v) = block.value {
+                    check_member_access_in_expr(
+                        v,
+                        store_field_names,
+                        universal,
+                        var_types,
+                        warnings,
+                    );
+                }
             }
         }
         Statement::Return(expr, _) => {
             check_member_access_in_expr(expr, store_field_names, universal, var_types, warnings);
         }
-        Statement::While { condition, body, .. } => {
-            check_member_access_in_expr(condition, store_field_names, universal, var_types, warnings);
-            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+        Statement::While {
+            condition, body, ..
+        } => {
+            check_member_access_in_expr(
+                condition,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
+            for s in &body.statements {
+                check_member_access_in_statement(
+                    s,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+            }
         }
         Statement::For { iterable, body, .. } | Statement::ForKV { iterable, body, .. } => {
-            check_member_access_in_expr(iterable, store_field_names, universal, var_types, warnings);
-            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+            check_member_access_in_expr(
+                iterable,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
+            for s in &body.statements {
+                check_member_access_in_statement(
+                    s,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+            }
         }
-        Statement::ForRange { start, end, step, body, .. } => {
+        Statement::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
             check_member_access_in_expr(start, store_field_names, universal, var_types, warnings);
             check_member_access_in_expr(end, store_field_names, universal, var_types, warnings);
-            if let Some(s) = step { check_member_access_in_expr(s, store_field_names, universal, var_types, warnings); }
-            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
+            if let Some(s) = step {
+                check_member_access_in_expr(s, store_field_names, universal, var_types, warnings);
+            }
+            for s in &body.statements {
+                check_member_access_in_statement(
+                    s,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+            }
         }
         Statement::FieldAssign { target, value, .. } => {
             check_member_access_in_expr(target, store_field_names, universal, var_types, warnings);
@@ -4351,13 +4868,14 @@ fn check_member_access_in_expr(
     warnings: &mut Vec<Diagnostic>,
 ) {
     match expr {
-        Expression::Member { target, property, span } => {
-            // Check the target for nested member accesses first
+        Expression::Member {
+            target,
+            property,
+            span,
+        } => {
             check_member_access_in_expr(target, store_field_names, universal, var_types, warnings);
 
-            // Determine the store type name from the target expression
             let store_type = match target.as_ref() {
-                // Direct call: make_Point().z
                 Expression::Call { callee, .. } => {
                     if let Expression::Identifier(name, _) = callee.as_ref() {
                         name.strip_prefix("make_")
@@ -4366,10 +4884,8 @@ fn check_member_access_in_expr(
                         None
                     }
                 }
-                // Variable: p.z where p was bound to make_Point()
-                Expression::Identifier(var_name, _) => {
-                    var_types.get(var_name.as_str()).cloned()
-                }
+
+                Expression::Identifier(var_name, _) => var_types.get(var_name.as_str()).cloned(),
                 _ => None,
             };
 
@@ -4392,7 +4908,9 @@ fn check_member_access_in_expr(
         }
         Expression::Call { callee, args, .. } => {
             check_member_access_in_expr(callee, store_field_names, universal, var_types, warnings);
-            for arg in args { check_member_access_in_expr(arg, store_field_names, universal, var_types, warnings); }
+            for arg in args {
+                check_member_access_in_expr(arg, store_field_names, universal, var_types, warnings);
+            }
         }
         Expression::Binary { left, right, .. } => {
             check_member_access_in_expr(left, store_field_names, universal, var_types, warnings);
@@ -4401,17 +4919,48 @@ fn check_member_access_in_expr(
         Expression::Unary { expr, .. } => {
             check_member_access_in_expr(expr, store_field_names, universal, var_types, warnings);
         }
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
-            check_member_access_in_expr(condition, store_field_names, universal, var_types, warnings);
-            check_member_access_in_expr(then_branch, store_field_names, universal, var_types, warnings);
-            check_member_access_in_expr(else_branch, store_field_names, universal, var_types, warnings);
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            check_member_access_in_expr(
+                condition,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
+            check_member_access_in_expr(
+                then_branch,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
+            check_member_access_in_expr(
+                else_branch,
+                store_field_names,
+                universal,
+                var_types,
+                warnings,
+            );
         }
         Expression::Pipeline { left, right, .. } => {
             check_member_access_in_expr(left, store_field_names, universal, var_types, warnings);
             check_member_access_in_expr(right, store_field_names, universal, var_types, warnings);
         }
         Expression::List(items, _) => {
-            for item in items { check_member_access_in_expr(item, store_field_names, universal, var_types, warnings); }
+            for item in items {
+                check_member_access_in_expr(
+                    item,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+            }
         }
         Expression::Map(entries, _) => {
             for (k, v) in entries {
@@ -4424,18 +4973,23 @@ fn check_member_access_in_expr(
             check_member_access_in_expr(index, store_field_names, universal, var_types, warnings);
         }
         Expression::Lambda { body, .. } => {
-            for s in &body.statements { check_member_access_in_statement(s, store_field_names, universal, var_types, warnings); }
-            if let Some(ref v) = body.value { check_member_access_in_expr(v, store_field_names, universal, var_types, warnings); }
+            for s in &body.statements {
+                check_member_access_in_statement(
+                    s,
+                    store_field_names,
+                    universal,
+                    var_types,
+                    warnings,
+                );
+            }
+            if let Some(ref v) = body.value {
+                check_member_access_in_expr(v, store_field_names, universal, var_types, warnings);
+            }
         }
         _ => {}
     }
 }
 
-// ========== R2.7: Typed Actor Message Validation ==========
-
-/// Walk all function bodies looking for `actor_send(target, "handler_name", ...)` calls.
-/// If the target's actor has a `@messages(TypeName)` annotation, warn when the handler name
-/// is not one of the actor's defined `@handler` methods.
 fn validate_typed_actor_sends(
     functions: &[Function],
     globals: &[crate::ast::Binding],
@@ -4446,17 +5000,29 @@ fn validate_typed_actor_sends(
     if actor_message_types.is_empty() {
         return;
     }
-    // Track variable→actor_type across global bindings
+
     let mut var_types: HashMap<String, String> = HashMap::new();
     for global in globals {
         if let Some(atype) = trace_actor_type_from_expr(&global.value) {
             var_types.insert(global.name.clone(), atype);
         }
-        walk_typed_send_expr(&global.value, actor_handler_names, actor_message_types, &var_types, warnings);
+        walk_typed_send_expr(
+            &global.value,
+            actor_handler_names,
+            actor_message_types,
+            &var_types,
+            warnings,
+        );
     }
     for func in functions {
         let mut local_vars = var_types.clone();
-        walk_typed_send_block(&func.body, actor_handler_names, actor_message_types, &mut local_vars, warnings);
+        walk_typed_send_block(
+            &func.body,
+            actor_handler_names,
+            actor_message_types,
+            &mut local_vars,
+            warnings,
+        );
     }
 }
 
@@ -4476,12 +5042,21 @@ fn walk_typed_send_block(
                 }
                 walk_typed_send_expr(&b.value, h, m, vars, w);
             }
-            crate::ast::Statement::If { condition, body, else_body, .. } => {
+            crate::ast::Statement::If {
+                condition,
+                body,
+                else_body,
+                ..
+            } => {
                 walk_typed_send_expr(condition, h, m, vars, w);
                 walk_typed_send_block(body, h, m, vars, w);
-                if let Some(eb) = else_body { walk_typed_send_block(eb, h, m, vars, w); }
+                if let Some(eb) = else_body {
+                    walk_typed_send_block(eb, h, m, vars, w);
+                }
             }
-            crate::ast::Statement::While { condition, body, .. } => {
+            crate::ast::Statement::While {
+                condition, body, ..
+            } => {
                 walk_typed_send_expr(condition, h, m, vars, w);
                 walk_typed_send_block(body, h, m, vars, w);
             }
@@ -4505,18 +5080,19 @@ fn walk_typed_send_expr(
     w: &mut Vec<Diagnostic>,
 ) {
     match expr {
-        Expression::Call { callee, args, span, .. } => {
+        Expression::Call {
+            callee, args, span, ..
+        } => {
             if let Expression::Identifier(name, _) = callee.as_ref() {
                 if name == "actor_send" && args.len() >= 2 {
                     if let Expression::String(handler, _) = &args[1] {
-                        let actor_name = trace_actor_type_from_expr(&args[0])
-                            .or_else(|| {
-                                if let Expression::Identifier(var, _) = &args[0] {
-                                    vars.get(var).cloned()
-                                } else {
-                                    None
-                                }
-                            });
+                        let actor_name = trace_actor_type_from_expr(&args[0]).or_else(|| {
+                            if let Expression::Identifier(var, _) = &args[0] {
+                                vars.get(var).cloned()
+                            } else {
+                                None
+                            }
+                        });
                         if let Some(actor_name) = actor_name {
                             if m.contains_key(&actor_name) {
                                 if let Some(known) = h.get(&actor_name) {
@@ -4537,9 +5113,16 @@ fn walk_typed_send_expr(
                 }
             }
             walk_typed_send_expr(callee, h, m, vars, w);
-            for arg in args { walk_typed_send_expr(arg, h, m, vars, w); }
+            for arg in args {
+                walk_typed_send_expr(arg, h, m, vars, w);
+            }
         }
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             walk_typed_send_expr(condition, h, m, vars, w);
             walk_typed_send_expr(then_branch, h, m, vars, w);
             walk_typed_send_expr(else_branch, h, m, vars, w);
@@ -4552,7 +5135,6 @@ fn walk_typed_send_expr(
     }
 }
 
-/// Try to infer actor type name from an expression (e.g. `make_Counter()` → `"Counter"`).
 fn trace_actor_type_from_expr(expr: &Expression) -> Option<String> {
     if let Expression::Call { callee, .. } = expr {
         if let Expression::Identifier(name, _) = callee.as_ref() {

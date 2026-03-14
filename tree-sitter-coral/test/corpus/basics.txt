@@ -1,0 +1,290 @@
+================================================================================
+Hello World
+================================================================================
+
+*main()
+    log('hello')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content))))))))
+
+================================================================================
+Bindings
+================================================================================
+
+*main()
+    x is 42
+    name is 'world'
+    pi is 3.14
+    flag is true
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (integer))
+      (binding
+        name: (identifier)
+        value: (template_string
+          (template_content)))
+      (binding
+        name: (identifier)
+        value: (float))
+      (binding
+        name: (identifier)
+        value: (true)))))
+
+================================================================================
+Binary Expressions
+================================================================================
+
+*main()
+    x is 1 + 2
+    y is x * 3
+    z is x > y
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (binary_expression
+          left: (integer)
+          operator: (operator)
+          right: (integer)))
+      (binding
+        name: (identifier)
+        value: (binary_expression
+          left: (identifier)
+          operator: (operator)
+          right: (integer)))
+      (binding
+        name: (identifier)
+        value: (binary_expression
+          left: (identifier)
+          operator: (operator)
+          right: (identifier))))))
+
+================================================================================
+Function Call
+================================================================================
+
+*greet(name)
+    log('Hello ' + name)
+
+*main()
+    greet('Alice')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (binary_expression
+              left: (template_string
+                (template_content))
+              operator: (operator)
+              right: (identifier)))))))
+  (function_definition
+    name: (identifier)
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content))))))))
+
+================================================================================
+If Expression
+================================================================================
+
+*main()
+    x is 5
+    if x > 3
+        log('big')
+    elif x > 1
+        log('medium')
+    else
+        log('small')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (integer))
+      (if_statement
+        condition: (binary_expression
+          left: (identifier)
+          operator: (operator)
+          right: (integer))
+        body: (block
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (template_string
+                  (template_content))))))
+        (elif_clause
+          condition: (binary_expression
+            left: (identifier)
+            operator: (operator)
+            right: (integer))
+          body: (block
+            (expression_statement
+              (call_expression
+                function: (identifier)
+                arguments: (argument_list
+                  (template_string
+                    (template_content)))))))
+        (else_clause
+          body: (block
+            (expression_statement
+              (call_expression
+                function: (identifier)
+                arguments: (argument_list
+                  (template_string
+                    (template_content)))))))))))
+
+================================================================================
+While Loop
+================================================================================
+
+*main()
+    i is 0
+    while i < 5
+        log(i)
+        i is i + 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (integer))
+      (while_statement
+        condition: (binary_expression
+          left: (identifier)
+          operator: (operator)
+          right: (integer))
+        body: (block
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (identifier))))
+          (binding
+            name: (identifier)
+            value: (binary_expression
+              left: (identifier)
+              operator: (operator)
+              right: (integer))))))))
+
+================================================================================
+List Literal
+================================================================================
+
+*main()
+    items is [1, 2, 3]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (list_literal
+          (integer)
+          (integer)
+          (integer))))))
+
+================================================================================
+Template String Interpolation
+================================================================================
+
+*main()
+    name is 'world'
+    log('hello ${name}!')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (template_string
+          (template_content)))
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content)
+              (template_interpolation
+                (identifier))
+              (template_content))))))))
+
+================================================================================
+Ternary Expression
+================================================================================
+
+*main()
+    x is 5
+    result is x > 3 ? 'big' ! 'small'
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (integer))
+      (binding
+        name: (identifier)
+        value: (ternary_expression
+          condition: (binary_expression
+            left: (identifier)
+            operator: (operator)
+            right: (integer))
+          consequence: (template_string
+            (template_content))
+          alternative: (template_string
+            (template_content)))))))

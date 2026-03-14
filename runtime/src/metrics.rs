@@ -1,27 +1,23 @@
-//! Runtime metrics and stack frame operations.
-
 use crate::*;
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_heap_alloc(size: usize) -> *mut c_void {
     unsafe { malloc(size) }
 }
 
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coral_heap_free(ptr: *mut c_void) {
     if !ptr.is_null() {
-        unsafe { free(ptr); }
+        unsafe {
+            free(ptr);
+        }
     }
 }
-
 
 fn align_up(value: usize, align: usize) -> usize {
     let align = align.max(1);
     (value + align - 1) & !(align - 1)
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_stack_frame_enter(pages: usize) {
@@ -33,12 +29,12 @@ pub extern "C" fn coral_stack_frame_enter(pages: usize) {
     record_heap_bytes(std::mem::size_of::<StackFrame>() + size);
     record_usage(UsageKind::StackAllocSuccess, size as u64);
     STACK_FRAMES.with(|frames| {
-        frames
-            .borrow_mut()
-            .push(StackFrame { buffer: vec![0u8; size], cursor: 0 });
+        frames.borrow_mut().push(StackFrame {
+            buffer: vec![0u8; size],
+            cursor: 0,
+        });
     });
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_stack_frame_leave() {
@@ -46,7 +42,6 @@ pub extern "C" fn coral_stack_frame_leave() {
         frames.borrow_mut().pop();
     });
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_stack_alloc(size: usize, align: usize) -> *mut c_void {
@@ -71,24 +66,20 @@ pub extern "C" fn coral_stack_alloc(size: usize, align: usize) -> *mut c_void {
     })
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_runtime_retain_count() -> u64 {
     RETAIN_COUNT.load(Ordering::Relaxed)
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_runtime_release_count() -> u64 {
     RELEASE_COUNT.load(Ordering::Relaxed)
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_runtime_live_values() -> u64 {
     LIVE_VALUE_COUNT.load(Ordering::Relaxed)
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_runtime_stats(out: *mut CoralRuntimeStats) {
@@ -105,7 +96,6 @@ pub extern "C" fn coral_runtime_stats(out: *mut CoralRuntimeStats) {
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_runtime_metrics(out: *mut CoralRuntimeMetrics) {
     if out.is_null() {
@@ -115,7 +105,6 @@ pub extern "C" fn coral_runtime_metrics(out: *mut CoralRuntimeMetrics) {
         *out = snapshot_runtime_metrics();
     }
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_metrics(value: ValueHandle, out: *mut CoralHandleMetrics) {
@@ -138,7 +127,6 @@ pub extern "C" fn coral_value_metrics(value: ValueHandle, out: *mut CoralHandleM
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_runtime_metrics_dump(path: *const u8, len: usize) {
     if path.is_null() || len == 0 {
@@ -155,7 +143,6 @@ pub extern "C" fn coral_runtime_metrics_dump(path: *const u8, len: usize) {
         }
     }
 }
-
 
 pub(crate) fn snapshot_runtime_metrics() -> CoralRuntimeMetrics {
     CoralRuntimeMetrics {
@@ -176,14 +163,12 @@ pub(crate) fn snapshot_runtime_metrics() -> CoralRuntimeMetrics {
     }
 }
 
-
 fn metrics_timestamp_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
         .unwrap_or(0)
 }
-
 
 pub(crate) fn metrics_json(metrics: &CoralRuntimeMetrics) -> String {
     format!(
@@ -204,4 +189,3 @@ pub(crate) fn metrics_json(metrics: &CoralRuntimeMetrics) -> String {
         metrics.stack_bytes
     )
 }
-

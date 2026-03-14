@@ -55,8 +55,8 @@ use lexer
 *make_unary_expr(op, expr, span)
 	return map("kind" is "unary", "op" is op, "expr" is expr, "span" is span)
 
-*make_call_expr(callee, args, span)
-	return map("kind" is "call", "callee" is callee, "args" is args, "span" is span)
+*make_call_expr(callee, args, arg_names, span)
+	return map("kind" is "call", "callee" is callee, "args" is args, "arg_names" is arg_names, "span" is span)
 
 *make_member_expr(target, property, span)
 	return map("kind" is "member", "target" is target, "property" is property, "span" is span)
@@ -128,8 +128,8 @@ use lexer
 *make_extern_function_item(name, params, span)
 	return map("kind" is "extern_function", "name" is name, "params" is params, "span" is span)
 
-*make_type_item(name, traits, fields, methods, variants, span)
-	return map("kind" is "type_def", "name" is name, "traits" is traits, "fields" is fields, "methods" is methods, "variants" is variants, "span" is span)
+*make_type_item(name, type_params, traits, fields, methods, variants, span)
+	return map("kind" is "type_def", "name" is name, "type_params" is type_params, "traits" is traits, "fields" is fields, "methods" is methods, "variants" is variants, "span" is span)
 
 *make_store_item(name, traits, fields, methods, is_actor, is_persistent, span)
 	return map("kind" is "store_def", "name" is name, "traits" is traits, "fields" is fields, "methods" is methods, "is_actor" is is_actor, "is_persistent" is is_persistent, "span" is span)
@@ -149,8 +149,8 @@ use lexer
 *make_block(statements, value, span)
 	return map("kind" is "block", "statements" is statements, "value" is value, "span" is span)
 
-*make_match_arm(pattern, body)
-	return map("kind" is "match_arm", "pattern" is pattern, "body" is body)
+*make_match_arm(pattern, guard, body)
+	return map("kind" is "match_arm", "pattern" is pattern, "guard" is guard, "body" is body)
 
 *make_variant(name, fields, span)
 	return map("kind" is "variant", "name" is name, "fields" is fields, "span" is span)
@@ -180,6 +180,58 @@ use lexer
 
 *make_template_expr(parts, span)
 	return map("kind" is "template", "parts" is parts, "span" is span)
+
+# ── New expression nodes for parity ─────────────────────────────────
+
+*make_spread_expr(expr, span)
+	return map("kind" is "spread", "expr" is expr, "span" is span)
+
+*make_list_comprehension_expr(body, variable, iterable, condition, span)
+	return map("kind" is "list_comprehension", "body" is body, "variable" is variable, "iterable" is iterable, "condition" is condition, "span" is span)
+
+*make_map_comprehension_expr(key, value, variable, iterable, condition, span)
+	return map("kind" is "map_comprehension", "key" is key, "value" is value, "variable" is variable, "iterable" is iterable, "condition" is condition, "span" is span)
+
+*make_slice_expr(target, start, end_expr, span)
+	return map("kind" is "slice", "target" is target, "start" is start, "end" is end_expr, "span" is span)
+
+*make_unsafe_expr(block, span)
+	return map("kind" is "unsafe", "block" is block, "span" is span)
+
+*make_inline_asm_expr(template, inputs, outputs, span)
+	return map("kind" is "inline_asm", "template" is template, "inputs" is inputs, "outputs" is outputs, "span" is span)
+
+*make_ptr_load_expr(address, span)
+	return map("kind" is "ptr_load", "address" is address, "span" is span)
+
+# ── New statement nodes ─────────────────────────────────────────────
+
+*make_pattern_binding_stmt(pattern, value, span)
+	return map("kind" is "pattern_binding", "pattern" is pattern, "value" is value, "span" is span)
+
+*make_field_assign_stmt(target, field, value, span)
+	return map("kind" is "field_assign", "target" is target, "field" is field, "value" is value, "span" is span)
+
+# ── New item nodes ──────────────────────────────────────────────────
+
+*make_extension_item(target_type, methods, span)
+	return map("kind" is "extension", "target_type" is target_type, "methods" is methods, "span" is span)
+
+# ── New match pattern nodes ─────────────────────────────────────────
+
+*make_pat_or(alternatives)
+	return map("kind" is "pat_or", "alternatives" is alternatives)
+
+*make_pat_range(start, end_val, span)
+	return map("kind" is "pat_range", "start" is start, "end" is end_val, "span" is span)
+
+*make_pat_rest(name, span)
+	return map("kind" is "pat_rest", "name" is name, "span" is span)
+
+# ── Type parameters ─────────────────────────────────────────────────
+
+*make_type_param(name, bounds, is_const)
+	return map("kind" is "type_param", "name" is name, "bounds" is bounds, "is_const" is is_const)
 
 # ─── Parser State ───────────────────────────────────────────────────
 
@@ -301,6 +353,8 @@ use lexer
 		return true
 	if kind is "keyword_persist"
 		return true
+	if kind is "keyword_extend"
+		return true
 	return false
 
 *synchronize_to_item(p)
@@ -373,6 +427,9 @@ use lexer
 
 	if kind is "keyword_use"
 		return parse_use_statement(p)
+
+	if kind is "keyword_extend"
+		return parse_extension_def(p)
 
 	# Identifier — could be binding or expression
 	if kind is "identifier"
@@ -583,11 +640,23 @@ use lexer
 		expect_newline(p)
 		return make_expression_stmt(expr)
 
-	# Identifier — binding or expression
+	# Identifier — binding or expression (or field assign)
 	if kind is "identifier"
 		if peek_is_binding(p)
 			return parse_binding(p)
 		expr is parse_expression(p)
+		# Check for field assignment: expr.field is value
+		if expr.get("kind") is "member" and current_kind(p) is "keyword_is"
+			advance_parser(p)
+			value is parse_expression(p)
+			expect_newline(p)
+			return make_field_assign_stmt(expr.get("target"), expr.get("property"), value, make_span(0, 0))
+		# Check for index assignment: expr[idx] is value
+		if expr.get("kind") is "index" and current_kind(p) is "keyword_is"
+			advance_parser(p)
+			value is parse_expression(p)
+			expect_newline(p)
+			return make_field_assign_stmt(expr.get("target"), expr.get("index"), value, make_span(0, 0))
 		expect_newline(p)
 		return make_expression_stmt(expr)
 
@@ -926,17 +995,36 @@ use lexer
 
 	return parse_postfix(p)
 
-# Postfix: call, member access, index
+# Postfix: call, member access, index, slice, do..end
 *parse_postfix(p)
 	expr is parse_primary(p)
 
 	while true
 		kind is current_kind(p)
 
-		# Function call: expr(args)
+		# Function call: expr(args)  or  expr(args) do ... end
 		if kind is "lparen"
-			args is parse_arg_list(p)
-			expr is make_call_expr(expr, args, make_span(0, 0))
+			result is parse_arg_list(p)
+			args is result.get("args")
+			arg_names is result.get("arg_names")
+
+			# Check for trailing do..end block
+			saved_pos is p.get("pos")
+			skip_newlines(p)
+			if current_kind(p) is "keyword_do"
+				do_block is parse_do_end_block(p)
+				args.push(do_block)
+				if arg_names.length() > 0
+					arg_names.push(none)
+			else
+				p.set("pos", saved_pos)
+			expr is make_call_expr(expr, args, arg_names, make_span(0, 0))
+			continue
+
+		# Bare do..end block: expr do ... end
+		if kind is "keyword_do"
+			do_block is parse_do_end_block(p)
+			expr is make_call_expr(expr, [do_block], [], make_span(0, 0))
 			continue
 
 		# Member access: expr.name
@@ -948,12 +1036,18 @@ use lexer
 			expr is make_member_expr(expr, name, make_span(0, 0))
 			continue
 
-		# Index: expr[index]
+		# Index or slice: expr[index] or expr[start to end]
 		if kind is "lbracket"
 			advance_parser(p)
-			index is parse_expression(p)
-			expect(p, "rbracket")
-			expr is make_index_expr(expr, index, make_span(0, 0))
+			start_expr is parse_expression(p)
+			if current_kind(p) is "keyword_to"
+				advance_parser(p)
+				end_expr is parse_expression(p)
+				expect(p, "rbracket")
+				expr is make_slice_expr(expr, start_expr, end_expr, make_span(0, 0))
+			else
+				expect(p, "rbracket")
+				expr is make_index_expr(expr, start_expr, make_span(0, 0))
 			continue
 
 		break
@@ -962,35 +1056,118 @@ use lexer
 
 *parse_arg_list(p)
 	args is []
+	arg_names is []
+	seen_named is false
 	expect(p, "lparen")
 
 	# Support multiline args
 	skip_newlines(p)
 
-	while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
-		# Handle indented multiline args  
+	if current_kind(p) is "rparen"
+		expect(p, "rparen")
+		return map("args" is args, "arg_names" is arg_names)
+
+	is_indented is false
+	if current_kind(p) is "newline"
+		advance_parser(p)
 		if current_kind(p) is "indent"
 			consume_indent(p)
-			while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
-				skip_newlines(p)
-				if current_kind(p) is "dedent"
-					break
-				arg is parse_expression(p)
-				args.push(arg)
-				if current_kind(p) is "comma"
-					advance_parser(p)
-				skip_newlines(p)
-			consume_dedent(p)
-			break
+			is_indented is true
 
-		arg is parse_expression(p)
-		args.push(arg)
+	while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+		if is_indented
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				consume_dedent(p)
+				break
+
+		# Check for named argument: identifier : value
+		is_named is false
+		if current_kind(p) is "identifier"
+			next is peek_token(p, 1)
+			if next.get("kind") is "colon"
+				is_named is true
+
+		if is_named
+			name_tok is current_token(p)
+			advance_parser(p)
+			advance_parser(p)
+			value is parse_expression(p)
+			args.push(value)
+			arg_names.push(name_tok.get("value"))
+			seen_named is true
+		else
+			# Handle indented multiline args
+			if current_kind(p) is "indent"
+				consume_indent(p)
+				while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+					skip_newlines(p)
+					if current_kind(p) is "dedent"
+						break
+					arg is parse_expression(p)
+					args.push(arg)
+					arg_names.push(none)
+					if current_kind(p) is "comma"
+						advance_parser(p)
+					skip_newlines(p)
+				consume_dedent(p)
+				break
+			arg is parse_expression(p)
+			args.push(arg)
+			arg_names.push(none)
+
 		if current_kind(p) is "comma"
 			advance_parser(p)
 		skip_newlines(p)
 
+	if is_indented
+		skip_newlines(p)
+		if current_kind(p) is "dedent"
+			consume_dedent(p)
+
 	expect(p, "rparen")
-	return args
+
+	# Clear arg_names if no named args were used
+	if seen_named is false
+		arg_names is []
+
+	return map("args" is args, "arg_names" is arg_names)
+
+# ─── Do..End Block ──────────────────────────────────────────────────
+
+*parse_do_end_block(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	stmts is []
+	trailing_value is none
+
+	skip_newlines(p)
+	if current_kind(p) is "indent"
+		consume_indent(p)
+
+	while current_kind(p) isnt "keyword_end" and current_kind(p) isnt "eof"
+		skip_newlines(p)
+		if current_kind(p) is "keyword_end"
+			break
+		if current_kind(p) is "dedent"
+			consume_dedent(p)
+			skip_newlines(p)
+			break
+		stmt is parse_statement(p)
+		if stmt.get("kind") is "expression_stmt"
+			if trailing_value isnt none
+				stmts.push(make_expression_stmt(trailing_value))
+			trailing_value is stmt.get("expr")
+		else
+			if trailing_value isnt none
+				stmts.push(make_expression_stmt(trailing_value))
+				trailing_value is none
+			stmts.push(stmt)
+		skip_newlines(p)
+
+	expect(p, "keyword_end")
+	body is make_block(stmts, trailing_value, make_span(start, current_token(p).get("start")))
+	return make_lambda_expr([], body, make_span(start, current_token(p).get("start")))
 
 # ─── Primary Expressions ───────────────────────────────────────────
 
@@ -1085,6 +1262,20 @@ use lexer
 	if kind is "keyword_err"
 		return parse_error_value(p)
 
+	# Unsafe block: unsafe ... (indented block)
+	if kind is "keyword_unsafe"
+		return parse_unsafe_block(p)
+
+	# Inline assembly: asm("template", constraint: value, ...)
+	if kind is "keyword_asm"
+		return parse_inline_asm(p)
+
+	# Pointer load: ptr expr
+	if kind is "keyword_ptr"
+		advance_parser(p)
+		address is parse_primary(p)
+		return make_ptr_load_expr(address, make_span(tok.get("start"), current_token(p).get("start")))
+
 	# Fallback — unexpected token
 	record_error(p, "unexpected token: " + kind)
 	advance_parser(p)
@@ -1170,26 +1361,58 @@ use lexer
 
 	skip_newlines(p)
 
+	if current_kind(p) is "rbracket"
+		expect(p, "rbracket")
+		return make_list_expr(items, make_span(start, current_token(p).get("start")))
+
+	is_indented is false
+	if current_kind(p) is "indent"
+		consume_indent(p)
+		is_indented is true
+
 	while current_kind(p) isnt "rbracket" and current_kind(p) isnt "eof"
-		if current_kind(p) is "indent"
-			consume_indent(p)
-			while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+		if is_indented
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				consume_dedent(p)
+				break
+
+		# Spread: ...expr
+		if current_kind(p) is "ellipsis"
+			spread_start is current_token(p).get("start")
+			advance_parser(p)
+			inner is parse_expression(p)
+			items.push(make_spread_expr(inner, make_span(spread_start, current_token(p).get("start"))))
+		else
+			items.push(parse_expression(p))
+
+		# Check for list comprehension after first item: [expr for var in iterable]
+		if items.length() is 1 and current_kind(p) is "keyword_for"
+			advance_parser(p)
+			var_tok is expect(p, "identifier")
+			var_name is var_tok.get("value")
+			expect(p, "keyword_in")
+			iterable is parse_expression(p)
+			condition is none
+			if current_kind(p) is "keyword_if"
+				advance_parser(p)
+				condition is parse_expression(p)
+			if is_indented
 				skip_newlines(p)
 				if current_kind(p) is "dedent"
-					break
-				item is parse_expression(p)
-				items.push(item)
-				if current_kind(p) is "comma"
-					advance_parser(p)
-				skip_newlines(p)
-			consume_dedent(p)
-			break
+					consume_dedent(p)
+			expect(p, "rbracket")
+			return make_list_comprehension_expr(items[0], var_name, iterable, condition, make_span(start, current_token(p).get("start")))
 
-		item is parse_expression(p)
-		items.push(item)
+		skip_newlines(p)
 		if current_kind(p) is "comma"
 			advance_parser(p)
 		skip_newlines(p)
+
+	if is_indented
+		skip_newlines(p)
+		if current_kind(p) is "dedent"
+			consume_dedent(p)
 
 	expect(p, "rbracket")
 	return make_list_expr(items, make_span(start, current_token(p).get("start")))
@@ -1204,26 +1427,52 @@ use lexer
 
 	skip_newlines(p)
 
+	if current_kind(p) is "rparen"
+		expect(p, "rparen")
+		return make_map_expr(entries, make_span(start, current_token(p).get("start")))
+
+	is_indented is false
+	if current_kind(p) is "indent"
+		consume_indent(p)
+		is_indented is true
+
 	while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
-		if current_kind(p) is "indent"
-			consume_indent(p)
-			while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
-				skip_newlines(p)
-				if current_kind(p) is "dedent"
-					break
-				entry is parse_map_entry(p)
-				entries.push(entry)
-				if current_kind(p) is "comma"
-					advance_parser(p)
-				skip_newlines(p)
-			consume_dedent(p)
-			break
+		if is_indented
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				consume_dedent(p)
+				break
 
 		entry is parse_map_entry(p)
 		entries.push(entry)
+
+		# Check for map comprehension after first entry
+		if entries.length() is 1 and current_kind(p) is "keyword_for"
+			advance_parser(p)
+			var_tok is expect(p, "identifier")
+			var_name is var_tok.get("value")
+			expect(p, "keyword_in")
+			iterable is parse_expression(p)
+			condition is none
+			if current_kind(p) is "keyword_if"
+				advance_parser(p)
+				condition is parse_expression(p)
+			if is_indented
+				skip_newlines(p)
+				if current_kind(p) is "dedent"
+					consume_dedent(p)
+			expect(p, "rparen")
+			first_entry is entries[0]
+			return make_map_comprehension_expr(first_entry[0], first_entry[1], var_name, iterable, condition, make_span(start, current_token(p).get("start")))
+
 		if current_kind(p) is "comma"
 			advance_parser(p)
 		skip_newlines(p)
+
+	if is_indented
+		skip_newlines(p)
+		if current_kind(p) is "dedent"
+			consume_dedent(p)
 
 	expect(p, "rparen")
 	return make_map_expr(entries, make_span(start, current_token(p).get("start")))
@@ -1265,17 +1514,32 @@ use lexer
 				skip_newlines(p)
 				continue
 
-			# Pattern arm: | pattern ? expr  (or just pattern ? expr)
+			# Pattern arm: | pattern [or pattern]* [if guard] ? expr
 			if current_kind(p) is "pipe"
 				advance_parser(p)
 
 			pat is parse_pattern(p)
+
+			# Or-patterns: pattern or pattern or ...
+			if current_kind(p) is "keyword_or"
+				alternatives is [pat]
+				while current_kind(p) is "keyword_or"
+					advance_parser(p)
+					alternatives.push(parse_pattern(p))
+				pat is make_pat_or(alternatives)
+
+			# Optional guard: if condition
+			guard is none
+			if current_kind(p) is "keyword_if"
+				advance_parser(p)
+				guard is parse_expression(p)
+
 			expect(p, "question")
 
 			# Arm body can be single-line expr or indented block
 			arm_body is parse_match_arm_body(p)
 
-			arms.push(make_match_arm(pat, arm_body))
+			arms.push(make_match_arm(pat, guard, arm_body))
 			skip_newlines(p)
 
 		consume_dedent(p)
@@ -1344,10 +1608,17 @@ use lexer
 	kind is current_kind(p)
 	tok is current_token(p)
 
-	# Integer pattern
+	# Integer pattern (with optional range: 1 to 5)
 	if kind is "integer"
 		advance_parser(p)
-		return make_pat_integer(parse_number(tok.get("value")))
+		val is parse_number(tok.get("value"))
+		if current_kind(p) is "keyword_to"
+			advance_parser(p)
+			end_tok is current_token(p)
+			advance_parser(p)
+			end_val is parse_number(end_tok.get("value"))
+			return make_pat_range(val, end_val, make_span(tok.get("start"), end_tok.get("end")))
+		return make_pat_integer(val)
 
 	# Negative integer
 	if kind is "minus"
@@ -1370,7 +1641,16 @@ use lexer
 		advance_parser(p)
 		return make_pat_string(tok.get("value"))
 
-	# List pattern: [a, b, c]
+	# Rest pattern: ...name
+	if kind is "ellipsis"
+		advance_parser(p)
+		rest_name is "_"
+		if current_kind(p) is "identifier"
+			rest_name is current_token(p).get("value")
+			advance_parser(p)
+		return make_pat_rest(rest_name, make_span(tok.get("start"), current_token(p).get("start")))
+
+	# List pattern: [a, b, c] or [head, ...rest]
 	if kind is "lbracket"
 		start_pos is tok.get("start")
 		advance_parser(p)
@@ -1470,6 +1750,9 @@ use lexer
 	name_tok is expect(p, "identifier")
 	name is name_tok.get("value")
 
+	# Optional type parameters: [T, U with Trait]
+	type_params is parse_type_params(p)
+
 	# Optional: with Trait1, Trait2
 	traits is parse_with_traits(p)
 
@@ -1505,7 +1788,7 @@ use lexer
 
 		consume_dedent(p)
 
-	return make_type_item(name, traits, fields, methods, variants, make_span(start, current_token(p).get("start")))
+	return make_type_item(name, type_params, traits, fields, methods, variants, make_span(start, current_token(p).get("start")))
 
 *parse_enum_def(p)
 	# enum is like type but expects variants
@@ -1544,7 +1827,7 @@ use lexer
 
 		consume_dedent(p)
 
-	return make_type_item(name, [], [], methods, variants, make_span(start, current_token(p).get("start")))
+	return make_type_item(name, [], [], [], methods, variants, make_span(start, current_token(p).get("start")))
 
 *parse_variant(p)
 	start is current_token(p).get("start")
@@ -1774,6 +2057,121 @@ use lexer
 	expect_newline(p)
 
 	return make_extern_function_item(name, params, make_span(start, current_token(p).get("start")))
+
+# ─── Type Parameters ───────────────────────────────────────────────
+
+*parse_type_params(p)
+	if current_kind(p) isnt "lbracket"
+		return []
+	advance_parser(p)
+	params is []
+
+	while current_kind(p) isnt "rbracket" and current_kind(p) isnt "eof"
+		# const parameter
+		if current_kind(p) is "keyword_const"
+			advance_parser(p)
+			name_tok is expect(p, "identifier")
+			params.push(make_type_param(name_tok.get("value"), [], true))
+		else
+			name_tok is expect(p, "identifier")
+			param_name is name_tok.get("value")
+			bounds is []
+			if current_kind(p) is "keyword_with"
+				advance_parser(p)
+				while true
+					bound_tok is expect(p, "identifier")
+					bounds.push(bound_tok.get("value"))
+					if current_kind(p) isnt "keyword_with"
+						break
+					advance_parser(p)
+			params.push(make_type_param(param_name, bounds, false))
+
+		if current_kind(p) is "comma"
+			advance_parser(p)
+		else
+			break
+
+	expect(p, "rbracket")
+	return params
+
+# ─── Extension Definition ──────────────────────────────────────────
+
+*parse_extension_def(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+
+	target_tok is expect(p, "identifier")
+	target_type is target_tok.get("value")
+
+	skip_newlines(p)
+	methods is []
+
+	if consume_indent(p)
+		while current_kind(p) isnt "dedent" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "dedent"
+				break
+			if current_kind(p) is "star"
+				m is parse_function(p, "method")
+				methods.push(m)
+				skip_newlines(p)
+				continue
+			record_error(p, "expected method definition in extension body")
+			advance_parser(p)
+			skip_newlines(p)
+		consume_dedent(p)
+
+	return make_extension_item(target_type, methods, make_span(start, current_token(p).get("start")))
+
+# ─── Unsafe Block ──────────────────────────────────────────────────
+
+*parse_unsafe_block(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	skip_newlines(p)
+	block is parse_block(p)
+	return make_unsafe_expr(block, make_span(start, current_token(p).get("start")))
+
+# ─── Inline Assembly ───────────────────────────────────────────────
+
+*parse_inline_asm(p)
+	start is current_token(p).get("start")
+	advance_parser(p)
+	expect(p, "lparen")
+
+	template_tok is current_token(p)
+	template is template_tok.get("value")
+	advance_parser(p)
+
+	inputs is []
+	outputs is []
+
+	if current_kind(p) is "comma"
+		advance_parser(p)
+		while current_kind(p) isnt "rparen" and current_kind(p) isnt "eof"
+			skip_newlines(p)
+			if current_kind(p) is "rparen"
+				break
+			constraint_tok is current_token(p)
+			constraint is constraint_tok.get("value")
+			advance_parser(p)
+			expect(p, "colon")
+			expr is parse_expression(p)
+			inputs.push(map("constraint" is constraint, "expr" is expr))
+			if current_kind(p) is "comma"
+				advance_parser(p)
+
+	expect(p, "rparen")
+	return make_inline_asm_expr(template, inputs, outputs, make_span(start, current_token(p).get("start")))
+
+# ─── Pattern Binding Statement ──────────────────────────────────────
+
+*parse_pattern_binding(p)
+	start is current_token(p).get("start")
+	pattern is parse_pattern(p)
+	expect(p, "keyword_is")
+	value is parse_expression(p)
+	return make_pattern_binding_stmt(pattern, value, make_span(start, current_token(p).get("start")))
 
 # ─── AST Display Helpers ───────────────────────────────────────────
 

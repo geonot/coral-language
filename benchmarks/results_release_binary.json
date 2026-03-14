@@ -1,0 +1,199 @@
+{
+  "mode": "release",
+  "execution": "binary",
+  "runs": 3,
+  "benchmarks": {
+    "fibonacci": {
+      "elapsed_ms": 249.0,
+      "min_ms": 206.0,
+      "max_ms": 252.0,
+      "runs": [
+        249.0,
+        252.0,
+        206.0
+      ],
+      "description": "Recursive calls, arithmetic",
+      "output": {
+        "fibonacci(30)": "832040"
+      }
+    },
+    "tight_loop": {
+      "elapsed_ms": 1217.0,
+      "min_ms": 1055.0,
+      "max_ms": 1280.0,
+      "runs": [
+        1280.0,
+        1217.0,
+        1055.0
+      ],
+      "description": "Numeric loop, NaN-boxing",
+      "output": {
+        "sum(0..10M)": "49999995000000"
+      }
+    },
+    "list_ops": {
+      "elapsed_ms": 593.0,
+      "min_ms": 550.0,
+      "max_ms": 645.0,
+      "runs": [
+        645.0,
+        550.0,
+        593.0
+      ],
+      "description": "List alloc, map/filter/reduce",
+      "output": {
+        "list_size": "100000",
+        "sum": "4999950000",
+        "evens_count": "50000",
+        "squared_first": "0"
+      }
+    },
+    "string_ops": {
+      "elapsed_ms": 33.0,
+      "min_ms": 26.0,
+      "max_ms": 54.0,
+      "runs": [
+        54.0,
+        33.0,
+        26.0
+      ],
+      "description": "String concat, split, replace",
+      "output": {
+        "built_length": "48889",
+        "token_count": "10000",
+        "replaced_length": "48889"
+      }
+    },
+    "matrix_mul": {
+      "elapsed_ms": 4945.0,
+      "min_ms": 4853.0,
+      "max_ms": 5155.0,
+      "runs": [
+        5155.0,
+        4853.0,
+        4945.0
+      ],
+      "description": "Nested loops, array indexing",
+      "output": {
+        "result[0][0]": "30",
+        "result[1][1]": "69",
+        "result[2][2]": "90"
+      }
+    },
+    "map_ops": {
+      "elapsed_ms": 82.0,
+      "min_ms": 69.0,
+      "max_ms": 88.0,
+      "runs": [
+        88.0,
+        69.0,
+        82.0
+      ],
+      "description": "Map insert, lookup, keys",
+      "output": {
+        "map_size": "10000",
+        "lookup_sum": "333283335000",
+        "keys_count": "10000"
+      }
+    },
+    "closures": {
+      "elapsed_ms": 251.0,
+      "min_ms": 233.0,
+      "max_ms": 313.0,
+      "runs": [
+        233.0,
+        251.0,
+        313.0
+      ],
+      "description": "Lambda calls, HOF pipeline",
+      "output": {
+        "func_ref_sum": "74250000",
+        "inline_sum": "50500000",
+        "pipeline_result": "33336666"
+      }
+    },
+    "pattern_matching": {
+      "elapsed_ms": 6766.0,
+      "min_ms": 6735.0,
+      "max_ms": 6943.0,
+      "runs": [
+        6766.0,
+        6735.0,
+        6943.0
+      ],
+      "description": "If/elif, match, ternary",
+      "output": {
+        "fizzbuzz": "33334",
+        "fizz": "133333",
+        "buzz": "66666",
+        "numbers": "266667",
+        "match_sum": "2100000",
+        "ternary_sum": "0"
+      }
+    },
+    "for_iteration": {
+      "elapsed_ms": 443.0,
+      "min_ms": 324.0,
+      "max_ms": 489.0,
+      "runs": [
+        489.0,
+        443.0,
+        324.0
+      ],
+      "description": "For-in loops, nested iteration",
+      "output": {
+        "list_sum": "1249975000",
+        "nested_sum": "55000",
+        "total_strlen": "390000"
+      }
+    },
+    "recursion": {
+      "elapsed_ms": 633.0,
+      "min_ms": 578.0,
+      "max_ms": 696.0,
+      "runs": [
+        633.0,
+        696.0,
+        578.0
+      ],
+      "description": "Ackermann, tree sum, GCD",
+      "output": {
+        "ackermann(3,8)": "2045",
+        "tree_sum(20)": "1048576",
+        "gcd_sum": "185709"
+      }
+    },
+    "store_ops": {
+      "elapsed_ms": 7153.0,
+      "min_ms": 6820.0,
+      "max_ms": 10426.0,
+      "runs": [
+        10426.0,
+        7153.0,
+        6820.0
+      ],
+      "description": "Store creation, methods, fields",
+      "output": {
+        "total_distance_sq": "1000000",
+        "total_area": "20000000",
+        "final_point": "(100000, 200000)"
+      }
+    },
+    "math_compute": {
+      "elapsed_ms": 1508.0,
+      "min_ms": 1506.0,
+      "max_ms": 1541.0,
+      "runs": [
+        1541.0,
+        1508.0,
+        1506.0
+      ],
+      "description": "Float, trig, sqrt",
+      "output": {
+        "pi_approx": "3.1415916535897743",
+        "trig_sum": "100000",
+        "sqrt_sum": "21081692.74615191"
+      }
+    }
+  }
+}

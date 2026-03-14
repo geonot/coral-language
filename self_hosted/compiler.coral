@@ -96,6 +96,14 @@ use codegen
 	if functions isnt none
 		for func in functions
 			fold_block(func.get("body"))
+	# Fold type_def / extension method bodies
+	type_defs is model.get("type_defs")
+	if type_defs isnt none
+		for td in type_defs
+			methods is td.get("methods")
+			if methods isnt none
+				for method in methods
+					fold_block(method.get("body"))
 
 *fold_block(block)
 	if block is none
@@ -147,6 +155,15 @@ use codegen
 		val is stmt.get("value")
 		if val isnt none
 			stmt.set("value", fold_expr(val))
+	elif kind is "pattern_binding"
+		val is stmt.get("value")
+		if val isnt none
+			stmt.set("value", fold_expr(val))
+	elif kind is "guard"
+		cond is stmt.get("condition")
+		if cond isnt none
+			stmt.set("condition", fold_expr(cond))
+		fold_block(stmt.get("body"))
 
 *fold_expr(expr)
 	if expr is none
@@ -279,6 +296,58 @@ use codegen
 
 	if kind is "lambda"
 		fold_block(expr.get("body"))
+		return expr
+
+	if kind is "list_comprehension"
+		expr.set("body", fold_expr(expr.get("body")))
+		expr.set("iterable", fold_expr(expr.get("iterable")))
+		if expr.get("condition") isnt none
+			expr.set("condition", fold_expr(expr.get("condition")))
+		return expr
+
+	if kind is "map_comprehension"
+		expr.set("key", fold_expr(expr.get("key")))
+		expr.set("value", fold_expr(expr.get("value")))
+		expr.set("iterable", fold_expr(expr.get("iterable")))
+		if expr.get("condition") isnt none
+			expr.set("condition", fold_expr(expr.get("condition")))
+		return expr
+
+	if kind is "spread"
+		expr.set("expr", fold_expr(expr.get("expr")))
+		return expr
+
+	if kind is "slice"
+		expr.set("target", fold_expr(expr.get("target")))
+		if expr.get("start") isnt none
+			expr.set("start", fold_expr(expr.get("start")))
+		if expr.get("end") isnt none
+			expr.set("end", fold_expr(expr.get("end")))
+		return expr
+
+	if kind is "match"
+		expr.set("value", fold_expr(expr.get("value")))
+		arms is expr.get("arms")
+		if arms isnt none
+			for arm in arms
+				fold_block(arm.get("body"))
+				if arm.get("guard") isnt none
+					arm.set("guard", fold_expr(arm.get("guard")))
+		if expr.get("default") isnt none
+			fold_block(expr.get("default"))
+		return expr
+
+	if kind is "pipeline"
+		expr.set("left", fold_expr(expr.get("left")))
+		expr.set("right", fold_expr(expr.get("right")))
+		return expr
+
+	if kind is "throw"
+		expr.set("value", fold_expr(expr.get("value")))
+		return expr
+
+	if kind is "error_propagate"
+		expr.set("expr", fold_expr(expr.get("expr")))
 		return expr
 
 	return expr

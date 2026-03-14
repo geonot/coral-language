@@ -1,5 +1,5 @@
-use coralc::module_loader::ModuleLoader;
 use coralc::Compiler;
+use coralc::module_loader::ModuleLoader;
 use std::path::PathBuf;
 
 fn try_compile(name: &str) {
@@ -7,18 +7,22 @@ fn try_compile(name: &str) {
     let path = PathBuf::from(ws).join(name);
     let mut loader = ModuleLoader::with_default_std();
     let source = loader.load(&path).unwrap();
-    
+
     // Find line number from byte offset
     let find_line = |offset: usize| -> (usize, String) {
         let mut line = 1;
         for (i, c) in source.char_indices() {
-            if i >= offset { break; }
-            if c == '\n' { line += 1; }
+            if i >= offset {
+                break;
+            }
+            if c == '\n' {
+                line += 1;
+            }
         }
         let line_text = source.lines().nth(line - 1).unwrap_or("").to_string();
         (line, line_text)
     };
-    
+
     let compiler = Compiler;
     match compiler.compile_to_ir(&source) {
         Ok(ir) => println!("{}: OK ({} bytes)", name, ir.len()),
@@ -71,7 +75,9 @@ fn dump_codegen_expanded() {
                     end -= 1;
                 }
                 &lines[i][..end]
-            } else { lines[i] };
+            } else {
+                lines[i]
+            };
             println!("{:4} (t={}): {}", i + 1, tabs, display);
         }
     }

@@ -1,0 +1,63 @@
+# Benchmark: Branching and dispatch
+# Tests: if/else chains, match expressions, ternary operators
+
+*classify(n)
+    if n % 15 is 0
+        return "fizzbuzz"
+    if n % 3 is 0
+        return "fizz"
+    if n % 5 is 0
+        return "buzz"
+    "number"
+
+*describe(n)
+    return match n
+        1 ? "one"
+        2 ? "two"
+        3 ? "three"
+        ! "other"
+
+*main()
+    start is time_now()
+
+    # Classify in tight loop (if/else branching)
+    fizz_count is 0
+    buzz_count is 0
+    fizzbuzz_count is 0
+    number_count is 0
+    i is 0
+    while i < 500000
+        result is classify(i)
+        if result is "fizzbuzz"
+            fizzbuzz_count is fizzbuzz_count + 1
+        elif result is "fizz"
+            fizz_count is fizz_count + 1
+        elif result is "buzz"
+            buzz_count is buzz_count + 1
+        else
+            number_count is number_count + 1
+        i is i + 1
+
+    # Match expression dispatch
+    match_sum is 0
+    j is 0
+    while j < 500000
+        label is describe(j % 5)
+        match_sum is match_sum + label.length
+        j is j + 1
+
+    # Ternary expressions in tight loop
+    ternary_sum is 0
+    k is 0
+    while k < 500000
+        ternary_sum is ternary_sum + (k % 2 is 0 ? 1 ! -1)
+        k is k + 1
+
+    elapsed is time_now() - start
+    log("fizzbuzz = " + to_string(fizzbuzz_count))
+    log("fizz = " + to_string(fizz_count))
+    log("buzz = " + to_string(buzz_count))
+    log("numbers = " + to_string(number_count))
+    log("match_sum = " + to_string(match_sum))
+    log("ternary_sum = " + to_string(ternary_sum))
+    log("elapsed_ms: " + to_string(elapsed))

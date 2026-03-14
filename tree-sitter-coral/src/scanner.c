@@ -153,7 +153,12 @@ bool tree_sitter_coral_external_scanner_scan(void *payload, TSLexer *lex,
   }
 
   /* 4. Only trigger on actual newline characters */
-  if (lex->lookahead != '\n' && lex->lookahead != '\r') return false;
+  /* Skip trailing spaces/tabs on the line before checking for newline */
+  while (!lex->eof(lex) &&
+         (lex->lookahead == ' ' || lex->lookahead == '\t')) {
+    lex->advance(lex, true);
+  }
+  if (lex->eof(lex) || (lex->lookahead != '\n' && lex->lookahead != '\r')) return false;
 
   lex->result_symbol = NEWLINE;
 

@@ -4,7 +4,9 @@ use coralc::Compiler;
 
 fn compile_and_verify(source: &str) -> Result<String, String> {
     let compiler = Compiler;
-    compiler.compile_to_ir(source).map_err(|e| format!("{:?}", e))
+    compiler
+        .compile_to_ir(source)
+        .map_err(|e| format!("{:?}", e))
 }
 
 // ==================== Unary Math Functions ====================
@@ -15,7 +17,10 @@ fn test_abs() {
 result is abs(-5)
 "#;
     let ir = compile_and_verify(source).expect("abs should compile");
-    assert!(ir.contains("coral_math_abs"), "IR should call coral_math_abs");
+    assert!(
+        ir.contains("coral_math_abs"),
+        "IR should call coral_math_abs"
+    );
 }
 
 #[test]
@@ -24,7 +29,10 @@ fn test_sqrt() {
 result is sqrt(16)
 "#;
     let ir = compile_and_verify(source).expect("sqrt should compile");
-    assert!(ir.contains("coral_math_sqrt"), "IR should call coral_math_sqrt");
+    assert!(
+        ir.contains("coral_math_sqrt"),
+        "IR should call coral_math_sqrt"
+    );
 }
 
 #[test]
@@ -33,7 +41,10 @@ fn test_floor() {
 result is floor(3.7)
 "#;
     let ir = compile_and_verify(source).expect("floor should compile");
-    assert!(ir.contains("coral_math_floor"), "IR should call coral_math_floor");
+    assert!(
+        ir.contains("coral_math_floor"),
+        "IR should call coral_math_floor"
+    );
 }
 
 #[test]
@@ -42,7 +53,10 @@ fn test_ceil() {
 result is ceil(3.2)
 "#;
     let ir = compile_and_verify(source).expect("ceil should compile");
-    assert!(ir.contains("coral_math_ceil"), "IR should call coral_math_ceil");
+    assert!(
+        ir.contains("coral_math_ceil"),
+        "IR should call coral_math_ceil"
+    );
 }
 
 #[test]
@@ -51,7 +65,10 @@ fn test_round() {
 result is round(3.5)
 "#;
     let ir = compile_and_verify(source).expect("round should compile");
-    assert!(ir.contains("coral_math_round"), "IR should call coral_math_round");
+    assert!(
+        ir.contains("coral_math_round"),
+        "IR should call coral_math_round"
+    );
 }
 
 #[test]
@@ -60,7 +77,10 @@ fn test_trunc() {
 result is trunc(3.9)
 "#;
     let ir = compile_and_verify(source).expect("trunc should compile");
-    assert!(ir.contains("coral_math_trunc"), "IR should call coral_math_trunc");
+    assert!(
+        ir.contains("coral_math_trunc"),
+        "IR should call coral_math_trunc"
+    );
 }
 
 #[test]
@@ -69,7 +89,10 @@ fn test_sign() {
 result is sign(42)
 "#;
     let ir = compile_and_verify(source).expect("sign should compile");
-    assert!(ir.contains("coral_math_sign"), "IR should call coral_math_sign");
+    assert!(
+        ir.contains("coral_math_sign"),
+        "IR should call coral_math_sign"
+    );
 }
 
 #[test]
@@ -78,7 +101,10 @@ fn test_signum_alias() {
 result is signum(-10)
 "#;
     let ir = compile_and_verify(source).expect("signum alias should compile");
-    assert!(ir.contains("coral_math_sign"), "IR should call coral_math_sign");
+    assert!(
+        ir.contains("coral_math_sign"),
+        "IR should call coral_math_sign"
+    );
 }
 
 // ==================== Trigonometric Functions ====================
@@ -89,7 +115,10 @@ fn test_sin() {
 result is sin(0)
 "#;
     let ir = compile_and_verify(source).expect("sin should compile");
-    assert!(ir.contains("coral_math_sin"), "IR should call coral_math_sin");
+    assert!(
+        ir.contains("coral_math_sin"),
+        "IR should call coral_math_sin"
+    );
 }
 
 #[test]
@@ -98,7 +127,10 @@ fn test_cos() {
 result is cos(0)
 "#;
     let ir = compile_and_verify(source).expect("cos should compile");
-    assert!(ir.contains("coral_math_cos"), "IR should call coral_math_cos");
+    assert!(
+        ir.contains("coral_math_cos"),
+        "IR should call coral_math_cos"
+    );
 }
 
 #[test]
@@ -107,7 +139,10 @@ fn test_tan() {
 result is tan(0)
 "#;
     let ir = compile_and_verify(source).expect("tan should compile");
-    assert!(ir.contains("coral_math_tan"), "IR should call coral_math_tan");
+    assert!(
+        ir.contains("coral_math_tan"),
+        "IR should call coral_math_tan"
+    );
 }
 
 // ==================== Inverse Trigonometric Functions ====================
@@ -118,7 +153,10 @@ fn test_asin() {
 result is asin(0.5)
 "#;
     let ir = compile_and_verify(source).expect("asin should compile");
-    assert!(ir.contains("coral_math_asin"), "IR should call coral_math_asin");
+    assert!(
+        ir.contains("coral_math_asin"),
+        "IR should call coral_math_asin"
+    );
 }
 
 #[test]
@@ -127,7 +165,10 @@ fn test_acos() {
 result is acos(0.5)
 "#;
     let ir = compile_and_verify(source).expect("acos should compile");
-    assert!(ir.contains("coral_math_acos"), "IR should call coral_math_acos");
+    assert!(
+        ir.contains("coral_math_acos"),
+        "IR should call coral_math_acos"
+    );
 }
 
 #[test]
@@ -136,7 +177,10 @@ fn test_atan() {
 result is atan(1)
 "#;
     let ir = compile_and_verify(source).expect("atan should compile");
-    assert!(ir.contains("coral_math_atan"), "IR should call coral_math_atan");
+    assert!(
+        ir.contains("coral_math_atan"),
+        "IR should call coral_math_atan"
+    );
 }
 
 #[test]
@@ -145,7 +189,10 @@ fn test_atan2() {
 result is atan2(1, 1)
 "#;
     let ir = compile_and_verify(source).expect("atan2 should compile");
-    assert!(ir.contains("coral_math_atan2"), "IR should call coral_math_atan2");
+    assert!(
+        ir.contains("coral_math_atan2"),
+        "IR should call coral_math_atan2"
+    );
 }
 
 // ==================== Hyperbolic Functions ====================
@@ -156,7 +203,10 @@ fn test_sinh() {
 result is sinh(0)
 "#;
     let ir = compile_and_verify(source).expect("sinh should compile");
-    assert!(ir.contains("coral_math_sinh"), "IR should call coral_math_sinh");
+    assert!(
+        ir.contains("coral_math_sinh"),
+        "IR should call coral_math_sinh"
+    );
 }
 
 #[test]
@@ -165,7 +215,10 @@ fn test_cosh() {
 result is cosh(0)
 "#;
     let ir = compile_and_verify(source).expect("cosh should compile");
-    assert!(ir.contains("coral_math_cosh"), "IR should call coral_math_cosh");
+    assert!(
+        ir.contains("coral_math_cosh"),
+        "IR should call coral_math_cosh"
+    );
 }
 
 #[test]
@@ -174,7 +227,10 @@ fn test_tanh() {
 result is tanh(0)
 "#;
     let ir = compile_and_verify(source).expect("tanh should compile");
-    assert!(ir.contains("coral_math_tanh"), "IR should call coral_math_tanh");
+    assert!(
+        ir.contains("coral_math_tanh"),
+        "IR should call coral_math_tanh"
+    );
 }
 
 // ==================== Exponential and Logarithm Functions ====================
@@ -185,7 +241,10 @@ fn test_exp() {
 result is exp(1)
 "#;
     let ir = compile_and_verify(source).expect("exp should compile");
-    assert!(ir.contains("coral_math_exp"), "IR should call coral_math_exp");
+    assert!(
+        ir.contains("coral_math_exp"),
+        "IR should call coral_math_exp"
+    );
 }
 
 #[test]
@@ -203,7 +262,10 @@ fn test_log10() {
 result is log10(100)
 "#;
     let ir = compile_and_verify(source).expect("log10 should compile");
-    assert!(ir.contains("coral_math_log10"), "IR should call coral_math_log10");
+    assert!(
+        ir.contains("coral_math_log10"),
+        "IR should call coral_math_log10"
+    );
 }
 
 // ==================== Binary Math Functions ====================
@@ -214,7 +276,10 @@ fn test_pow() {
 result is pow(2, 3)
 "#;
     let ir = compile_and_verify(source).expect("pow should compile");
-    assert!(ir.contains("coral_math_pow"), "IR should call coral_math_pow");
+    assert!(
+        ir.contains("coral_math_pow"),
+        "IR should call coral_math_pow"
+    );
 }
 
 #[test]
@@ -223,7 +288,10 @@ fn test_min() {
 result is min(5, 3)
 "#;
     let ir = compile_and_verify(source).expect("min should compile");
-    assert!(ir.contains("coral_math_min"), "IR should call coral_math_min");
+    assert!(
+        ir.contains("coral_math_min"),
+        "IR should call coral_math_min"
+    );
 }
 
 #[test]
@@ -232,7 +300,10 @@ fn test_max() {
 result is max(5, 3)
 "#;
     let ir = compile_and_verify(source).expect("max should compile");
-    assert!(ir.contains("coral_math_max"), "IR should call coral_math_max");
+    assert!(
+        ir.contains("coral_math_max"),
+        "IR should call coral_math_max"
+    );
 }
 
 // ==================== Chained Math Operations ====================
@@ -243,9 +314,18 @@ fn test_chained_math() {
 result is abs(floor(sqrt(17)))
 "#;
     let ir = compile_and_verify(source).expect("chained math should compile");
-    assert!(ir.contains("coral_math_sqrt"), "IR should call coral_math_sqrt");
-    assert!(ir.contains("coral_math_floor"), "IR should call coral_math_floor");
-    assert!(ir.contains("coral_math_abs"), "IR should call coral_math_abs");
+    assert!(
+        ir.contains("coral_math_sqrt"),
+        "IR should call coral_math_sqrt"
+    );
+    assert!(
+        ir.contains("coral_math_floor"),
+        "IR should call coral_math_floor"
+    );
+    assert!(
+        ir.contains("coral_math_abs"),
+        "IR should call coral_math_abs"
+    );
 }
 
 #[test]
@@ -254,8 +334,14 @@ fn test_math_in_expression() {
 result is sqrt(16) + pow(2, 3)
 "#;
     let ir = compile_and_verify(source).expect("math in expression should compile");
-    assert!(ir.contains("coral_math_sqrt"), "IR should call coral_math_sqrt");
-    assert!(ir.contains("coral_math_pow"), "IR should call coral_math_pow");
+    assert!(
+        ir.contains("coral_math_sqrt"),
+        "IR should call coral_math_sqrt"
+    );
+    assert!(
+        ir.contains("coral_math_pow"),
+        "IR should call coral_math_pow"
+    );
 }
 
 #[test]
@@ -267,8 +353,14 @@ fn test_math_in_function() {
 result is hypotenuse(3, 4)
 "#;
     let ir = compile_and_verify(source).expect("math in function should compile");
-    assert!(ir.contains("coral_math_sqrt"), "IR should call coral_math_sqrt");
-    assert!(ir.contains("coral_math_pow"), "IR should call coral_math_pow");
+    assert!(
+        ir.contains("coral_math_sqrt"),
+        "IR should call coral_math_sqrt"
+    );
+    assert!(
+        ir.contains("coral_math_pow"),
+        "IR should call coral_math_pow"
+    );
 }
 
 #[test]
@@ -277,8 +369,14 @@ fn test_math_with_pipeline() {
 result is 16 ~ sqrt ~ floor
 "#;
     let ir = compile_and_verify(source).expect("math with pipeline should compile");
-    assert!(ir.contains("coral_math_sqrt"), "IR should call coral_math_sqrt");
-    assert!(ir.contains("coral_math_floor"), "IR should call coral_math_floor");
+    assert!(
+        ir.contains("coral_math_sqrt"),
+        "IR should call coral_math_sqrt"
+    );
+    assert!(
+        ir.contains("coral_math_floor"),
+        "IR should call coral_math_floor"
+    );
 }
 
 // ==================== Arity Error Tests ====================

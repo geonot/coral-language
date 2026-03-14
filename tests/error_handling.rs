@@ -4,9 +4,9 @@
 //! operations and that error checking/handling works as expected.
 
 use coralc::Compiler;
-use coralc::semantic;
-use coralc::parser;
 use coralc::lexer;
+use coralc::parser;
+use coralc::semantic;
 
 #[test]
 fn error_value_creation() {
@@ -17,9 +17,14 @@ fn error_value_creation() {
     log(x)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Error value creation should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Error value creation should compile");
     // Should call coral_make_error
-    assert!(ir.contains("@coral_make_error"), "Should call coral_make_error");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should call coral_make_error"
+    );
 }
 
 #[test]
@@ -32,9 +37,17 @@ fn error_propagation_through_addition() {
     log(y)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Error propagation should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
-    assert!(ir.contains("@coral_value_add"), "Should use value_add for addition");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Error propagation should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
+    assert!(
+        ir.contains("@coral_value_add"),
+        "Should use value_add for addition"
+    );
 }
 
 #[test]
@@ -47,8 +60,13 @@ fn error_propagation_through_string_concat() {
     log(y)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("String error propagation should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("String error propagation should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
 }
 
 #[test]
@@ -61,9 +79,17 @@ fn error_propagation_through_comparison() {
     log(y)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Comparison error propagation should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
-    assert!(ir.contains("@coral_value_equals"), "Should use value_equals for comparison");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Comparison error propagation should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
+    assert!(
+        ir.contains("@coral_value_equals"),
+        "Should use value_equals for comparison"
+    );
 }
 
 #[test]
@@ -76,9 +102,17 @@ fn error_propagation_through_bitwise() {
     log(y)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Bitwise error propagation should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
-    assert!(ir.contains("@coral_value_bitand"), "Should use value_bitand for bitwise AND");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Bitwise error propagation should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
+    assert!(
+        ir.contains("@coral_value_bitand"),
+        "Should use value_bitand for bitwise AND"
+    );
 }
 
 #[test]
@@ -90,11 +124,18 @@ fn hierarchical_error_name() {
     log(x)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Hierarchical error names should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Hierarchical error names should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
     // The error name should be stored as a global constant
-    assert!(ir.contains("Database:Connection:Timeout") || ir.contains("Database_Connection_Timeout"),
-        "Should contain hierarchical error name");
+    assert!(
+        ir.contains("Database:Connection:Timeout") || ir.contains("Database_Connection_Timeout"),
+        "Should contain hierarchical error name"
+    );
 }
 
 #[test]
@@ -108,8 +149,13 @@ fn multiple_error_propagation() {
     log(c)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Multiple error propagation should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error values");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Multiple error propagation should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error values"
+    );
 }
 
 // ========== ERROR PROPAGATION SYNTAX TESTS ==========
@@ -126,8 +172,13 @@ fn error_propagation_syntax_parses() {
     x + 1
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Error propagation syntax should parse");
-    assert!(ir.contains("@coral_nb_is_err"), "Should call coral_nb_is_err to check for errors");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Error propagation syntax should parse");
+    assert!(
+        ir.contains("@coral_nb_is_err"),
+        "Should call coral_nb_is_err to check for errors"
+    );
 }
 
 #[test]
@@ -142,11 +193,19 @@ fn error_propagation_returns_early_on_error() {
     result + 10
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Error propagation should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Error propagation should compile");
     // Should have error checking and conditional return
-    assert!(ir.contains("@coral_nb_is_err"), "Should check if value is error");
+    assert!(
+        ir.contains("@coral_nb_is_err"),
+        "Should check if value is error"
+    );
     // Should have conditional branch for error case
-    assert!(ir.contains("br i1"), "Should have conditional branch for error handling");
+    assert!(
+        ir.contains("br i1"),
+        "Should have conditional branch for error handling"
+    );
 }
 
 #[test]
@@ -161,8 +220,13 @@ fn error_propagation_continues_on_success() {
     x * 2
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Success case should compile");
-    assert!(ir.contains("@coral_nb_is_err"), "Should still check for errors");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Success case should compile");
+    assert!(
+        ir.contains("@coral_nb_is_err"),
+        "Should still check for errors"
+    );
 }
 
 #[test]
@@ -181,10 +245,16 @@ fn error_propagation_chained() {
     b * 2
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Chained propagation should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Chained propagation should compile");
     // Should have multiple coral_is_err calls
     let is_err_count = ir.matches("@coral_nb_is_err").count();
-    assert!(is_err_count >= 2, "Should have multiple error checks, found {}", is_err_count);
+    assert!(
+        is_err_count >= 2,
+        "Should have multiple error checks, found {}",
+        is_err_count
+    );
 }
 
 #[test]
@@ -200,7 +270,9 @@ fn error_propagation_in_expression() {
     y
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Expression propagation should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Expression propagation should compile");
     assert!(ir.contains("@coral_nb_is_err"), "Should check for errors");
 }
 
@@ -214,10 +286,15 @@ fn error_propagation_does_not_conflict_with_ternary() {
     log(result)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Ternary should still work");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Ternary should still work");
     // Should NOT have error propagation calls, just ternary
     // Note: declaration of coral_is_err may exist, but no calls should be made
-    assert!(!ir.contains("call i8 @coral_nb_is_err"), "Ternary should not trigger error propagation calls");
+    assert!(
+        !ir.contains("call i8 @coral_nb_is_err"),
+        "Ternary should not trigger error propagation calls"
+    );
 }
 
 #[test]
@@ -232,8 +309,13 @@ fn error_propagation_with_function_call() {
     data * 2
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Function call propagation should compile");
-    assert!(ir.contains("@coral_nb_is_err"), "Should check function result for errors");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Function call propagation should compile");
+    assert!(
+        ir.contains("@coral_nb_is_err"),
+        "Should check function result for errors"
+    );
 }
 
 // ========== .err PROPERTY TESTS ==========
@@ -248,8 +330,13 @@ fn err_property_on_error_value() {
     log(is_error)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect(".err property should compile");
-    assert!(ir.contains("@coral_is_err"), "Should call coral_is_err for .err property");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect(".err property should compile");
+    assert!(
+        ir.contains("@coral_is_err"),
+        "Should call coral_is_err for .err property"
+    );
 }
 
 #[test]
@@ -261,8 +348,13 @@ fn err_property_on_normal_value() {
     x.err ? log("error") ! log("ok")
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect(".err property on normal value should compile");
-    assert!(ir.contains("@coral_is_err"), "Should call coral_is_err for .err property");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect(".err property on normal value should compile");
+    assert!(
+        ir.contains("@coral_is_err"),
+        "Should call coral_is_err for .err property"
+    );
 }
 
 // ========== GUARD CLAUSE SYNTAX TESTS ==========
@@ -276,8 +368,13 @@ fn guard_clause_basic() {
     x
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Guard clause should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value for guard clause");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Guard clause should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value for guard clause"
+    );
 }
 
 #[test]
@@ -290,8 +387,13 @@ fn guard_clause_hierarchical() {
     x
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Hierarchical guard clause should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error values for guard clauses");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Hierarchical guard clause should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error values for guard clauses"
+    );
 }
 
 // ========== ERROR DEFINITION TESTS ==========
@@ -306,7 +408,9 @@ err NotFound
     log("hello")
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Simple error definition should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Simple error definition should compile");
     assert!(ir.contains("main"), "Should have main function");
 }
 
@@ -325,7 +429,9 @@ err Database
     log("hello")
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Nested error definition should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Nested error definition should compile");
     assert!(ir.contains("main"), "Should have main function");
 }
 
@@ -341,7 +447,9 @@ err NotFound
     log("hello")
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Error definition with attributes should compile");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Error definition with attributes should compile");
     assert!(ir.contains("main"), "Should have main function");
 }
 
@@ -367,8 +475,13 @@ err Database
     log(e)
 "#;
     let compiler = Compiler;
-    let ir = compiler.compile_to_ir(code).expect("Full error hierarchy should compile");
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
+    let ir = compiler
+        .compile_to_ir(code)
+        .expect("Full error hierarchy should compile");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
 }
 
 // ========== UNHANDLED ERROR WARNING TESTS ==========
@@ -385,11 +498,16 @@ fn warning_for_standalone_error_value() {
     let p = parser::Parser::new(tokens, code.len());
     let ast = p.parse().expect("Should parse");
     let model = semantic::analyze(ast).expect("Should analyze");
-    
+
     // Should have a warning about the unhandled error value
-    assert!(!model.warnings.is_empty(), "Should have warning for standalone error value");
-    assert!(model.warnings[0].message.contains("NotFound"), 
-        "Warning should mention the error name");
+    assert!(
+        !model.warnings.is_empty(),
+        "Should have warning for standalone error value"
+    );
+    assert!(
+        model.warnings[0].message.contains("NotFound"),
+        "Warning should mention the error name"
+    );
 }
 
 #[test]
@@ -403,9 +521,13 @@ fn no_warning_for_returned_error() {
     let p = parser::Parser::new(tokens, code.len());
     let ast = p.parse().expect("Should parse");
     let model = semantic::analyze(ast).expect("Should analyze");
-    
+
     // Should not have warnings - the error is returned via ternary
-    assert!(model.warnings.is_empty(), "Should not warn when error is returned: {:?}", model.warnings);
+    assert!(
+        model.warnings.is_empty(),
+        "Should not warn when error is returned: {:?}",
+        model.warnings
+    );
 }
 
 #[test]
@@ -421,7 +543,11 @@ fn no_warning_for_bound_error() {
     let p = parser::Parser::new(tokens, code.len());
     let ast = p.parse().expect("Should parse");
     let model = semantic::analyze(ast).expect("Should analyze");
-    
+
     // Should not have warnings - the error is bound and then checked
-    assert!(model.warnings.is_empty(), "Should not warn when error is bound and used: {:?}", model.warnings);
+    assert!(
+        model.warnings.is_empty(),
+        "Should not warn when error is bound and used: {:?}",
+        model.warnings
+    );
 }

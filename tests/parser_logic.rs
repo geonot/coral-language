@@ -1,4 +1,4 @@
-use coralc::ast::{Binding, Expression, Item, BinaryOp};
+use coralc::ast::{BinaryOp, Binding, Expression, Item};
 use coralc::lexer;
 use coralc::parser::Parser;
 
@@ -20,9 +20,7 @@ fn parse_single_binding_expression(source: &str) -> Expression {
 #[test]
 fn parses_binding_type_annotation() {
     let binding = parse_binding_item("answer: Number is 42\n");
-    let annotation = binding
-        .type_annotation
-        .expect("missing annotation");
+    let annotation = binding.type_annotation.expect("missing annotation");
     assert_eq!(annotation.segments, vec!["Number".to_string()]);
     assert_eq!(annotation.type_args, vec![]);
 }
@@ -49,10 +47,20 @@ fn parses_function_parameter_annotation() {
 fn logic_operator_precedence_or_vs_and() {
     let expr = parse_single_binding_expression("result is true or false and false\n");
     match expr {
-        Expression::Binary { op: BinaryOp::Or, left, right, .. } => {
-            assert!(matches!(*left, Expression::Bool(true, _)), "left side should be literal true");
+        Expression::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+            ..
+        } => {
+            assert!(
+                matches!(*left, Expression::Bool(true, _)),
+                "left side should be literal true"
+            );
             match *right {
-                Expression::Binary { op: BinaryOp::And, .. } => {}
+                Expression::Binary {
+                    op: BinaryOp::And, ..
+                } => {}
                 other => panic!("expected right branch to be AND, got {:?}", other),
             }
         }
@@ -101,9 +109,7 @@ fn parses_member_call_with_argument() {
 
 #[test]
 fn parses_map_literal() {
-    let expr = parse_single_binding_expression(
-        "config is map('foo' is 1, 'bar' is 2)\n",
-    );
+    let expr = parse_single_binding_expression("config is map('foo' is 1, 'bar' is 2)\n");
     match expr {
         Expression::Map(entries, _) => {
             assert_eq!(entries.len(), 2);
@@ -115,9 +121,7 @@ fn parses_map_literal() {
 #[test]
 fn parses_map_literal_colon_syntax() {
     // S1.1: Colon syntax for map entries
-    let expr = parse_single_binding_expression(
-        "config is map('foo': 1, 'bar': 2)\n",
-    );
+    let expr = parse_single_binding_expression("config is map('foo': 1, 'bar': 2)\n");
     match expr {
         Expression::Map(entries, _) => {
             assert_eq!(entries.len(), 2);
@@ -129,22 +133,21 @@ fn parses_map_literal_colon_syntax() {
 #[test]
 fn parses_map_literal_mixed_separators() {
     // Both `:` and `is` can be used in the same map literal
-    let expr = parse_single_binding_expression(
-        "config is map('foo': 1, 'bar' is 2)\n",
-    );
+    let expr = parse_single_binding_expression("config is map('foo': 1, 'bar' is 2)\n");
     match expr {
         Expression::Map(entries, _) => {
             assert_eq!(entries.len(), 2);
         }
-        other => panic!("expected map literal with mixed separators, got {:?}", other),
+        other => panic!(
+            "expected map literal with mixed separators, got {:?}",
+            other
+        ),
     }
 }
 
 #[test]
 fn parses_map_property_access() {
-    let expr = parse_single_binding_expression(
-        "value is map('foo' is 1).foo\n",
-    );
+    let expr = parse_single_binding_expression("value is map('foo' is 1).foo\n");
     match expr {
         Expression::Member { property, .. } => assert_eq!(property, "foo"),
         other => panic!("expected member access, got {:?}", other),
@@ -153,9 +156,7 @@ fn parses_map_property_access() {
 
 #[test]
 fn parses_map_get_method_call() {
-    let expr = parse_single_binding_expression(
-        "value is map('foo' is 1).get('foo')\n",
-    );
+    let expr = parse_single_binding_expression("value is map('foo' is 1).get('foo')\n");
     match expr {
         Expression::Call { callee, args, .. } => {
             assert_eq!(args.len(), 1);
@@ -170,9 +171,7 @@ fn parses_map_get_method_call() {
 
 #[test]
 fn parses_map_set_method_call() {
-    let expr = parse_single_binding_expression(
-        "value is map('foo' is 1).set('foo', 2)\n",
-    );
+    let expr = parse_single_binding_expression("value is map('foo' is 1).set('foo', 2)\n");
     match expr {
         Expression::Call { callee, args, .. } => {
             assert_eq!(args.len(), 2);
@@ -208,13 +207,23 @@ fn parses_placeholder_argument_in_call() {
 fn parses_interpolated_string() {
     let expr = parse_single_binding_expression("greeting is 'Hello, {name}!'\n");
     match expr {
-        Expression::Binary { op: BinaryOp::Add, left, right, .. } => {
+        Expression::Binary {
+            op: BinaryOp::Add,
+            left,
+            right,
+            ..
+        } => {
             match *right {
                 Expression::String(ref suffix, _) => assert_eq!(suffix, "!"),
                 other => panic!("expected suffix literal, got {:?}", other),
             }
             match *left {
-                Expression::Binary { op: BinaryOp::Add, left: inner_left, right: inner_right, .. } => {
+                Expression::Binary {
+                    op: BinaryOp::Add,
+                    left: inner_left,
+                    right: inner_right,
+                    ..
+                } => {
                     match *inner_left {
                         Expression::String(ref value, _) => assert_eq!(value, "Hello, "),
                         other => panic!("expected leading literal, got {:?}", other),

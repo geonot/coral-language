@@ -1,0 +1,158 @@
+================================================================================
+Function With Multiple Parameters
+================================================================================
+
+*add(a, b)
+    a + b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))
+    body: (block
+      (expression_statement
+        (binary_expression
+          left: (identifier)
+          operator: (operator)
+          right: (identifier))))))
+
+================================================================================
+Function With Type Annotations
+================================================================================
+
+*greet(name: String)
+    log('Hello {name}')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (type_annotation
+          (identifier))))
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content)
+              (template_interpolation
+                (identifier)))))))))
+
+================================================================================
+Function With Default Parameter
+================================================================================
+
+*greet(name ? 'world')
+    log('Hello {name}')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        default: (template_string
+          (template_content))))
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content)
+              (template_interpolation
+                (identifier)))))))))
+
+================================================================================
+Lambda Expression
+================================================================================
+
+*main()
+    double is *fn(x) x * 2
+    result is double(5)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (lambda_expression
+          parameters: (parameter_list
+            (parameter
+              name: (identifier)))
+          body: (binary_expression
+            left: (identifier)
+            operator: (operator)
+            right: (integer))))
+      (binding
+        name: (identifier)
+        value: (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (integer)))))))
+
+================================================================================
+Return Statement
+================================================================================
+
+*max(a, b)
+    if a > b
+        return a
+    return b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_statement
+        condition: (binary_expression
+          left: (identifier)
+          operator: (operator)
+          right: (identifier))
+        body: (block
+          (return_statement
+            (identifier))))
+      (return_statement
+        (identifier)))))
+
+================================================================================
+Extern Function
+================================================================================
+
+extern fn puts(s: String): Int
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (extern_function
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (type_annotation
+          (identifier))))
+    return_type: (type_annotation
+      (identifier))))

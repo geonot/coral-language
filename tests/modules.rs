@@ -1,5 +1,5 @@
-use coralc::module_loader::ModuleLoader;
 use coralc::Compiler;
+use coralc::module_loader::ModuleLoader;
 use std::path::PathBuf;
 
 #[test]
@@ -51,8 +51,14 @@ fn compiles_actor_program_and_wires_runtime_calls() {
         ir.contains("@coral_actor_send"),
         "main should send initial message to its handler",
     );
-    assert!(ir.contains("@make_Counter"), "actor constructor should be generated");
-    assert!(ir.contains("@__Counter_handler_invoke"), "actor handler invoke should be generated");
+    assert!(
+        ir.contains("@make_Counter"),
+        "actor constructor should be generated"
+    );
+    assert!(
+        ir.contains("@__Counter_handler_invoke"),
+        "actor handler invoke should be generated"
+    );
 }
 
 #[test]
@@ -67,18 +73,35 @@ fn compiles_actor_with_state_and_self_access() {
         .expect("failed to compile actor state program");
 
     // Actor constructor should create state map
-    assert!(ir.contains("@coral_make_map"), "actor should create state map");
+    assert!(
+        ir.contains("@coral_make_map"),
+        "actor should create state map"
+    );
     // State should have field initialized
-    assert!(ir.contains("@coral_map_set"), "actor should initialize fields in state");
+    assert!(
+        ir.contains("@coral_map_set"),
+        "actor should initialize fields in state"
+    );
     // self.field access should use map_get
-    assert!(ir.contains("@coral_map_get"), "self.field should emit map_get");
+    assert!(
+        ir.contains("@coral_map_get"),
+        "self.field should emit map_get"
+    );
     // Handler should pass state to methods (now returns i64 NaN-boxed values)
-    assert!(ir.contains("define i64 @Greeter_say_hello(i64"), 
-        "message handlers should take state i64 as first param");
+    assert!(
+        ir.contains("define i64 @Greeter_say_hello(i64"),
+        "message handlers should take state i64 as first param"
+    );
     // Handler invoke should be generated
-    assert!(ir.contains("@__Greeter_handler_invoke"), "actor handler invoke should be generated");
+    assert!(
+        ir.contains("@__Greeter_handler_invoke"),
+        "actor handler invoke should be generated"
+    );
     // Handler release should be generated
-    assert!(ir.contains("@__Greeter_handler_release"), "actor handler release should be generated");
+    assert!(
+        ir.contains("@__Greeter_handler_release"),
+        "actor handler release should be generated"
+    );
 }
 
 #[test]
@@ -93,12 +116,16 @@ fn compiles_actor_handler_with_param() {
         .expect("failed to compile actor with param program");
 
     // Handler with 1 param should take state i64 + i64 (NaN-boxed values)
-    assert!(ir.contains("define i64 @Counter_set_value(i64 %0, i64 %1)"), 
-        "handler with param should take state i64 and param");
+    assert!(
+        ir.contains("define i64 @Counter_set_value(i64 %0, i64 %1)"),
+        "handler with param should take state i64 and param"
+    );
     // Dispatch no longer needs to convert msg_data to number (passed as NaN-boxed now)
     // Handler with no params should only take state
-    assert!(ir.contains("define i64 @Counter_ping(i64 %0)"),
-        "handler with no params should only take state i64");
+    assert!(
+        ir.contains("define i64 @Counter_ping(i64 %0)"),
+        "handler with no params should only take state i64"
+    );
 }
 
 #[test]
@@ -163,11 +190,23 @@ fn compiles_store_with_fields() {
         .expect("failed to compile store program");
 
     // Store constructor should create a Map with __type__ and fields
-    assert!(ir.contains("@make_Point"), "constructor should be generated");
-    assert!(ir.contains("@coral_make_map"), "store should use Map internally");
-    assert!(ir.contains("@coral_map_set"), "fields should be set in constructor");
+    assert!(
+        ir.contains("@make_Point"),
+        "constructor should be generated"
+    );
+    assert!(
+        ir.contains("@coral_make_map"),
+        "store should use Map internally"
+    );
+    assert!(
+        ir.contains("@coral_map_set"),
+        "fields should be set in constructor"
+    );
     // Field access should use map_get
-    assert!(ir.contains("@coral_map_get"), "field access should use map_get");
+    assert!(
+        ir.contains("@coral_map_get"),
+        "field access should use map_get"
+    );
 }
 
 #[test]
@@ -182,12 +221,24 @@ fn compiles_store_with_methods() {
         .expect("failed to compile store method program");
 
     // Store methods should be generated
-    assert!(ir.contains("@Counter_increment"), "increment method should be generated");
-    assert!(ir.contains("@Counter_add"), "add method should be generated");
+    assert!(
+        ir.contains("@Counter_increment"),
+        "increment method should be generated"
+    );
+    assert!(
+        ir.contains("@Counter_add"),
+        "add method should be generated"
+    );
     // Method calls should include self parameter
-    assert!(ir.contains("store_method_call"), "method calls should go through store dispatch");
+    assert!(
+        ir.contains("store_method_call"),
+        "method calls should go through store dispatch"
+    );
     // self.field assignment should use map_set
-    assert!(ir.contains("@coral_map_set"), "self.field assignment should use map_set");
+    assert!(
+        ir.contains("@coral_map_set"),
+        "self.field assignment should use map_set"
+    );
 }
 
 #[test]
@@ -200,7 +251,10 @@ fn compiles_program_using_std_string() {
     let ir = compiler
         .compile_to_ir(&source)
         .expect("failed to compile string program");
-    assert!(ir.contains("@coral_string_to_upper"), "should call to_upper");
+    assert!(
+        ir.contains("@coral_string_to_upper"),
+        "should call to_upper"
+    );
 }
 
 #[test]
@@ -239,7 +293,10 @@ fn compiles_program_using_std_set() {
     let ir = compiler
         .compile_to_ir(&source)
         .expect("failed to compile set program");
-    assert!(ir.contains("@coral_map_set"), "should use map_set for set operations");
+    assert!(
+        ir.contains("@coral_map_set"),
+        "should use map_set for set operations"
+    );
 }
 
 #[test]
@@ -272,10 +329,17 @@ fn load_modules_returns_separate_modules() {
     let modules = loader.load_modules(&entry).expect("load_modules");
 
     // Should have at least 2 modules: utils first, then main
-    assert!(modules.len() >= 2, "expected at least 2 modules, got {}", modules.len());
+    assert!(
+        modules.len() >= 2,
+        "expected at least 2 modules, got {}",
+        modules.len()
+    );
 
     // First module should be utils (dependency comes before dependent)
-    let utils_mod = modules.iter().find(|m| m.name == "utils").expect("utils module");
+    let utils_mod = modules
+        .iter()
+        .find(|m| m.name == "utils")
+        .expect("utils module");
     assert!(utils_mod.source.contains("*add(a, b)"));
     assert!(!utils_mod.source.contains("use utils")); // use directives stripped
 
@@ -339,9 +403,17 @@ fn load_modules_detects_circular_imports() {
     let result = loader.load_modules(&a);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("circular import"), "should contain 'circular import': {}", err);
+    assert!(
+        err.contains("circular import"),
+        "should contain 'circular import': {}",
+        err
+    );
     // CC3.4: enhanced error messages include line numbers
-    assert!(err.contains("line 1"), "should include line number for 'use' directive: {}", err);
+    assert!(
+        err.contains("line 1"),
+        "should include line number for 'use' directive: {}",
+        err
+    );
 }
 
 #[test]
@@ -362,7 +434,11 @@ fn load_modules_circular_triangle_shows_line_numbers() {
     assert!(err.contains("alpha"), "should mention alpha: {}", err);
     assert!(err.contains("beta"), "should mention beta: {}", err);
     assert!(err.contains("gamma"), "should mention gamma: {}", err);
-    assert!(err.contains("restructur"), "should suggest restructuring: {}", err);
+    assert!(
+        err.contains("restructur"),
+        "should suggest restructuring: {}",
+        err
+    );
 }
 
 #[test]
@@ -378,9 +454,16 @@ fn load_modules_circular_import_suggestion_for_pair() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     // For a 2-module cycle, should suggest extracting shared code with module names
-    assert!(err.contains("Suggestion:"), "should include suggestion: {}", err);
-    assert!(err.contains("foo") && err.contains("bar"),
-        "suggestion should name both modules: {}", err);
+    assert!(
+        err.contains("Suggestion:"),
+        "should include suggestion: {}",
+        err
+    );
+    assert!(
+        err.contains("foo") && err.contains("bar"),
+        "suggestion should name both modules: {}",
+        err
+    );
 }
 
 #[test]
@@ -398,8 +481,11 @@ fn load_modules_circular_line_number_not_first_line() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("circular import"), "msg: {}", err);
     // The use directive in x.coral is on line 3
-    assert!(err.contains("line 3") || err.contains("line 1"),
-        "should include a line number: {}", err);
+    assert!(
+        err.contains("line 3") || err.contains("line 1"),
+        "should include a line number: {}",
+        err
+    );
 }
 
 #[test]
@@ -446,8 +532,14 @@ fn compile_modules_produces_same_ir_as_concat() {
     assert!(!ir_modules.is_empty(), "module IR should not be empty");
 
     // Both should reference the coral_make_string runtime function
-    assert!(ir_concat.contains("@coral_make_string"), "concat IR should have string runtime");
-    assert!(ir_modules.contains("@coral_make_string"), "module IR should have string runtime");
+    assert!(
+        ir_concat.contains("@coral_make_string"),
+        "concat IR should have string runtime"
+    );
+    assert!(
+        ir_modules.contains("@coral_make_string"),
+        "module IR should have string runtime"
+    );
 }
 
 #[test]

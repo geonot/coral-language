@@ -1,53 +1,35 @@
-//! LLVM code generation for Coral programs.
-//!
-//! This module transforms semantic models into LLVM IR using inkwell bindings.
-
-mod runtime;
 mod builtins;
-mod match_adt;
-mod store_actor;
 mod closures;
+mod match_adt;
+mod runtime;
+mod store_actor;
 
 use runtime::RuntimeBindings;
 
 use crate::ast::{
-    BinaryOp,
-    Binding,
-    Block,
-    Expression,
-    Function,
-    FunctionKind,
-    MatchExpression,
-    MatchPattern,
-    Parameter,
-    Statement,
-    TypeAnnotation,
-    UnaryOp,
+    BinaryOp, Binding, Block, Expression, Function, FunctionKind, MatchExpression, MatchPattern,
+    Parameter, Statement, TypeAnnotation, UnaryOp,
 };
 use crate::diagnostics::Diagnostic;
 use crate::semantic::SemanticModel;
 use crate::span::{LineIndex, Span};
-use crate::types::{AllocationStrategy, TypeId, Primitive};
+use crate::types::{AllocationStrategy, Primitive, TypeId};
 use inkwell::InlineAsmDialect;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::debug_info::{
-    AsDIScope, DWARFEmissionKind, DWARFSourceLanguage, DIFlags, DIFlagsConstants, DIScope,
-    DISubroutineType, DebugInfoBuilder, DICompileUnit, DIFile,
+    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DIScope, DISubroutineType,
+    DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
 };
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType, FunctionType, IntType, StructType};
+use inkwell::types::{
+    BasicMetadataTypeEnum, BasicTypeEnum, FloatType, FunctionType, IntType, StructType,
+};
 use inkwell::values::{
-    BasicMetadataValueEnum,
-    BasicValue,
-    BasicValueEnum,
-    FloatValue,
-    FunctionValue,
-    GlobalValue,
-    IntValue,
-    PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, GlobalValue,
+    IntValue, PointerValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::{HashMap, HashSet};
@@ -71,37 +53,36 @@ pub struct CodeGenerator<'ctx> {
     allocation_hints: HashMap<String, AllocationStrategy>,
     extern_sigs: HashMap<String, ExternSignature<'ctx>>,
     inline_asm_mode: InlineAsmMode,
-    /// Maps store method name to (store_name, param_count) for dynamic dispatch
+
     store_methods: HashMap<String, (String, usize)>,
-    /// Maps (store_name, field_name) to is_reference for reference field tracking
+
     reference_fields: HashSet<(String, String)>,
-    /// Maps enum constructor name to (enum_name, field_count) for ADT construction
+
     enum_constructors: HashMap<String, (String, usize)>,
-    /// Set of store constructor function names (e.g., "make_Counter")
+
     store_constructors: HashSet<String>,
-    /// Set of all known store field names (for disambiguation in member access)
+
     store_field_names: HashSet<String>,
-    /// Set of persistent store type names (for persistence hooks)
+
     persistent_stores: HashSet<String>,
-    /// Tracks whether any persistent store was opened (to emit save_all at exit)
+
     has_persistent_stores: bool,
-    /// CC2.3: Optional DWARF debug info context.
+
     debug_ctx: Option<DebugContext<'ctx>>,
-    /// C2.1/C2.2: Resolved variable types from semantic analysis for type specialization.
+
     resolved_types: HashMap<String, TypeId>,
-    /// S4.2: Parameter metadata for default argument filling at call sites.
+
     fn_param_defaults: HashMap<String, Vec<Parameter>>,
-    /// CC3.2: Maps short module name to list of exported function names
+
     module_exports: HashMap<String, Vec<String>>,
 }
 
-/// CC2.3: Holds state for DWARF debug-info emission.
 struct DebugContext<'ctx> {
     builder: DebugInfoBuilder<'ctx>,
     compile_unit: DICompileUnit<'ctx>,
     file: DIFile<'ctx>,
     line_index: LineIndex,
-    /// A generic subroutine type used for all Coral functions (all i64 → i64).
+
     fn_di_type: DISubroutineType<'ctx>,
 }
 
@@ -166,7 +147,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self
     }
 
-    /// CC2.3: Enable DWARF debug info emission, supplying filename and source text.
     pub fn with_debug_info(mut self, filename: &str, source: &str) -> Self {
         let debug_metadata_version = self.context.i32_type().const_int(3, false);
         self.module.add_basic_value_flag(
@@ -176,7 +156,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let (dibuilder, compile_unit) = self.module.create_debug_info_builder(
             true,
-            DWARFSourceLanguage::C, // closest available; Coral has no DWARF lang code
+            DWARFSourceLanguage::C,
             filename,
             ".",
             "coralc",
@@ -188,18 +168,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             0,
             false,
             false,
-            "", // sysroot (llvm16)
-            "", // sdk      (llvm16)
+            "",
+            "",
         );
         let file = compile_unit.get_file();
         let line_index = LineIndex::new(source);
-        // Generic subroutine type for Coral functions (returns void-placeholder, no typed params)
-        let fn_di_type = dibuilder.create_subroutine_type(
-            file,
-            None,
-            &[],
-            DIFlags::PUBLIC,
-        );
+
+        let fn_di_type = dibuilder.create_subroutine_type(file, None, &[], DIFlags::PUBLIC);
         self.debug_ctx = Some(DebugContext {
             builder: dibuilder,
             compile_unit,
@@ -210,7 +185,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self
     }
 
-    /// CC2.3: Set the LLVM builder's current debug location from a Coral span.
     fn set_debug_location(&self, span: Span, scope: DIScope<'ctx>) {
         if let Some(dbg) = &self.debug_ctx {
             let (line, col) = dbg.line_index.line_col(span.start);
@@ -226,30 +200,26 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn compile(mut self, model: &SemanticModel) -> Result<Module<'ctx>, Diagnostic> {
-        // C4.2: Apply LLVM attributes to runtime FFI declarations.
         self.apply_runtime_attributes();
         self.allocation_hints = model.allocation.symbols.clone();
-        // CC3.2: Populate module namespace map for qualified function access
+
         self.module_exports = model.module_exports.clone();
-        // C2.1: Populate resolved types from semantic analysis for type specialization.
+
         for (name, ty) in model.types.iter_all() {
             self.resolved_types.insert(name, ty);
         }
 
-        // C3.5: Compute reachable functions (dead function elimination).
         let reachable = Self::compute_reachable_functions(model);
 
         self.declare_global_bindings(&model.globals);
         self.extern_sigs.clear();
 
-        // Declare extern functions
         for extern_fn in &model.extern_functions {
             let mut param_types = Vec::new();
             for param in &extern_fn.params {
-                let ann = param
-                    .type_annotation
-                    .as_ref()
-                    .ok_or_else(|| Diagnostic::new("extern parameters require a type", param.span))?;
+                let ann = param.type_annotation.as_ref().ok_or_else(|| {
+                    Diagnostic::new("extern parameters require a type", param.span)
+                })?;
                 param_types.push(self.map_extern_type(ann)?);
             }
             let ret_type = if let Some(ret_ann) = &extern_fn.return_type {
@@ -269,12 +239,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             );
             self.functions.insert(extern_fn.name.clone(), llvm_fn);
         }
-        
-        // Declare user functions
-        // All Coral functions use Value* (pointer to tagged value) for params and returns.
-        // This ensures non-numeric values (strings, lists, etc.) are passed correctly.
+
         for function in &model.functions {
-            // C3.5: Skip unreachable functions
             if !reachable.contains(&function.name) {
                 continue;
             }
@@ -289,38 +255,36 @@ impl<'ctx> CodeGenerator<'ctx> {
             );
             let llvm_fn = self.module.add_function(llvm_name, fn_type, None);
             self.functions.insert(function.name.clone(), llvm_fn);
-            // S4.1/S4.2: Store parameter metadata for named args and default argument filling
-            self.fn_param_defaults.insert(function.name.clone(), function.params.clone());
+
+            self.fn_param_defaults
+                .insert(function.name.clone(), function.params.clone());
         }
-        // Handle stores and actors
+
         for store in &model.stores {
-            // Track reference fields for this store
             for field in &store.fields {
                 self.store_field_names.insert(field.name.clone());
                 if field.is_reference {
-                    self.reference_fields.insert((store.name.clone(), field.name.clone()));
+                    self.reference_fields
+                        .insert((store.name.clone(), field.name.clone()));
                 }
             }
-            
-            // All stores get a constructor that returns a Map with fields
+
             let constructor_name = format!("make_{}", store.name);
             let ctor_type = self.runtime.value_i64_type.fn_type(&[], false);
             let ctor_fn = self.module.add_function(&constructor_name, ctor_type, None);
             self.functions.insert(constructor_name.clone(), ctor_fn);
             self.store_constructors.insert(constructor_name);
-            
+
             if store.is_persistent {
                 self.persistent_stores.insert(store.name.clone());
                 self.has_persistent_stores = true;
             }
-            
+
             if store.is_actor {
-                // Declare message handler functions for each @method
-                // Actor methods take state as hidden first param (i64), plus user params (i64)
                 for method in &store.methods {
                     if method.kind == FunctionKind::ActorMessage {
                         let mangled = format!("{}_{}", store.name, method.name);
-                        let mut param_types: Vec<BasicMetadataTypeEnum> = 
+                        let mut param_types: Vec<BasicMetadataTypeEnum> =
                             vec![self.runtime.value_i64_type.into()];
                         for _ in 0..method.params.len() {
                             param_types.push(self.runtime.value_i64_type.into());
@@ -331,11 +295,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             } else {
-                // Non-actor store methods: take self (store Map) as first param
                 for method in &store.methods {
                     if method.kind == FunctionKind::Method {
                         let mangled = format!("{}_{}", store.name, method.name);
-                        let mut param_types: Vec<BasicMetadataTypeEnum> = 
+                        let mut param_types: Vec<BasicMetadataTypeEnum> =
                             vec![self.runtime.value_i64_type.into()];
                         for _ in 0..method.params.len() {
                             param_types.push(self.runtime.value_i64_type.into());
@@ -343,42 +306,45 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let fn_type = self.runtime.value_i64_type.fn_type(&param_types, false);
                         let llvm_fn = self.module.add_function(&mangled, fn_type, None);
                         self.functions.insert(mangled.clone(), llvm_fn);
-                        self.store_methods.insert(method.name.clone(), (store.name.clone(), method.params.len()));
+                        self.store_methods.insert(
+                            method.name.clone(),
+                            (store.name.clone(), method.params.len()),
+                        );
                     }
                 }
             }
         }
-        
-        // Register enum constructors from type definitions
+
         for type_def in &model.type_defs {
             for variant in &type_def.variants {
-                // Track constructor: (enum_name, field_count)
                 self.enum_constructors.insert(
-                    variant.name.clone(), 
-                    (type_def.name.clone(), variant.fields.len())
+                    variant.name.clone(),
+                    (type_def.name.clone(), variant.fields.len()),
                 );
             }
-            // Declare type methods (mirrors store method pattern)
+
             for method in &type_def.methods {
                 if method.kind == FunctionKind::Method {
                     let mangled = format!("{}_{}", type_def.name, method.name);
-                    let mut param_types: Vec<BasicMetadataTypeEnum> = 
-                        vec![self.runtime.value_i64_type.into()]; // self
+                    let mut param_types: Vec<BasicMetadataTypeEnum> =
+                        vec![self.runtime.value_i64_type.into()];
                     for _ in 0..method.params.len() {
                         param_types.push(self.runtime.value_i64_type.into());
                     }
                     let fn_type = self.runtime.value_i64_type.fn_type(&param_types, false);
                     let llvm_fn = self.module.add_function(&mangled, fn_type, None);
                     self.functions.insert(mangled.clone(), llvm_fn);
-                    self.store_methods.insert(method.name.clone(), (type_def.name.clone(), method.params.len()));
+                    self.store_methods.insert(
+                        method.name.clone(),
+                        (type_def.name.clone(), method.params.len()),
+                    );
                 }
             }
         }
-        
+
         self.build_global_initializer(&model.globals)?;
-        
+
         for function in &model.functions {
-            // C3.5: Skip unreachable functions
             if !reachable.contains(&function.name) {
                 continue;
             }
@@ -386,7 +352,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_function_body(function, *llvm_fn)?;
             }
         }
-        // Build store/actor method bodies
+
         for store in &model.stores {
             if store.is_actor {
                 for method in &store.methods {
@@ -398,7 +364,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             } else {
-                // Non-actor store methods
                 for method in &store.methods {
                     if method.kind == FunctionKind::Method {
                         let mangled = format!("{}_{}", store.name, method.name);
@@ -409,7 +374,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        // Build type method bodies (same mechanism as store methods)
+
         for type_def in &model.type_defs {
             for method in &type_def.methods {
                 if method.kind == FunctionKind::Method {
@@ -420,8 +385,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        
-        // Generate store/actor constructor bodies
+
         for store in &model.stores {
             if store.is_actor {
                 self.build_actor_constructor(store)?;
@@ -429,40 +393,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store_constructor(store)?;
             }
         }
-        
-        // Emit a minimal main that initializes globals
-        let main_fn = self
-            .module
-            .add_function("main", self.context.i32_type().fn_type(&[], false), None);
+
+        let main_fn =
+            self.module
+                .add_function("main", self.context.i32_type().fn_type(&[], false), None);
         let main_entry = self.context.append_basic_block(main_fn, "entry");
         self.builder.position_at_end(main_entry);
         self.ensure_globals_initialized();
         if let Some(init_fn) = self.global_init_fn {
-            self.builder.build_call(init_fn, &[], "init_globals").unwrap();
+            self.builder
+                .build_call(init_fn, &[], "init_globals")
+                .unwrap();
         }
-        // Build a handler closure that calls __user_main once per message
+
         if let Some(user_main) = self.functions.get("main") {
-            // Create trampoline function handler(self, msg)
             let handler_ty = self.context.void_type().fn_type(
-                &[self.runtime.value_ptr_type.into(), self.runtime.value_ptr_type.into()],
+                &[
+                    self.runtime.value_ptr_type.into(),
+                    self.runtime.value_ptr_type.into(),
+                ],
                 false,
             );
-            let handler_fn = self.module.add_function("__coral_main_handler", handler_ty, None);
+            let handler_fn = self
+                .module
+                .add_function("__coral_main_handler", handler_ty, None);
             let h_entry = self.context.append_basic_block(handler_fn, "entry");
             self.builder.position_at_end(h_entry);
             let _ = self.builder.build_call(*user_main, &[], "call_user_main");
-            // Flush all persistent stores before exiting
+
             if self.has_persistent_stores {
-                let _ = self.builder.build_call(self.runtime.store_save_all, &[], "save_stores");
+                let _ = self
+                    .builder
+                    .build_call(self.runtime.store_save_all, &[], "save_stores");
             }
-            // Signal that main handler is done
-            let _ = self.builder.build_call(self.runtime.main_done_signal, &[], "main_done");
+
+            let _ = self
+                .builder
+                .build_call(self.runtime.main_done_signal, &[], "main_done");
             self.builder.build_return(None).unwrap();
 
-            // Return builder to main entry before constructing closure/actor
             self.builder.position_at_end(main_entry);
 
-            // Make closure with null env/release
             let handler_closure = self.call_runtime_ptr(
                 self.runtime.make_closure,
                 &[
@@ -478,16 +449,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &[handler_closure.into()],
                 "main_actor",
             );
-            // Send unit to trigger handler
+
             let unit = self.wrap_unit();
             let unit_ptr = self.nb_to_ptr(unit);
-            let _ = self.call_runtime_ptr(self.runtime.actor_send, &[actor.into(), unit_ptr.into()], "send_unit");
-            // Wait for main actor to complete
+            let _ = self.call_runtime_ptr(
+                self.runtime.actor_send,
+                &[actor.into(), unit_ptr.into()],
+                "send_unit",
+            );
+
             let _ = self.call_runtime_ptr(self.runtime.main_wait, &[], "wait_main");
         }
-        self.builder.build_return(Some(&self.context.i32_type().const_int(0, false))).unwrap();
+        self.builder
+            .build_return(Some(&self.context.i32_type().const_int(0, false)))
+            .unwrap();
 
-        // CC2.3: Finalize DWARF debug info before returning the module.
         if let Some(dbg) = &self.debug_ctx {
             dbg.builder.finalize();
         }
@@ -495,10 +471,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(self.module)
     }
 
-    // ====================== C3.5: Dead Function Elimination ======================
-
-    /// Check whether a function body contains a direct call to itself (recursion).
-    /// Used by C3.1 inlining to avoid marking recursive functions as `alwaysinline`.
     fn body_calls_self(block: &Block, fn_name: &str) -> bool {
         for stmt in &block.statements {
             if Self::stmt_calls_self(stmt, fn_name) {
@@ -540,9 +512,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 false
             }
-            Statement::While { condition, body, .. } => {
-                Self::expr_calls_self(condition, name) || Self::body_calls_self(body, name)
-            }
+            Statement::While {
+                condition, body, ..
+            } => Self::expr_calls_self(condition, name) || Self::body_calls_self(body, name),
             Statement::For { iterable, body, .. } => {
                 Self::expr_calls_self(iterable, name) || Self::body_calls_self(body, name)
             }
@@ -550,11 +522,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Self::expr_calls_self(iterable, name) || Self::body_calls_self(body, name)
             }
             Statement::ForRange {
-                start, end, step, body, ..
+                start,
+                end,
+                step,
+                body,
+                ..
             } => {
                 Self::expr_calls_self(start, name)
                     || Self::expr_calls_self(end, name)
-                    || step.as_ref().map_or(false, |s| Self::expr_calls_self(s, name))
+                    || step
+                        .as_ref()
+                        .map_or(false, |s| Self::expr_calls_self(s, name))
                     || Self::body_calls_self(body, name)
             }
             Statement::FieldAssign { target, value, .. } => {
@@ -597,8 +575,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Index { target, index, .. } => {
                 Self::expr_calls_self(target, name) || Self::expr_calls_self(index, name)
             }
-            Expression::Slice { target, start, end, .. } => {
-                Self::expr_calls_self(target, name) || Self::expr_calls_self(start, name) || Self::expr_calls_self(end, name)
+            Expression::Slice {
+                target, start, end, ..
+            } => {
+                Self::expr_calls_self(target, name)
+                    || Self::expr_calls_self(start, name)
+                    || Self::expr_calls_self(end, name)
             }
             Expression::List(items, _) => items.iter().any(|i| Self::expr_calls_self(i, name)),
             Expression::Map(entries, _) => entries
@@ -635,52 +617,51 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// C3.4: Compute a cache key for a pure (side-effect-free) expression.
-    /// Returns Some(key) if the expression is cacheable, None if it has side effects
-    /// or isn't worth caching (e.g., simple variable reads or literals).
-    /// Conservative: only caches pure computations (binary/unary on values).
-    /// Does NOT cache member/index access (may read from mutable stores/maps).
     fn expr_cache_key(expr: &Expression) -> Option<String> {
         match expr {
-            // Variable reads and literals are already cheap — not worth caching
-            Expression::Identifier(..) | Expression::Integer(..) | Expression::Float(..)
-            | Expression::Bool(..) | Expression::String(..) | Expression::Bytes(..) => None,
-            // Binary on pure sub-expressions
-            Expression::Binary { op, left, right, .. } => {
+            Expression::Identifier(..)
+            | Expression::Integer(..)
+            | Expression::Float(..)
+            | Expression::Bool(..)
+            | Expression::String(..)
+            | Expression::Bytes(..) => None,
+
+            Expression::Binary {
+                op, left, right, ..
+            } => {
                 let lk = Self::expr_cache_key_inner(left)?;
                 let rk = Self::expr_cache_key_inner(right)?;
                 Some(format!("({:?} {} {})", op, lk, rk))
             }
-            // Unary on pure sub-expression
-            Expression::Unary { op, expr: inner, .. } => {
+
+            Expression::Unary {
+                op, expr: inner, ..
+            } => {
                 let ik = Self::expr_cache_key_inner(inner)?;
                 Some(format!("({:?} {})", op, ik))
             }
-            // Member and Index accesses are NOT cached — they may read from mutable
-            // stores/maps and caching them could return stale values.
+
             Expression::Member { .. } | Expression::Index { .. } | Expression::Slice { .. } => None,
-            // Only cache calls to known-pure global functions (not methods on objects)
-            Expression::Call { callee, args, .. } => {
-                match callee.as_ref() {
-                    Expression::Identifier(name, _) if Self::is_pure_function(name) => {
-                        let mut key = format!("{}(", name);
-                        for (i, arg) in args.iter().enumerate() {
-                            if i > 0 { key.push(','); }
-                            key.push_str(&Self::expr_cache_key_inner(arg)?);
+
+            Expression::Call { callee, args, .. } => match callee.as_ref() {
+                Expression::Identifier(name, _) if Self::is_pure_function(name) => {
+                    let mut key = format!("{}(", name);
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            key.push(',');
                         }
-                        key.push(')');
-                        Some(key)
+                        key.push_str(&Self::expr_cache_key_inner(arg)?);
                     }
-                    _ => None,
+                    key.push(')');
+                    Some(key)
                 }
-            }
-            // Everything else (if/match/lambda/etc.) — not cached
+                _ => None,
+            },
+
             _ => None,
         }
     }
 
-    /// Inner helper: produces a key string for any pure sub-expression,
-    /// including simple variables and literals.
     fn expr_cache_key_inner(expr: &Expression) -> Option<String> {
         match expr {
             Expression::Identifier(name, _) => Some(format!("v:{}", name)),
@@ -688,23 +669,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Float(f, _) => Some(format!("f:{}", f)),
             Expression::Bool(b, _) => Some(format!("b:{}", b)),
             Expression::String(s, _) => Some(format!("s:{}", s)),
-            // For compound expressions, delegate to the outer key computation
+
             other => Self::expr_cache_key(other),
         }
     }
 
-    /// Check if a function name refers to a known-pure builtin (no side effects).
     fn is_pure_function(name: &str) -> bool {
-        matches!(name, "len" | "length" | "abs" | "sqrt" | "min" | "max"
-            | "floor" | "ceil" | "round" | "to_string" | "to_number"
-            | "type_of" | "is_number" | "is_string" | "is_bool" | "is_list" | "is_map")
+        matches!(
+            name,
+            "len"
+                | "length"
+                | "abs"
+                | "sqrt"
+                | "min"
+                | "max"
+                | "floor"
+                | "ceil"
+                | "round"
+                | "to_string"
+                | "to_number"
+                | "type_of"
+                | "is_number"
+                | "is_string"
+                | "is_bool"
+                | "is_list"
+                | "is_map"
+        )
     }
 
-    // ====================== C4.2: LLVM Function Attributes ======================
-
-    /// Check if a user-defined function body is free of side effects (pure).
-    /// Conservative: returns true only for simple functions with no calls to
-    /// non-pure builtins, no log/print, no I/O, no actor sends.
     fn is_function_pure(body: &Block) -> bool {
         for stmt in &body.statements {
             if !Self::is_statement_pure(stmt) {
@@ -722,13 +714,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         match stmt {
             Statement::Binding(binding) => Self::is_expression_pure(&binding.value),
             Statement::Expression(expr) => Self::is_expression_pure(expr),
-            Statement::If { condition, body, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                else_body,
+                ..
+            } => {
                 Self::is_expression_pure(condition)
                     && Self::is_block_pure(body)
-                    && else_body.as_ref().map_or(true, |eb| Self::is_block_pure(eb))
+                    && else_body
+                        .as_ref()
+                        .map_or(true, |eb| Self::is_block_pure(eb))
             }
             Statement::Return(expr, _) => Self::is_expression_pure(expr),
-            _ => false, // For/while/match/send/spawn etc. are not pure
+            _ => false,
         }
     }
 
@@ -738,13 +737,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return false;
             }
         }
-        block.value.as_ref().map_or(true, |v| Self::is_expression_pure(v))
+        block
+            .value
+            .as_ref()
+            .map_or(true, |v| Self::is_expression_pure(v))
     }
 
     fn is_expression_pure(expr: &Expression) -> bool {
         match expr {
-            Expression::Integer(_, _) | Expression::Float(_, _) | Expression::String(_, _)
-            | Expression::Bool(_, _) | Expression::Unit | Expression::None(_)
+            Expression::Integer(_, _)
+            | Expression::Float(_, _)
+            | Expression::String(_, _)
+            | Expression::Bool(_, _)
+            | Expression::Unit
+            | Expression::None(_)
             | Expression::Identifier(_, _) => true,
             Expression::Binary { left, right, .. } => {
                 Self::is_expression_pure(left) && Self::is_expression_pure(right)
@@ -758,7 +764,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 false
             }
-            Expression::Ternary { condition, then_branch, else_branch, .. } => {
+            Expression::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::is_expression_pure(condition)
                     && Self::is_expression_pure(then_branch)
                     && Self::is_expression_pure(else_branch)
@@ -767,28 +778,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// C4.2: Apply LLVM function attributes based on purity analysis.
     fn apply_function_attributes(&self, llvm_fn: FunctionValue<'ctx>, is_pure: bool) {
-        // All Coral user functions can be marked nounwind — Coral doesn't use
-        // LLVM exception handling (unwind/invoke); errors are value-based.
         let nounwind_id = Attribute::get_named_enum_kind_id("nounwind");
         let nounwind = self.context.create_enum_attribute(nounwind_id, 0);
         llvm_fn.add_attribute(AttributeLoc::Function, nounwind);
 
-        // C4.3: noalias on all function parameters.
-        // In Coral's NaN-boxed model, function arguments are i64 values passed
-        // by value — they never alias any existing memory location.
         let noalias_id = Attribute::get_named_enum_kind_id("noalias");
         let noalias = self.context.create_enum_attribute(noalias_id, 0);
         let param_count = llvm_fn.count_params();
         for i in 0..param_count {
-            llvm_fn.add_attribute(AttributeLoc::Param(i), noalias);
+            if llvm_fn.get_nth_param(i).map_or(false, |p| p.is_pointer_value()) {
+                llvm_fn.add_attribute(AttributeLoc::Param(i), noalias);
+            }
         }
 
         if is_pure {
-            // Pure functions: no observable side effects, reads no external state
             let readnone_id = Attribute::get_named_enum_kind_id("memory");
-            // memory(none) = 0 — tells LLVM the function doesn't access any memory
+
             let readnone = self.context.create_enum_attribute(readnone_id, 0);
             llvm_fn.add_attribute(AttributeLoc::Function, readnone);
 
@@ -798,31 +804,36 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// C4.2 + C4.3: Apply attributes to runtime FFI declarations.
     fn apply_runtime_attributes(&self) {
         let nounwind_id = Attribute::get_named_enum_kind_id("nounwind");
         let nounwind = self.context.create_enum_attribute(nounwind_id, 0);
 
-        // Core runtime functions that don't throw LLVM exceptions
         let nounwind_fns = [
-            self.runtime.make_number, self.runtime.make_string,
-            self.runtime.make_bool, self.runtime.make_unit,
-            self.runtime.make_bytes, self.runtime.make_list,
+            self.runtime.make_number,
+            self.runtime.make_string,
+            self.runtime.make_bool,
+            self.runtime.make_unit,
+            self.runtime.make_bytes,
+            self.runtime.make_list,
             self.runtime.make_map,
-            self.runtime.value_add, self.runtime.value_equals,
-            self.runtime.value_not_equals, self.runtime.value_length,
+            self.runtime.value_add,
+            self.runtime.value_equals,
+            self.runtime.value_not_equals,
+            self.runtime.value_length,
             self.runtime.type_of,
-            self.runtime.list_push, self.runtime.list_get,
-            self.runtime.list_length, self.runtime.list_pop,
-            self.runtime.map_get, self.runtime.map_set,
-            self.runtime.map_length, self.runtime.map_keys,
+            self.runtime.list_push,
+            self.runtime.list_get,
+            self.runtime.list_length,
+            self.runtime.list_pop,
+            self.runtime.map_get,
+            self.runtime.map_set,
+            self.runtime.map_length,
+            self.runtime.map_keys,
         ];
         for f in &nounwind_fns {
             f.add_attribute(AttributeLoc::Function, nounwind);
         }
 
-        // C4.3: noalias on return values of allocation functions.
-        // Freshly allocated objects don't alias any existing pointer.
         let noalias_id = Attribute::get_named_enum_kind_id("noalias");
         let noalias = self.context.create_enum_attribute(noalias_id, 0);
         let allocator_fns = [
@@ -839,12 +850,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Compute the set of function names transitively reachable from `main` and
-    /// global initializers.  Functions not in this set are dead code and won't be
-    /// emitted to LLVM IR, reducing binary size and compilation time.
     fn compute_reachable_functions(model: &SemanticModel) -> HashSet<String> {
-        // If there's no main function, skip DCE — all functions are reachable.
-        // This handles library/fragment compilation and tests without main.
         let has_main = model.functions.iter().any(|f| f.name == "main");
         if !has_main {
             let mut all: HashSet<String> = HashSet::new();
@@ -868,7 +874,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             return all;
         }
 
-        // Build a map from function name → body for lookup
         let mut fn_bodies: HashMap<String, &Block> = HashMap::new();
         for f in &model.functions {
             fn_bodies.insert(f.name.clone(), &f.body);
@@ -886,8 +891,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Collect all mangled method names keyed by their base method name,
-        // so method calls can resolve to the right mangled forms.
         let mut method_name_map: HashMap<String, Vec<String>> = HashMap::new();
         for store in &model.stores {
             for method in &store.methods {
@@ -908,7 +911,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Collect all enum constructor names and store constructor names
         let mut all_names: HashSet<String> = HashSet::new();
         for f in &model.functions {
             all_names.insert(f.name.clone());
@@ -928,11 +930,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Worklist algorithm: start from "main" + globals, expand transitively
         let mut reachable: HashSet<String> = HashSet::new();
         let mut worklist: Vec<String> = vec!["main".to_string()];
 
-        // Global initializers can reference any function
         for global in &model.globals {
             Self::collect_expr_refs(&global.value, &all_names, &method_name_map, &mut worklist);
         }
@@ -943,8 +943,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             reachable.insert(name.clone());
 
-            // If this is a store constructor (make_X), also mark all methods of
-            // that store as reachable since they may be called via method dispatch.
             if let Some(store_name) = name.strip_prefix("make_") {
                 for store in &model.stores {
                     if store.name == store_name {
@@ -972,7 +970,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         reachable
     }
 
-    /// Collect function references from a block (statements + optional trailing expression).
     fn collect_block_refs(
         block: &Block,
         all_names: &HashSet<String>,
@@ -987,7 +984,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Collect function references from a statement.
     fn collect_stmt_refs(
         stmt: &Statement,
         all_names: &HashSet<String>,
@@ -1001,7 +997,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             Statement::Expression(e) | Statement::Return(e, _) => {
                 Self::collect_expr_refs(e, all_names, method_map, worklist);
             }
-            Statement::If { condition, body, elif_branches, else_body, .. } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
                 Self::collect_expr_refs(condition, all_names, method_map, worklist);
                 Self::collect_block_refs(body, all_names, method_map, worklist);
                 for (cond, blk) in elif_branches {
@@ -1012,7 +1014,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Self::collect_block_refs(eb, all_names, method_map, worklist);
                 }
             }
-            Statement::While { condition, body, .. } => {
+            Statement::While {
+                condition, body, ..
+            } => {
                 Self::collect_expr_refs(condition, all_names, method_map, worklist);
                 Self::collect_block_refs(body, all_names, method_map, worklist);
             }
@@ -1024,7 +1028,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Self::collect_expr_refs(iterable, all_names, method_map, worklist);
                 Self::collect_block_refs(body, all_names, method_map, worklist);
             }
-            Statement::ForRange { start, end, step, body, .. } => {
+            Statement::ForRange {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
                 Self::collect_expr_refs(start, all_names, method_map, worklist);
                 Self::collect_expr_refs(end, all_names, method_map, worklist);
                 if let Some(s) = step {
@@ -1043,7 +1053,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Collect function references from an expression.
     fn collect_expr_refs(
         expr: &Expression,
         all_names: &HashSet<String>,
@@ -1052,15 +1061,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) {
         match expr {
             Expression::Identifier(name, _) => {
-                // A bare identifier may be a function reference (e.g., passed as an argument).
                 if all_names.contains(name) {
                     worklist.push(name.clone());
                 }
             }
             Expression::Call { callee, args, .. } => {
-                // Check for method call pattern: obj.method(args)
-                if let Expression::Member { target, property, .. } = callee.as_ref() {
-                    // Mark all mangled methods that match this property name as reachable
+                if let Expression::Member {
+                    target, property, ..
+                } = callee.as_ref()
+                {
                     if let Some(candidates) = method_map.get(property) {
                         for mangled in candidates {
                             worklist.push(mangled.clone());
@@ -1074,8 +1083,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Self::collect_expr_refs(arg, all_names, method_map, worklist);
                 }
             }
-            Expression::Member { target, property, .. } => {
-                // Property access alone (no call) — could be used as a method reference
+            Expression::Member {
+                target, property, ..
+            } => {
                 if let Some(candidates) = method_map.get(property) {
                     for mangled in candidates {
                         worklist.push(mangled.clone());
@@ -1093,7 +1103,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Spread(inner, _) => {
                 Self::collect_expr_refs(inner, all_names, method_map, worklist);
             }
-            Expression::Ternary { condition, then_branch, else_branch, .. } => {
+            Expression::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 Self::collect_expr_refs(condition, all_names, method_map, worklist);
                 Self::collect_expr_refs(then_branch, all_names, method_map, worklist);
                 Self::collect_expr_refs(else_branch, all_names, method_map, worklist);
@@ -1136,7 +1151,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Self::collect_expr_refs(target, all_names, method_map, worklist);
                 Self::collect_expr_refs(index, all_names, method_map, worklist);
             }
-            Expression::Slice { target, start, end, .. } => {
+            Expression::Slice {
+                target, start, end, ..
+            } => {
                 Self::collect_expr_refs(target, all_names, method_map, worklist);
                 Self::collect_expr_refs(start, all_names, method_map, worklist);
                 Self::collect_expr_refs(end, all_names, method_map, worklist);
@@ -1155,14 +1172,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::PtrLoad { address, .. } => {
                 Self::collect_expr_refs(address, all_names, method_map, worklist);
             }
-            Expression::ListComprehension { body, iterable, condition, .. } => {
+            Expression::ListComprehension {
+                body,
+                iterable,
+                condition,
+                ..
+            } => {
                 Self::collect_expr_refs(iterable, all_names, method_map, worklist);
                 Self::collect_expr_refs(body, all_names, method_map, worklist);
                 if let Some(cond) = condition {
                     Self::collect_expr_refs(cond, all_names, method_map, worklist);
                 }
             }
-            Expression::MapComprehension { key, value, iterable, condition, .. } => {
+            Expression::MapComprehension {
+                key,
+                value,
+                iterable,
+                condition,
+                ..
+            } => {
                 Self::collect_expr_refs(iterable, all_names, method_map, worklist);
                 Self::collect_expr_refs(key, all_names, method_map, worklist);
                 Self::collect_expr_refs(value, all_names, method_map, worklist);
@@ -1170,7 +1198,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Self::collect_expr_refs(cond, all_names, method_map, worklist);
                 }
             }
-            // Leaf expressions: no function references
+
             Expression::Unit
             | Expression::None(_)
             | Expression::Integer(_, _)
@@ -1184,7 +1212,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Collect constructor names referenced in match patterns (e.g., `Some(v)`, `None`).
     fn collect_match_pattern_refs(
         pattern: &MatchPattern,
         all_names: &HashSet<String>,
@@ -1214,12 +1241,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Self::collect_match_pattern_refs(alt, all_names, worklist);
                 }
             }
-            MatchPattern::Integer(_) | MatchPattern::Bool(_) | MatchPattern::String(_)
-            | MatchPattern::Wildcard(_) | MatchPattern::Range { .. } | MatchPattern::RangeBinding { .. } | MatchPattern::Rest(..) => {}
+            MatchPattern::Integer(_)
+            | MatchPattern::Bool(_)
+            | MatchPattern::String(_)
+            | MatchPattern::Wildcard(_)
+            | MatchPattern::Range { .. }
+            | MatchPattern::RangeBinding { .. }
+            | MatchPattern::Rest(..) => {}
         }
     }
-
-    // ====================== End C3.5 ======================
 
     fn map_extern_type(&self, ann: &TypeAnnotation) -> Result<BasicTypeEnum<'ctx>, Diagnostic> {
         let name = ann
@@ -1238,7 +1268,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Err(Diagnostic::new(
                     format!("unsupported extern type `{}`", name),
                     ann.span,
-                ))
+                ));
             }
         };
         Ok(ty)
@@ -1255,9 +1285,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(BasicTypeEnum::FloatType(t)) => t.fn_type(&param_meta, false),
             Some(other) => {
                 return Err(Diagnostic::new(
-                    format!("extern return type not supported: `{}`", self.format_type_enum(*other)),
+                    format!(
+                        "extern return type not supported: `{}`",
+                        self.format_type_enum(*other)
+                    ),
                     Span::default(),
-                ))
+                ));
             }
             None => self.context.void_type().fn_type(&param_meta, false),
         };
@@ -1280,11 +1313,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         function: &Function,
         llvm_fn: FunctionValue<'ctx>,
     ) -> Result<(), Diagnostic> {
-        // C3.1: Small function inlining — annotate small, non-recursive functions
-        // with LLVM's alwaysinline attribute so they get inlined at call sites.
         if function.name != "main" {
-            let stmt_count = function.body.statements.len()
-                + if function.body.value.is_some() { 1 } else { 0 };
+            let stmt_count =
+                function.body.statements.len() + if function.body.value.is_some() { 1 } else { 0 };
             if stmt_count <= 5 && !Self::body_calls_self(&function.body, &function.name) {
                 let kind_id = Attribute::get_named_enum_kind_id("alwaysinline");
                 let attr = self.context.create_enum_attribute(kind_id, 0);
@@ -1292,11 +1323,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // C4.2: Apply LLVM function attributes based on purity analysis.
         let is_pure = Self::is_function_pure(&function.body);
         self.apply_function_attributes(llvm_fn, is_pure);
 
-        // CC2.3: Attach DISubprogram debug metadata to the function.
         let di_scope: Option<DIScope<'ctx>> = if let Some(dbg) = &self.debug_ctx {
             let (line, _) = dbg.line_index.line_col(function.body.span.start);
             let subprogram = dbg.builder.create_function(
@@ -1333,26 +1362,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             lambda_out_param: None,
         };
 
-        // Parameters are NaN-boxed i64 values
-        for (param, param_ast) in llvm_fn
-            .get_param_iter()
-            .zip(function.params.iter())
-        {
+        for (param, param_ast) in llvm_fn.get_param_iter().zip(function.params.iter()) {
             let value_nb = param.into_int_value();
             self.store_variable(&mut ctx, &param_ast.name, value_nb);
         }
 
-        // C3.3: The function body's tail expression is in tail position
         ctx.in_tail_position = true;
         let block_value = self.emit_block(&mut ctx, &function.body)?;
         ctx.in_tail_position = false;
-        // Return Value* pointer directly, not as f64
+
         self.builder.build_return(Some(&block_value)).unwrap();
         Ok(())
     }
 
-    /// Build body for an actor @message method.
-    /// Actor methods have a hidden first parameter (state Map) accessible as `self`.
     fn build_actor_method_body(
         &mut self,
         function: &Function,
@@ -1373,11 +1395,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             lambda_out_param: None,
         };
 
-        // First param is the state (NaN-boxed i64), inject as `self`
         let state_val = llvm_fn.get_nth_param(0).unwrap().into_int_value();
         self.store_variable(&mut ctx, "self", state_val);
 
-        // Remaining params are user params (starting at index 1) - NaN-boxed i64
         for (i, param_ast) in function.params.iter().enumerate() {
             let param = llvm_fn.get_nth_param((i + 1) as u32).unwrap();
             let value_nb = param.into_int_value();
@@ -1385,7 +1405,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         let block_value = self.emit_block(&mut ctx, &function.body)?;
-        // Return Value* pointer directly
+
         self.builder.build_return(Some(&block_value)).unwrap();
         Ok(())
     }
@@ -1413,7 +1433,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => self.emit_expression(ctx, &binding.value)?,
                     };
                     self.store_variable(ctx, &binding.name, value);
-                    // C3.4: Invalidate CSE cache entries involving this variable
+
                     let var_key = format!("v:{}", binding.name);
                     ctx.cse_cache.retain(|k, _| !k.contains(&var_key));
                 }
@@ -1421,11 +1441,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let _ = self.emit_expression(ctx, expr)?;
                 }
                 Statement::Return(expr, _) => {
-                    // C3.3: Return expression is in tail position
                     ctx.in_tail_position = true;
                     let value = self.emit_expression(ctx, expr)?;
                     ctx.in_tail_position = false;
-                    // S4.6: If inside a lambda, store to out_param and ret void
+
                     if let Some(out_ptr) = ctx.lambda_out_param {
                         let result_ptr = self.nb_to_ptr(value);
                         self.builder.build_store(out_ptr, result_ptr).unwrap();
@@ -1433,12 +1452,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         self.builder.build_return(Some(&value)).unwrap();
                     }
-                    // Return a zero sentinel without emitting any LLVM instruction.
-                    // const_zero() is a compile-time constant, so no instruction is added
-                    // after the `ret` terminator.
+
                     return Ok(self.runtime.value_i64_type.const_zero());
                 }
-                Statement::If { condition, body, elif_branches, else_body, .. } => {
+                Statement::If {
+                    condition,
+                    body,
+                    elif_branches,
+                    else_body,
+                    ..
+                } => {
                     let function = ctx.function;
                     let cond_is_bool = self.expr_is_bool(condition);
                     let cond_value = self.emit_expression(ctx, condition)?;
@@ -1451,28 +1474,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let then_bb = self.context.append_basic_block(function, "if_then");
                     let merge_bb = self.context.append_basic_block(function, "if_merge");
 
-                    // Track (value, source_block) pairs for PHI node
-                    let mut phi_incoming: Vec<(IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+                    let mut phi_incoming: Vec<(
+                        IntValue<'ctx>,
+                        inkwell::basic_block::BasicBlock<'ctx>,
+                    )> = Vec::new();
 
-                    // Determine initial else target
                     let first_else_bb = if elif_branches.is_empty() && else_body.is_none() {
                         merge_bb
                     } else {
                         self.context.append_basic_block(function, "if_else")
                     };
-                    self.builder.build_conditional_branch(cond_bool, then_bb, first_else_bb).unwrap();
+                    self.builder
+                        .build_conditional_branch(cond_bool, then_bb, first_else_bb)
+                        .unwrap();
 
-                    // Emit then body
                     self.builder.position_at_end(then_bb);
-                    ctx.cse_cache.clear(); // C3.4: Clear at control flow boundary
+                    ctx.cse_cache.clear();
                     let then_value = self.emit_block(ctx, body)?;
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
                         let then_end_bb = self.builder.get_insert_block().unwrap();
                         phi_incoming.push((then_value, then_end_bb));
                         self.builder.build_unconditional_branch(merge_bb).unwrap();
                     }
 
-                    // Emit elif/else chain
                     if !elif_branches.is_empty() || else_body.is_some() {
                         let mut current_else_bb = first_else_bb;
                         for (i, (elif_cond, elif_body)) in elif_branches.iter().enumerate() {
@@ -1485,18 +1515,34 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.value_to_bool(elif_cond_val)
                             };
 
-                            let elif_then_bb = self.context.append_basic_block(function, &format!("elif_then_{i}"));
-                            let next_else_bb = if i + 1 < elif_branches.len() || else_body.is_some() {
-                                self.context.append_basic_block(function, &format!("elif_else_{i}"))
+                            let elif_then_bb = self
+                                .context
+                                .append_basic_block(function, &format!("elif_then_{i}"));
+                            let next_else_bb = if i + 1 < elif_branches.len() || else_body.is_some()
+                            {
+                                self.context
+                                    .append_basic_block(function, &format!("elif_else_{i}"))
                             } else {
                                 merge_bb
                             };
-                            self.builder.build_conditional_branch(elif_cond_bool, elif_then_bb, next_else_bb).unwrap();
+                            self.builder
+                                .build_conditional_branch(
+                                    elif_cond_bool,
+                                    elif_then_bb,
+                                    next_else_bb,
+                                )
+                                .unwrap();
 
                             self.builder.position_at_end(elif_then_bb);
-                            ctx.cse_cache.clear(); // C3.4
+                            ctx.cse_cache.clear();
                             let elif_value = self.emit_block(ctx, elif_body)?;
-                            if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                            if self
+                                .builder
+                                .get_insert_block()
+                                .unwrap()
+                                .get_terminator()
+                                .is_none()
+                            {
                                 let elif_end_bb = self.builder.get_insert_block().unwrap();
                                 phi_incoming.push((elif_value, elif_end_bb));
                                 self.builder.build_unconditional_branch(merge_bb).unwrap();
@@ -1505,9 +1551,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         if let Some(else_block) = else_body {
                             self.builder.position_at_end(current_else_bb);
-                            ctx.cse_cache.clear(); // C3.4
+                            ctx.cse_cache.clear();
                             let else_value = self.emit_block(ctx, else_block)?;
-                            if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+                            if self
+                                .builder
+                                .get_insert_block()
+                                .unwrap()
+                                .get_terminator()
+                                .is_none()
+                            {
                                 let else_end_bb = self.builder.get_insert_block().unwrap();
                                 phi_incoming.push((else_value, else_end_bb));
                                 self.builder.build_unconditional_branch(merge_bb).unwrap();
@@ -1515,18 +1567,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
 
-                    // If no else body, the implicit fall-through produces unit
-                    if else_body.is_none() && (elif_branches.is_empty() || elif_branches.last().is_some()) {
-                        // The merge_bb is the fall-through from the last condition check
-                        // when there's no else block. We need to add a unit value for that path.
-                        // Actually, we need a dedicated block for this since merge_bb is the target.
-                        // The fall-through already branches to merge_bb via the conditional branch.
-                        // We handle this by checking if merge_bb has predecessors without phi entries.
+                    if else_body.is_none()
+                        && (elif_branches.is_empty() || elif_branches.last().is_some())
+                    {
                     }
 
                     self.builder.position_at_end(merge_bb);
+                    ctx.cse_cache.clear();
 
-                    // Build PHI node if we have incoming values from branches
                     if !phi_incoming.is_empty() && else_body.is_some() {
                         let phi = self
                             .builder
@@ -1535,20 +1583,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                         for (val, bb) in &phi_incoming {
                             phi.add_incoming(&[(val as &dyn BasicValue<'ctx>, *bb)]);
                         }
-                        // Store the if-expression result as __if_result for potential use
+
                         let if_result = phi.as_basic_value().into_int_value();
                         self.store_variable(ctx, "__if_result", if_result);
                     }
                 }
-                Statement::While { condition, body, .. } => {
+                Statement::While {
+                    condition, body, ..
+                } => {
                     let function = ctx.function;
                     let loop_header = self.context.append_basic_block(function, "while_cond");
                     let loop_body = self.context.append_basic_block(function, "while_body");
                     let loop_exit = self.context.append_basic_block(function, "while_exit");
 
-                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                    self.builder
+                        .build_unconditional_branch(loop_header)
+                        .unwrap();
 
-                    // Condition check
                     self.builder.position_at_end(loop_header);
                     let while_cond_is_bool = self.expr_is_bool(condition);
                     let cond_value = self.emit_expression(ctx, condition)?;
@@ -1557,26 +1608,42 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         self.value_to_bool(cond_value)
                     };
-                    self.builder.build_conditional_branch(cond_bool, loop_body, loop_exit).unwrap();
+                    self.builder
+                        .build_conditional_branch(cond_bool, loop_body, loop_exit)
+                        .unwrap();
 
-                    // Body
                     self.builder.position_at_end(loop_body);
-                    // R2.4: cooperative yield check at loop back-edge
-                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
-                    ctx.cse_cache.clear(); // C3.4
+
+                    self.builder
+                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                        .unwrap();
+                    ctx.cse_cache.clear();
                     ctx.loop_stack.push((loop_header, loop_exit));
                     self.emit_block(ctx, body)?;
                     ctx.loop_stack.pop();
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
 
                     self.builder.position_at_end(loop_exit);
                 }
-                Statement::For { variable, iterable, body, .. } => {
+                Statement::For {
+                    variable,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     let function = ctx.function;
                     let iter_value = self.emit_expression(ctx, iterable)?;
-                    // Create iterator from the iterable (works for lists and maps)
+
                     let iter_ptr = self.nb_to_ptr(iter_value);
                     let iter = self.call_runtime_ptr(
                         self.runtime.value_iter,
@@ -1588,53 +1655,82 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let loop_body = self.context.append_basic_block(function, "for_body");
                     let loop_exit = self.context.append_basic_block(function, "for_exit");
 
-                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                    self.builder
+                        .build_unconditional_branch(loop_header)
+                        .unwrap();
 
-                    // Get next element and check if iteration is done (Unit tag == 7)
                     self.builder.position_at_end(loop_header);
                     let elem_ptr = self.call_runtime_ptr(
                         self.runtime.value_iter_next,
                         &[iter.into()],
                         "for_next",
                     );
-                    // Read the tag byte at offset 0 of the Value struct
-                    let tag_ptr = self.builder.build_pointer_cast(
-                        elem_ptr,
-                        self.i8_type.ptr_type(AddressSpace::default()),
-                        "tag_ptr",
-                    ).unwrap();
-                    let tag_val = self.builder.build_load(self.i8_type, tag_ptr, "tag_val")
-                        .unwrap().into_int_value();
-                    let unit_tag = self.i8_type.const_int(7, false); // Unit = 7
-                    let is_done = self.builder.build_int_compare(
-                        IntPredicate::EQ, tag_val, unit_tag, "for_done",
-                    ).unwrap();
-                    self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
 
-                    // Body: bind loop variable (convert element pointer to NaN-boxed)
+                    let tag_ptr = self
+                        .builder
+                        .build_pointer_cast(
+                            elem_ptr,
+                            self.i8_type.ptr_type(AddressSpace::default()),
+                            "tag_ptr",
+                        )
+                        .unwrap();
+                    let tag_val = self
+                        .builder
+                        .build_load(self.i8_type, tag_ptr, "tag_val")
+                        .unwrap()
+                        .into_int_value();
+                    let unit_tag = self.i8_type.const_int(7, false);
+                    let is_done = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, tag_val, unit_tag, "for_done")
+                        .unwrap();
+                    self.builder
+                        .build_conditional_branch(is_done, loop_exit, loop_body)
+                        .unwrap();
+
                     self.builder.position_at_end(loop_body);
-                    // R2.4: cooperative yield check at loop back-edge
-                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
-                    ctx.cse_cache.clear(); // C3.4
+
+                    self.builder
+                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                        .unwrap();
+                    ctx.cse_cache.clear();
                     let elem_nb = self.ptr_to_nb(elem_ptr);
                     self.store_variable(ctx, variable, elem_nb);
                     ctx.loop_stack.push((loop_header, loop_exit));
                     self.emit_block(ctx, body)?;
                     ctx.loop_stack.pop();
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
 
-                    // Release the iterator after the loop
                     self.builder.position_at_end(loop_exit);
-                    self.call_runtime_void(self.runtime.value_release, &[iter.into()], "release_iter");
+                    self.call_runtime_void(
+                        self.runtime.value_release,
+                        &[iter.into()],
+                        "release_iter",
+                    );
                 }
-                Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+                Statement::ForKV {
+                    key_var,
+                    value_var,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     let function = ctx.function;
                     let iter_value = self.emit_expression(ctx, iterable)?;
-                    // Get map entries as a list of [key, value] pairs
-                    let entries_list = self.call_bridged(self.runtime.map_entries, &[iter_value], "forkv_entries");
-                    // Create iterator over the entries list
+
+                    let entries_list =
+                        self.call_bridged(self.runtime.map_entries, &[iter_value], "forkv_entries");
+
                     let entries_ptr = self.nb_to_ptr(entries_list);
                     let iter = self.call_runtime_ptr(
                         self.runtime.value_iter,
@@ -1646,54 +1742,89 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let loop_body = self.context.append_basic_block(function, "forkv_body");
                     let loop_exit = self.context.append_basic_block(function, "forkv_exit");
 
-                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                    self.builder
+                        .build_unconditional_branch(loop_header)
+                        .unwrap();
 
-                    // Get next entry pair and check if iteration is done (Unit tag == 7)
                     self.builder.position_at_end(loop_header);
                     let elem_ptr = self.call_runtime_ptr(
                         self.runtime.value_iter_next,
                         &[iter.into()],
                         "forkv_next",
                     );
-                    let tag_ptr = self.builder.build_pointer_cast(
-                        elem_ptr,
-                        self.i8_type.ptr_type(AddressSpace::default()),
-                        "tag_ptr",
-                    ).unwrap();
-                    let tag_val = self.builder.build_load(self.i8_type, tag_ptr, "tag_val")
-                        .unwrap().into_int_value();
+                    let tag_ptr = self
+                        .builder
+                        .build_pointer_cast(
+                            elem_ptr,
+                            self.i8_type.ptr_type(AddressSpace::default()),
+                            "tag_ptr",
+                        )
+                        .unwrap();
+                    let tag_val = self
+                        .builder
+                        .build_load(self.i8_type, tag_ptr, "tag_val")
+                        .unwrap()
+                        .into_int_value();
                     let unit_tag = self.i8_type.const_int(7, false);
-                    let is_done = self.builder.build_int_compare(
-                        IntPredicate::EQ, tag_val, unit_tag, "forkv_done",
-                    ).unwrap();
-                    self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+                    let is_done = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, tag_val, unit_tag, "forkv_done")
+                        .unwrap();
+                    self.builder
+                        .build_conditional_branch(is_done, loop_exit, loop_body)
+                        .unwrap();
 
-                    // Body: extract key and value from the [key, value] pair
                     self.builder.position_at_end(loop_body);
-                    // R2.4: cooperative yield check at loop back-edge
-                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
-                    ctx.cse_cache.clear(); // C3.4
+
+                    self.builder
+                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                        .unwrap();
+                    ctx.cse_cache.clear();
                     let pair_nb = self.ptr_to_nb(elem_ptr);
                     let index_zero = self.wrap_number(self.f64_type.const_float(0.0));
                     let index_one = self.wrap_number(self.f64_type.const_float(1.0));
-                    let key_nb = self.call_bridged(self.runtime.list_get, &[pair_nb, index_zero], "forkv_key");
-                    let val_nb = self.call_bridged(self.runtime.list_get, &[pair_nb, index_one], "forkv_val");
+                    let key_nb = self.call_bridged(
+                        self.runtime.list_get,
+                        &[pair_nb, index_zero],
+                        "forkv_key",
+                    );
+                    let val_nb = self.call_bridged(
+                        self.runtime.list_get,
+                        &[pair_nb, index_one],
+                        "forkv_val",
+                    );
                     self.store_variable(ctx, key_var, key_nb);
                     self.store_variable(ctx, value_var, val_nb);
                     ctx.loop_stack.push((loop_header, loop_exit));
                     self.emit_block(ctx, body)?;
                     ctx.loop_stack.pop();
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
 
-                    // Release the iterator after the loop
                     self.builder.position_at_end(loop_exit);
-                    self.call_runtime_void(self.runtime.value_release, &[iter.into()], "release_iter");
+                    self.call_runtime_void(
+                        self.runtime.value_release,
+                        &[iter.into()],
+                        "release_iter",
+                    );
                 }
-                Statement::ForRange { variable, start, end, step, body, .. } => {
-                    // Efficient counted loop: for i in start to end [step s]
-                    // All arithmetic done as f64, NaN-boxed only for body access
+                Statement::ForRange {
+                    variable,
+                    start,
+                    end,
+                    step,
+                    body,
+                    ..
+                } => {
                     let function = ctx.function;
                     let start_val = self.emit_expression(ctx, start)?;
                     let end_val = self.emit_expression(ctx, end)?;
@@ -1701,94 +1832,131 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let step_nb = self.emit_expression(ctx, step_expr)?;
                         self.value_to_number(step_nb)
                     } else {
-                        // Default step: 1.0
                         self.f64_type.const_float(1.0)
                     };
 
-                    // Extract f64 values for direct arithmetic
                     let start_f64 = self.value_to_number(start_val);
                     let end_f64 = self.value_to_number(end_val);
 
-                    // Allocate loop counter as f64
-                    let counter_alloca = self.builder.build_alloca(self.f64_type, "for_range_counter").unwrap();
+                    let counter_alloca = self
+                        .builder
+                        .build_alloca(self.f64_type, "for_range_counter")
+                        .unwrap();
                     self.builder.build_store(counter_alloca, start_f64).unwrap();
 
                     let loop_header = self.context.append_basic_block(function, "for_range_cond");
                     let loop_body = self.context.append_basic_block(function, "for_range_body");
                     let loop_exit = self.context.append_basic_block(function, "for_range_exit");
 
-                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                    self.builder
+                        .build_unconditional_branch(loop_header)
+                        .unwrap();
 
-                    // Check: counter < end (exclusive upper bound, like Python range)
                     self.builder.position_at_end(loop_header);
-                    let current = self.builder.build_load(self.f64_type, counter_alloca, "cur")
-                        .unwrap().into_float_value();
-                    let is_done = self.builder.build_float_compare(
-                        inkwell::FloatPredicate::OGE, current, end_f64, "for_range_done",
-                    ).unwrap();
-                    self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+                    let current = self
+                        .builder
+                        .build_load(self.f64_type, counter_alloca, "cur")
+                        .unwrap()
+                        .into_float_value();
+                    let is_done = self
+                        .builder
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OGE,
+                            current,
+                            end_f64,
+                            "for_range_done",
+                        )
+                        .unwrap();
+                    self.builder
+                        .build_conditional_branch(is_done, loop_exit, loop_body)
+                        .unwrap();
 
-                    // Body: wrap counter as NaN-boxed number, bind to variable
                     self.builder.position_at_end(loop_body);
-                    // R2.4: cooperative yield check at loop back-edge
-                    self.builder.build_call(self.runtime.actor_yield_check, &[], "yield_chk").unwrap();
-                    ctx.cse_cache.clear(); // C3.4
+
+                    self.builder
+                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                        .unwrap();
+                    ctx.cse_cache.clear();
                     let counter_nb = self.wrap_number(current);
                     self.store_variable(ctx, variable, counter_nb);
                     ctx.loop_stack.push((loop_header, loop_exit));
                     self.emit_block(ctx, body)?;
                     ctx.loop_stack.pop();
 
-                    // Increment counter: counter += step
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        let updated_current = self.builder.build_load(self.f64_type, counter_alloca, "cur_upd")
-                            .unwrap().into_float_value();
-                        let next = self.builder.build_float_add(updated_current, step_f64, "next_counter").unwrap();
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        let updated_current = self
+                            .builder
+                            .build_load(self.f64_type, counter_alloca, "cur_upd")
+                            .unwrap()
+                            .into_float_value();
+                        let next = self
+                            .builder
+                            .build_float_add(updated_current, step_f64, "next_counter")
+                            .unwrap();
                         self.builder.build_store(counter_alloca, next).unwrap();
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
 
                     self.builder.position_at_end(loop_exit);
                 }
-                Statement::FieldAssign { target, field, value, .. } => {
-                    // self.field is value → coral_map_set(self, "field", value)
+                Statement::FieldAssign {
+                    target,
+                    field,
+                    value,
+                    ..
+                } => {
                     let target_value = self.emit_expression(ctx, &target)?;
                     let key_value = self.emit_string_literal(&field);
                     let new_value = self.emit_expression(ctx, &value)?;
-                    
-                    // Bridge to pointer-based API
+
                     let target_ptr = self.nb_to_ptr(target_value);
                     let key_ptr = self.nb_to_ptr(key_value);
                     let new_ptr = self.nb_to_ptr(new_value);
-                    
-                    // Handle reference field retain/release for proper refcounting
+
                     if let Expression::Identifier(name, _) = &target {
                         if name == "self" {
-                            let is_ref = self.reference_fields.iter().any(|(_, f)| f == field.as_str());
+                            let is_ref = self
+                                .reference_fields
+                                .iter()
+                                .any(|(_, f)| f == field.as_str());
                             if is_ref {
-                                // Release old value before setting new one
                                 let old_value = self.call_runtime_ptr(
                                     self.runtime.map_get,
                                     &[target_ptr.into(), key_ptr.into()],
                                     "old_field_value",
                                 );
-                                self.call_runtime_void(self.runtime.value_release, &[old_value.into()], "release_old");
-                                self.call_runtime_void(self.runtime.value_retain, &[new_ptr.into()], "retain_new");
+                                self.call_runtime_void(
+                                    self.runtime.value_release,
+                                    &[old_value.into()],
+                                    "release_old",
+                                );
+                                self.call_runtime_void(
+                                    self.runtime.value_retain,
+                                    &[new_ptr.into()],
+                                    "retain_new",
+                                );
                             }
                         }
                     }
-                    
+
                     self.call_runtime_ptr(
                         self.runtime.map_set,
                         &[target_ptr.into(), key_ptr.into(), new_ptr.into()],
                         "map_set_field",
                     );
-                    // C3.4: Field mutation invalidates all CSE entries involving the target
+
                     if let Expression::Identifier(name, _) = &target {
                         let var_key = format!("v:{}", name);
                         ctx.cse_cache.retain(|k, _| !k.contains(&var_key));
                     } else {
-                        // Conservative: clear entire cache on non-trivial target mutation
                         ctx.cse_cache.clear();
                     }
                 }
@@ -1796,20 +1964,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(&(_, loop_exit)) = ctx.loop_stack.last() {
                         self.builder.build_unconditional_branch(loop_exit).unwrap();
                     }
-                    // After break, no more code in this block is reachable
+
                     let function = ctx.function;
                     let unreachable_bb = self.context.append_basic_block(function, "after_break");
                     self.builder.position_at_end(unreachable_bb);
                 }
                 Statement::Continue(_) => {
                     if let Some(&(loop_header, _)) = ctx.loop_stack.last() {
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
                     let function = ctx.function;
-                    let unreachable_bb = self.context.append_basic_block(function, "after_continue");
+                    let unreachable_bb =
+                        self.context.append_basic_block(function, "after_continue");
                     self.builder.position_at_end(unreachable_bb);
                 }
-                // S2.4: Destructuring pattern binding
+
                 Statement::PatternBinding { pattern, value, .. } => {
                     let val = self.emit_expression(ctx, value)?;
                     self.bind_pattern_variables(ctx, val, pattern);
@@ -1818,16 +1989,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Some(expr) = &block.value {
-            // C3.3: Block tail value inherits the current tail position
-            // (already set by caller if this is a function body return)
             self.emit_expression(ctx, expr.as_ref())
         } else {
             Ok(self.wrap_number(self.f64_type.const_float(0.0)))
         }
     }
 
-    /// S4.1: Resolve named arguments to positional order.
-    /// Matches named args to parameter positions from `fn_param_defaults`.
     fn resolve_named_args(
         &self,
         fn_name: &str,
@@ -1837,25 +2004,27 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<Vec<Expression>, Diagnostic> {
         let param_defs = self.fn_param_defaults.get(fn_name).ok_or_else(|| {
             Diagnostic::new(
-                format!("cannot use named arguments for unknown function `{}`", fn_name),
+                format!(
+                    "cannot use named arguments for unknown function `{}`",
+                    fn_name
+                ),
                 span,
             )
         })?;
 
-        // Count positional args (those without names at the beginning)
         let positional_count = arg_names.iter().take_while(|n| n.is_none()).count();
         let named_start = positional_count;
 
-        // Build the result by starting with positional args
         let mut result: Vec<Option<Expression>> = vec![None; param_defs.len()];
 
-        // Place positional args first
         for i in 0..positional_count {
             if i >= param_defs.len() {
                 return Err(Diagnostic::new(
                     format!(
                         "too many arguments for `{}`: expected {}, got at least {}",
-                        fn_name, param_defs.len(), positional_count
+                        fn_name,
+                        param_defs.len(),
+                        positional_count
                     ),
                     span,
                 ));
@@ -1863,18 +2032,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             result[i] = Some(args[i].clone());
         }
 
-        // Place named args by matching parameter names
         for i in named_start..args.len() {
             let name = arg_names[i].as_ref().unwrap();
-            let param_idx = param_defs.iter().position(|p| &p.name == name).ok_or_else(|| {
-                Diagnostic::new(
-                    format!(
-                        "unknown parameter `{}` in call to `{}`",
-                        name, fn_name
-                    ),
-                    span,
-                )
-            })?;
+            let param_idx = param_defs
+                .iter()
+                .position(|p| &p.name == name)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        format!("unknown parameter `{}` in call to `{}`", name, fn_name),
+                        span,
+                    )
+                })?;
             if result[param_idx].is_some() {
                 return Err(Diagnostic::new(
                     format!(
@@ -1887,13 +2055,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             result[param_idx] = Some(args[i].clone());
         }
 
-        // Collect resolved args, filling gaps with default expressions
         let mut resolved = Vec::new();
         for (idx, slot) in result.iter().enumerate() {
             match slot {
                 Some(expr) => resolved.push(expr.clone()),
                 None => {
-                    // Fill with default expression if available, otherwise error
                     if let Some(ref default_expr) = param_defs[idx].default {
                         resolved.push(default_expr.clone());
                     } else {
@@ -1917,16 +2083,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         ctx: &mut FunctionContext<'ctx>,
         expr: &Expression,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
-        // CC2.3: Set debug location from the expression's span.
         if let Some(scope) = ctx.di_scope {
             self.set_debug_location(expr.span(), scope);
         }
-        // C3.4: Common subexpression elimination — check cache for pure expressions.
+
         if let Some(key) = Self::expr_cache_key(expr) {
             if let Some(&cached) = ctx.cse_cache.get(&key) {
                 return Ok(cached);
             }
-            // Fall through to compute, then cache the result below.
+
             let result = self.emit_expression_inner(ctx, expr)?;
             ctx.cse_cache.insert(key, result);
             return Ok(result);
@@ -1934,15 +2099,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.emit_expression_inner(ctx, expr)
     }
 
-    /// Inner expression emit — called by emit_expression after CSE check.
     fn emit_expression_inner(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
         expr: &Expression,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         match expr {
-            Expression::Integer(value, _) => Ok(self.wrap_number(self.f64_type.const_float(*value as f64))),
-            Expression::Float(value, _) => Ok(self.wrap_number(self.f64_type.const_float(*value))),
+            Expression::Integer(value, _) => {
+                // For integer literals, compute the NaN-boxed bits at compile time
+                let f = *value as f64;
+                let bits = f.to_bits();
+                // Check if this value would be a quiet NaN (extremely rare for integers)
+                Ok(if (bits & 0xFFF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
+                    self.runtime.value_i64_type.const_int(0x7FFB_8000_0000_0000, false)
+                } else {
+                    self.runtime.value_i64_type.const_int(bits, false)
+                })
+            }
+            Expression::Float(value, _) => {
+                let bits = value.to_bits();
+                Ok(if (bits & 0xFFF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
+                    self.runtime.value_i64_type.const_int(0x7FFB_8000_0000_0000, false)
+                } else {
+                    self.runtime.value_i64_type.const_int(bits, false)
+                })
+            }
             Expression::Bool(value, _) => Ok(self.wrap_bool(self.boolean_to_int(*value))),
             Expression::String(value, _) => Ok(self.emit_string_literal(value)),
             Expression::Bytes(value, _) => Ok(self.emit_bytes_literal(value)),
@@ -1958,21 +2139,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "throw expressions are not lowered yet",
                 *span,
             )),
-            Expression::Lambda { params, body, span } =>
-                self.emit_lambda(ctx, params, body, *span),
+            Expression::Lambda { params, body, span } => self.emit_lambda(ctx, params, body, *span),
             Expression::Placeholder(_, span) => Err(Diagnostic::new(
                 "placeholder expressions require higher-order lowering, which is not implemented yet",
                 *span,
             )),
-            Expression::Binary { op, left, right, .. } => match op {
-                BinaryOp::And | BinaryOp::Or =>
-                    self.emit_logical_binary(ctx, *op, left, right),
+            Expression::Binary {
+                op, left, right, ..
+            } => match op {
+                BinaryOp::And | BinaryOp::Or => self.emit_logical_binary(ctx, *op, left, right),
                 _ => {
-                    // C3.3: Operands of a binary op are NOT in tail position
                     let saved_tail = ctx.in_tail_position;
                     ctx.in_tail_position = false;
-                    // C2.1/C2.2: Check if both operands have known numeric/bool types
-                    // for specialization (avoids runtime FFI for Add, Equals, NotEquals).
+
                     let both_numeric = self.expr_is_numeric(left) && self.expr_is_numeric(right);
                     let lhs = self.emit_expression(ctx, left)?;
                     let rhs = self.emit_expression(ctx, right)?;
@@ -1981,7 +2160,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             },
             Expression::Unary { op, expr, .. } => {
-                // C3.3: Operand of unary expression is not in tail position
                 let saved_tail = ctx.in_tail_position;
                 ctx.in_tail_position = false;
                 let is_bool = self.expr_is_bool(expr);
@@ -1989,12 +2167,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ctx.in_tail_position = saved_tail;
                 match op {
                     UnaryOp::Neg => {
-                        let as_number = self.value_to_number(value);
-                        let neg = self.builder.build_float_neg(as_number, "neg").unwrap();
-                        Ok(self.wrap_number(neg))
+                        if self.expr_is_numeric(expr) {
+                            let as_number = self.value_to_number_fast(value);
+                            let neg = self.builder.build_float_neg(as_number, "neg_fast").unwrap();
+                            Ok(self.wrap_number_fast(neg))
+                        } else {
+                            let as_number = self.value_to_number(value);
+                            let neg = self.builder.build_float_neg(as_number, "neg").unwrap();
+                            Ok(self.wrap_number(neg))
+                        }
                     }
                     UnaryOp::Not => {
-                        // C2.2: Use fast bool extraction when operand is known-boolean.
                         let predicate = if is_bool {
                             self.value_to_bool_fast(value)
                         } else {
@@ -2014,8 +2197,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
-            Expression::Call { callee, args, arg_names, .. } => {
-                // S4.1: Resolve named arguments to positional order
+            Expression::Call {
+                callee,
+                args,
+                arg_names,
+                ..
+            } => {
                 let args = if !arg_names.is_empty() {
                     if let Expression::Identifier(name, _) = callee.as_ref() {
                         self.resolve_named_args(name, args, arg_names, expr.span())?
@@ -2030,15 +2217,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 };
                 let args = &args;
 
-                if let Expression::Member { target, property, span } = callee.as_ref() {
-                    return self.emit_member_call(ctx, target, property, args, *span);
+                if let Expression::Member {
+                    target,
+                    property,
+                    span,
+                } = callee.as_ref()
+                {
+                    let result = self.emit_member_call(ctx, target, property, args, *span);
+                    // Member calls (e.g. .push, .set) may mutate state
+                    ctx.cse_cache.clear();
+                    return result;
                 }
                 if let Expression::Identifier(name, _) = callee.as_ref() {
-                    // Check builtins first (includes actor constructors)
                     if let Some(result) = self.emit_builtin_call(name, args, ctx, expr.span())? {
                         return Ok(result);
                     }
-                    // Extern functions with typed lowering
+
                     if let Some(sig) = self.extern_sigs.get(name).cloned() {
                         if sig.param_types.len() != args.len() {
                             return Err(Diagnostic::new(
@@ -2060,34 +2254,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_call(sig.function, &lowered_args, "extern_call")
                             .unwrap();
                         if let Some(ret_ty) = &sig.ret_type {
-                            let ret_val = call
-                                .try_as_basic_value()
-                                .left()
-                                .ok_or_else(|| Diagnostic::new("extern call produced no value", expr.span()))?;
+                            let ret_val = call.try_as_basic_value().left().ok_or_else(|| {
+                                Diagnostic::new("extern call produced no value", expr.span())
+                            })?;
                             return self.wrap_extern_return(ret_val, *ret_ty, expr.span());
                         } else {
                             return Ok(self.wrap_unit());
                         }
                     }
-                    // Then check user functions
+
                     if let Some(&function) = self.functions.get(name) {
-                        // Pass Value* pointers directly, not as f64
                         let mut arg_values = Vec::new();
                         for arg in args {
-                            // C3.3: Arguments are never in tail position themselves
                             let saved_tail = ctx.in_tail_position;
                             ctx.in_tail_position = false;
                             let value = self.emit_expression(ctx, arg)?;
                             ctx.in_tail_position = saved_tail;
                             arg_values.push(value);
                         }
-                        // S4.2: Fill in default values for omitted arguments
+
                         if let Some(param_defs) = self.fn_param_defaults.get(name).cloned() {
                             let provided = arg_values.len();
                             let expected = param_defs.len();
                             if provided < expected {
-                                // Temporarily bind already-provided args to param names
-                                // so defaults can reference earlier params (e.g. `*f(a, b ? a)`)
                                 let mut temp_bindings: Vec<String> = Vec::new();
                                 for (idx, pdef) in param_defs.iter().enumerate().take(provided) {
                                     if !ctx.variables.contains_key(&pdef.name) {
@@ -2101,14 +2290,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ctx.in_tail_position = false;
                                         let value = self.emit_expression(ctx, default_expr)?;
                                         ctx.in_tail_position = saved_tail;
-                                        // Also bind this default so later defaults can reference it
+
                                         if !ctx.variables.contains_key(&param_defs[i].name) {
                                             ctx.variables.insert(param_defs[i].name.clone(), value);
                                             temp_bindings.push(param_defs[i].name.clone());
                                         }
                                         arg_values.push(value);
                                     } else {
-                                        // Clean up temp bindings before returning error
                                         for tb in &temp_bindings {
                                             ctx.variables.remove(tb);
                                         }
@@ -2121,7 +2309,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         ));
                                     }
                                 }
-                                // Clean up temporary bindings
+
                                 for tb in &temp_bindings {
                                     ctx.variables.remove(tb);
                                 }
@@ -2133,31 +2321,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .builder
                             .build_call(function, &metadata_args, "call")
                             .unwrap();
-                        // C3.3: Mark direct self-recursive calls in tail position
+
                         if ctx.in_tail_position && name == &ctx.fn_name {
                             call.set_tail_call(true);
                         }
-                        // Return is NaN-boxed i64
+
                         let value = call
                             .try_as_basic_value()
                             .left()
                             .ok_or_else(|| Diagnostic::new("call produced no value", expr.span()))?
                             .into_int_value();
                         Ok(value)
-                    } else if let Some((enum_name, expected_field_count)) = self.enum_constructors.get(name).cloned() {
-                        // Enum constructor call - create tagged value
+                    } else if let Some((enum_name, expected_field_count)) =
+                        self.enum_constructors.get(name).cloned()
+                    {
                         if args.len() != expected_field_count {
                             return Err(Diagnostic::new(
                                 format!(
                                     "enum constructor `{}::{}` expects {} argument(s), found {}",
-                                    enum_name, name, expected_field_count, args.len()
+                                    enum_name,
+                                    name,
+                                    expected_field_count,
+                                    args.len()
                                 ),
                                 expr.span(),
                             ));
                         }
                         self.emit_enum_constructor(ctx, name, args)
-                    } else if ctx.variables.contains_key(name) || ctx.variable_allocas.contains_key(name) {
-                        // Local variable - might be a closure stored in a binding.
+                    } else if ctx.variables.contains_key(name)
+                        || ctx.variable_allocas.contains_key(name)
+                    {
                         let callee_value = self.emit_expression(ctx, callee)?;
                         self.emit_closure_call(ctx, callee_value, args)
                     } else {
@@ -2171,12 +2364,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_closure_call(ctx, callee_value, args)
                 }
             }
-            Expression::Member { target, property, span } =>
-                self.emit_member_expression(ctx, target, property, *span),
-            Expression::Index { target, index, span: _ } => {
+            Expression::Member {
+                target,
+                property,
+                span,
+            } => self.emit_member_expression(ctx, target, property, *span),
+            Expression::Index {
+                target,
+                index,
+                span: _,
+            } => {
                 let target_val = self.emit_expression(ctx, target)?;
                 let index_val = self.emit_expression(ctx, index)?;
-                // Bridge via nb_to_ptr for old API, convert result back
+
                 let target_ptr = self.nb_to_ptr(target_val);
                 let index_ptr = self.nb_to_ptr(index_val);
                 let result = self.call_runtime_ptr(
@@ -2186,11 +2386,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 Ok(self.ptr_to_nb(result))
             }
-            Expression::Slice { target, start, end, .. } => {
+            Expression::Slice {
+                target, start, end, ..
+            } => {
                 let target_val = self.emit_expression(ctx, target)?;
                 let start_val = self.emit_expression(ctx, start)?;
                 let end_val = self.emit_expression(ctx, end)?;
-                let result = self.call_bridged(self.runtime.list_slice, &[target_val, start_val, end_val], "slice");
+                let result = self.call_bridged(
+                    self.runtime.list_slice,
+                    &[target_val, start_val, end_val],
+                    "slice",
+                );
                 Ok(result)
             }
             Expression::Ternary {
@@ -2201,10 +2407,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             } => self.emit_ternary(ctx, condition, then_branch, else_branch),
             Expression::Match(match_expr) => self.emit_match(ctx, match_expr),
             Expression::Unit => Ok(self.wrap_unit()),
-            Expression::None(_) => {
-                Ok(self.wrap_none())
-            }
-            Expression::InlineAsm { template, inputs, span, .. } => {
+            Expression::None(_) => Ok(self.wrap_none()),
+            Expression::InlineAsm {
+                template,
+                inputs,
+                span,
+                ..
+            } => {
                 let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(inputs.len());
                 let mut constraint_parts: Vec<&str> = Vec::with_capacity(inputs.len());
                 for (constraint, expr) in inputs {
@@ -2226,7 +2435,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             Expression::PtrLoad { address, span } => {
-                // Evaluate address expression as number, cast to pointer, load f64, wrap as number.
                 let addr_val = self.emit_expression(ctx, address)?;
                 let addr_num = self.value_to_number(addr_val);
                 let addr_int = self
@@ -2236,12 +2444,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let addr_ptr = self
                     .builder
                     .build_int_to_ptr(
-                        addr_int
-                            .into_int_value(),
+                        addr_int.into_int_value(),
                         self.f64_type.ptr_type(AddressSpace::default()),
                         "addr_ptr",
                     )
-                    .map_err(|e| Diagnostic::new(format!("ptr load int_to_ptr failed: {e}"), *span))?;
+                    .map_err(|e| {
+                        Diagnostic::new(format!("ptr load int_to_ptr failed: {e}"), *span)
+                    })?;
                 let loaded = self
                     .builder
                     .build_load(self.f64_type, addr_ptr, "ptr_load")
@@ -2249,60 +2458,52 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into_float_value();
                 Ok(self.wrap_number(loaded))
             }
-            Expression::Unsafe { block, .. } => {
-                // Unsafe is transparent to codegen for now.
-                self.emit_block(ctx, block)
-            }
-            Expression::Pipeline { left, right, span } => {
-                // Desugar pipeline: `a ~ f(args)` becomes `f(a, args)`
-                // With explicit $ placeholder: `a ~ f($, extra)` becomes `f(a, extra)`
-                match right.as_ref() {
-                    Expression::Call { callee, args, span: call_span, .. } => {
-                        // Check if any argument is a placeholder (or contains one)
-                        let has_placeholder = args.iter().any(|arg| self.contains_placeholder(arg));
-                        
-                        let new_args = if has_placeholder {
-                            // Replace $ placeholders with the piped value
-                            args.iter()
-                                .map(|arg| self.replace_placeholder_with(arg, left.as_ref()))
-                                .collect()
-                        } else {
-                            // No placeholder - prepend left as first argument
-                            let mut new_args = vec![left.as_ref().clone()];
-                            new_args.extend(args.iter().cloned());
-                            new_args
-                        };
-                        
-                        let desugared = Expression::Call {
-                            callee: callee.clone(),
-                            args: new_args,
-                            arg_names: vec![],
-                            span: *call_span,
-                        };
-                        self.emit_expression(ctx, &desugared)
-                    }
-                    Expression::Identifier(name, id_span) => {
-                        // `a ~ f` becomes `f(a)`
-                        let desugared = Expression::Call {
-                            callee: Box::new(Expression::Identifier(name.clone(), *id_span)),
-                            args: vec![left.as_ref().clone()],
-                            arg_names: vec![],
-                            span: *span,
-                        };
-                        self.emit_expression(ctx, &desugared)
-                    }
-                    _ => Err(Diagnostic::new(
-                        "pipeline right-hand side must be a function call or identifier",
-                        *span,
-                    ))
+            Expression::Unsafe { block, .. } => self.emit_block(ctx, block),
+            Expression::Pipeline { left, right, span } => match right.as_ref() {
+                Expression::Call {
+                    callee,
+                    args,
+                    span: call_span,
+                    ..
+                } => {
+                    let has_placeholder = args.iter().any(|arg| self.contains_placeholder(arg));
+
+                    let new_args = if has_placeholder {
+                        args.iter()
+                            .map(|arg| self.replace_placeholder_with(arg, left.as_ref()))
+                            .collect()
+                    } else {
+                        let mut new_args = vec![left.as_ref().clone()];
+                        new_args.extend(args.iter().cloned());
+                        new_args
+                    };
+
+                    let desugared = Expression::Call {
+                        callee: callee.clone(),
+                        args: new_args,
+                        arg_names: vec![],
+                        span: *call_span,
+                    };
+                    self.emit_expression(ctx, &desugared)
                 }
-            }
+                Expression::Identifier(name, id_span) => {
+                    let desugared = Expression::Call {
+                        callee: Box::new(Expression::Identifier(name.clone(), *id_span)),
+                        args: vec![left.as_ref().clone()],
+                        arg_names: vec![],
+                        span: *span,
+                    };
+                    self.emit_expression(ctx, &desugared)
+                }
+                _ => Err(Diagnostic::new(
+                    "pipeline right-hand side must be a function call or identifier",
+                    *span,
+                )),
+            },
             Expression::ErrorValue { path, span: _ } => {
-                // Create an error value with the given path
                 let error_name = path.join(":");
                 let name_bytes = error_name.as_bytes();
-                
-                // Create a global constant for the error name string
+
                 let name_array = self.context.const_string(name_bytes, false);
                 let name_global = self.module.add_global(
                     name_array.get_type(),
@@ -2312,19 +2513,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 name_global.set_linkage(inkwell::module::Linkage::Private);
                 name_global.set_initializer(&name_array);
                 name_global.set_constant(true);
-                
-                // Get pointer to name string
-                let name_ptr = self.builder.build_pointer_cast(
-                    name_global.as_pointer_value(),
-                    self.i8_type.ptr_type(AddressSpace::default()),
-                    "err_name_ptr",
-                ).unwrap();
-                
-                // Error code: could be derived from the error definition, for now use 0
+
+                let name_ptr = self
+                    .builder
+                    .build_pointer_cast(
+                        name_global.as_pointer_value(),
+                        self.i8_type.ptr_type(AddressSpace::default()),
+                        "err_name_ptr",
+                    )
+                    .unwrap();
+
                 let error_code = self.context.i32_type().const_int(0, false);
                 let name_len = self.usize_type.const_int(name_bytes.len() as u64, false);
-                
-                // Call coral_make_error(code, name_ptr, name_len)
+
                 let err_ptr = self.call_runtime_ptr(
                     self.runtime.make_error,
                     &[error_code.into(), name_ptr.into(), name_len.into()],
@@ -2332,20 +2533,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 Ok(self.ptr_to_nb(err_ptr))
             }
-            Expression::Spread(inner, _) => {
-                // Spread outside list literal context: just emit the inner expression
-                self.emit_expression(ctx, inner)
-            }
-            Expression::ListComprehension { body, var, iterable, condition, span: _ } => {
+            Expression::Spread(inner, _) => self.emit_expression(ctx, inner),
+            Expression::ListComprehension {
+                body,
+                var,
+                iterable,
+                condition,
+                span: _,
+            } => {
                 let function = ctx.function;
                 let list_value = self.emit_expression(ctx, iterable)?;
 
-                // Get list length as f64
                 let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "lc_len");
                 let len_f64 = self.value_to_number(len_nb);
 
-                // Create empty output list: coral_make_list(null, 0)
-                let null_ptr = self.runtime.value_ptr_type
+                let null_ptr = self
+                    .runtime
+                    .value_ptr_type
                     .ptr_type(inkwell::AddressSpace::default())
                     .const_null();
                 let zero_usize = self.usize_type.const_int(0, false);
@@ -2356,111 +2560,180 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 let out_list_nb = self.ptr_to_nb(out_list_ptr);
 
-                // Alloca for output list (mutated by push)
-                let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "lc_out_alloca").unwrap();
+                let out_alloca = self
+                    .builder
+                    .build_alloca(self.runtime.value_i64_type, "lc_out_alloca")
+                    .unwrap();
                 self.builder.build_store(out_alloca, out_list_nb).unwrap();
 
-                // Counter alloca
-                let counter_alloca = self.builder.build_alloca(self.f64_type, "lc_counter").unwrap();
-                self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+                let counter_alloca = self
+                    .builder
+                    .build_alloca(self.f64_type, "lc_counter")
+                    .unwrap();
+                self.builder
+                    .build_store(counter_alloca, self.f64_type.const_float(0.0))
+                    .unwrap();
 
                 let loop_header = self.context.append_basic_block(function, "lc_cond");
                 let loop_body = self.context.append_basic_block(function, "lc_body");
                 let loop_exit = self.context.append_basic_block(function, "lc_exit");
 
-                self.builder.build_unconditional_branch(loop_header).unwrap();
+                self.builder
+                    .build_unconditional_branch(loop_header)
+                    .unwrap();
 
-                // Header: check counter < length
                 self.builder.position_at_end(loop_header);
-                let current = self.builder.build_load(self.f64_type, counter_alloca, "lc_i")
-                    .unwrap().into_float_value();
-                let is_done = self.builder.build_float_compare(
-                    inkwell::FloatPredicate::OGE, current, len_f64, "lc_done",
-                ).unwrap();
-                self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+                let current = self
+                    .builder
+                    .build_load(self.f64_type, counter_alloca, "lc_i")
+                    .unwrap()
+                    .into_float_value();
+                let is_done = self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OGE, current, len_f64, "lc_done")
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_done, loop_exit, loop_body)
+                    .unwrap();
 
-                // Body: get element, bind var, optionally check condition, emit body, push
                 self.builder.position_at_end(loop_body);
                 ctx.cse_cache.clear();
                 let idx_nb = self.wrap_number(current);
-                let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "lc_elem");
+                let elem_nb =
+                    self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "lc_elem");
                 self.store_variable(ctx, var, elem_nb);
 
                 if let Some(cond) = condition {
                     let cond_val = self.emit_expression(ctx, cond)?;
-                    let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[cond_val.into()], "lc_truthy");
-                    let truthy_bool = self.builder.build_int_compare(
-                        inkwell::IntPredicate::NE,
-                        is_truthy,
-                        self.i8_type.const_int(0, false),
-                        "lc_cond_bool",
-                    ).unwrap();
+                    let is_truthy =
+                        self.call_nb(self.runtime.nb_is_truthy, &[cond_val.into()], "lc_truthy");
+                    let truthy_bool = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            is_truthy,
+                            self.i8_type.const_int(0, false),
+                            "lc_cond_bool",
+                        )
+                        .unwrap();
                     let lc_push = self.context.append_basic_block(function, "lc_push");
                     let lc_skip = self.context.append_basic_block(function, "lc_skip");
-                    self.builder.build_conditional_branch(truthy_bool, lc_push, lc_skip).unwrap();
+                    self.builder
+                        .build_conditional_branch(truthy_bool, lc_push, lc_skip)
+                        .unwrap();
 
-                    // Push block
                     self.builder.position_at_end(lc_push);
                     let body_val = self.emit_expression(ctx, body)?;
-                    let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "lc_cur_out")
-                        .unwrap().into_int_value();
-                    let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, body_val], "lc_push_res");
+                    let cur_out = self
+                        .builder
+                        .build_load(self.runtime.value_i64_type, out_alloca, "lc_cur_out")
+                        .unwrap()
+                        .into_int_value();
+                    let new_out = self.call_bridged(
+                        self.runtime.list_push,
+                        &[cur_out, body_val],
+                        "lc_push_res",
+                    );
                     self.builder.build_store(out_alloca, new_out).unwrap();
-                    // Increment and loop back
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "lc_cur_upd")
-                            .unwrap().into_float_value();
-                        let next = self.builder.build_float_add(
-                            cur_f64, self.f64_type.const_float(1.0), "lc_next",
-                        ).unwrap();
+
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        let cur_f64 = self
+                            .builder
+                            .build_load(self.f64_type, counter_alloca, "lc_cur_upd")
+                            .unwrap()
+                            .into_float_value();
+                        let next = self
+                            .builder
+                            .build_float_add(cur_f64, self.f64_type.const_float(1.0), "lc_next")
+                            .unwrap();
                         self.builder.build_store(counter_alloca, next).unwrap();
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
 
-                    // Skip block: just increment counter
                     self.builder.position_at_end(lc_skip);
-                    let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "lc_skip_upd")
-                        .unwrap().into_float_value();
-                    let next = self.builder.build_float_add(
-                        cur_f64, self.f64_type.const_float(1.0), "lc_skip_next",
-                    ).unwrap();
+                    let cur_f64 = self
+                        .builder
+                        .build_load(self.f64_type, counter_alloca, "lc_skip_upd")
+                        .unwrap()
+                        .into_float_value();
+                    let next = self
+                        .builder
+                        .build_float_add(cur_f64, self.f64_type.const_float(1.0), "lc_skip_next")
+                        .unwrap();
                     self.builder.build_store(counter_alloca, next).unwrap();
-                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                    self.builder
+                        .build_unconditional_branch(loop_header)
+                        .unwrap();
                 } else {
-                    // No condition — unconditionally push
                     let body_val = self.emit_expression(ctx, body)?;
-                    let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "lc_cur_out")
-                        .unwrap().into_int_value();
-                    let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, body_val], "lc_push_res");
+                    let cur_out = self
+                        .builder
+                        .build_load(self.runtime.value_i64_type, out_alloca, "lc_cur_out")
+                        .unwrap()
+                        .into_int_value();
+                    let new_out = self.call_bridged(
+                        self.runtime.list_push,
+                        &[cur_out, body_val],
+                        "lc_push_res",
+                    );
                     self.builder.build_store(out_alloca, new_out).unwrap();
-                    // Increment counter
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "lc_cur_upd")
-                            .unwrap().into_float_value();
-                        let next = self.builder.build_float_add(
-                            cur_f64, self.f64_type.const_float(1.0), "lc_next",
-                        ).unwrap();
+
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        let cur_f64 = self
+                            .builder
+                            .build_load(self.f64_type, counter_alloca, "lc_cur_upd")
+                            .unwrap()
+                            .into_float_value();
+                        let next = self
+                            .builder
+                            .build_float_add(cur_f64, self.f64_type.const_float(1.0), "lc_next")
+                            .unwrap();
                         self.builder.build_store(counter_alloca, next).unwrap();
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
                 }
 
-                // Return the output list
                 self.builder.position_at_end(loop_exit);
-                let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "lc_result")
-                    .unwrap().into_int_value();
+                let final_out = self
+                    .builder
+                    .build_load(self.runtime.value_i64_type, out_alloca, "lc_result")
+                    .unwrap()
+                    .into_int_value();
                 Ok(final_out)
             }
-            Expression::MapComprehension { key, value, var, iterable, condition, span: _ } => {
+            Expression::MapComprehension {
+                key,
+                value,
+                var,
+                iterable,
+                condition,
+                span: _,
+            } => {
                 let function = ctx.function;
                 let list_value = self.emit_expression(ctx, iterable)?;
 
-                // Get list length
                 let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "mc_len");
                 let len_f64 = self.value_to_number(len_nb);
 
-                // Create empty output map
-                let entry_ptr_type = self.runtime.map_entry_type
+                let entry_ptr_type = self
+                    .runtime
+                    .map_entry_type
                     .ptr_type(inkwell::AddressSpace::default());
                 let null_entries = entry_ptr_type.const_null();
                 let zero_usize = self.usize_type.const_int(0, false);
@@ -2471,128 +2744,197 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 let out_map_nb = self.ptr_to_nb(out_map_ptr);
 
-                // Allocas
-                let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "mc_out_alloca").unwrap();
+                let out_alloca = self
+                    .builder
+                    .build_alloca(self.runtime.value_i64_type, "mc_out_alloca")
+                    .unwrap();
                 self.builder.build_store(out_alloca, out_map_nb).unwrap();
-                let counter_alloca = self.builder.build_alloca(self.f64_type, "mc_counter").unwrap();
-                self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+                let counter_alloca = self
+                    .builder
+                    .build_alloca(self.f64_type, "mc_counter")
+                    .unwrap();
+                self.builder
+                    .build_store(counter_alloca, self.f64_type.const_float(0.0))
+                    .unwrap();
 
                 let loop_header = self.context.append_basic_block(function, "mc_cond");
                 let loop_body = self.context.append_basic_block(function, "mc_body");
                 let loop_exit = self.context.append_basic_block(function, "mc_exit");
 
-                self.builder.build_unconditional_branch(loop_header).unwrap();
+                self.builder
+                    .build_unconditional_branch(loop_header)
+                    .unwrap();
 
-                // Header: counter < length
                 self.builder.position_at_end(loop_header);
-                let current = self.builder.build_load(self.f64_type, counter_alloca, "mc_i")
-                    .unwrap().into_float_value();
-                let is_done = self.builder.build_float_compare(
-                    inkwell::FloatPredicate::OGE, current, len_f64, "mc_done",
-                ).unwrap();
-                self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+                let current = self
+                    .builder
+                    .build_load(self.f64_type, counter_alloca, "mc_i")
+                    .unwrap()
+                    .into_float_value();
+                let is_done = self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OGE, current, len_f64, "mc_done")
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_done, loop_exit, loop_body)
+                    .unwrap();
 
-                // Body
                 self.builder.position_at_end(loop_body);
                 ctx.cse_cache.clear();
                 let idx_nb = self.wrap_number(current);
-                let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "mc_elem");
+                let elem_nb =
+                    self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "mc_elem");
                 self.store_variable(ctx, var, elem_nb);
 
                 if let Some(cond) = condition {
                     let cond_val = self.emit_expression(ctx, cond)?;
-                    let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[cond_val.into()], "mc_truthy");
-                    let truthy_bool = self.builder.build_int_compare(
-                        inkwell::IntPredicate::NE,
-                        is_truthy,
-                        self.i8_type.const_int(0, false),
-                        "mc_cond_bool",
-                    ).unwrap();
+                    let is_truthy =
+                        self.call_nb(self.runtime.nb_is_truthy, &[cond_val.into()], "mc_truthy");
+                    let truthy_bool = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            is_truthy,
+                            self.i8_type.const_int(0, false),
+                            "mc_cond_bool",
+                        )
+                        .unwrap();
                     let mc_set = self.context.append_basic_block(function, "mc_set");
                     let mc_skip = self.context.append_basic_block(function, "mc_skip");
-                    self.builder.build_conditional_branch(truthy_bool, mc_set, mc_skip).unwrap();
+                    self.builder
+                        .build_conditional_branch(truthy_bool, mc_set, mc_skip)
+                        .unwrap();
 
                     self.builder.position_at_end(mc_set);
                     let key_val = self.emit_expression(ctx, key)?;
                     let val_val = self.emit_expression(ctx, value)?;
-                    let cur_map = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "mc_cur_map")
-                        .unwrap().into_int_value();
-                    let new_map = self.call_bridged(self.runtime.map_set, &[cur_map, key_val, val_val], "mc_set_res");
+                    let cur_map = self
+                        .builder
+                        .build_load(self.runtime.value_i64_type, out_alloca, "mc_cur_map")
+                        .unwrap()
+                        .into_int_value();
+                    let new_map = self.call_bridged(
+                        self.runtime.map_set,
+                        &[cur_map, key_val, val_val],
+                        "mc_set_res",
+                    );
                     self.builder.build_store(out_alloca, new_map).unwrap();
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "mc_i_upd")
-                            .unwrap().into_float_value();
-                        let next = self.builder.build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_next").unwrap();
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        let cur_f64 = self
+                            .builder
+                            .build_load(self.f64_type, counter_alloca, "mc_i_upd")
+                            .unwrap()
+                            .into_float_value();
+                        let next = self
+                            .builder
+                            .build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_next")
+                            .unwrap();
                         self.builder.build_store(counter_alloca, next).unwrap();
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
 
                     self.builder.position_at_end(mc_skip);
-                    let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "mc_skip_upd")
-                        .unwrap().into_float_value();
-                    let next = self.builder.build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_skip_next").unwrap();
+                    let cur_f64 = self
+                        .builder
+                        .build_load(self.f64_type, counter_alloca, "mc_skip_upd")
+                        .unwrap()
+                        .into_float_value();
+                    let next = self
+                        .builder
+                        .build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_skip_next")
+                        .unwrap();
                     self.builder.build_store(counter_alloca, next).unwrap();
-                    self.builder.build_unconditional_branch(loop_header).unwrap();
+                    self.builder
+                        .build_unconditional_branch(loop_header)
+                        .unwrap();
                 } else {
                     let key_val = self.emit_expression(ctx, key)?;
                     let val_val = self.emit_expression(ctx, value)?;
-                    let cur_map = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "mc_cur_map")
-                        .unwrap().into_int_value();
-                    let new_map = self.call_bridged(self.runtime.map_set, &[cur_map, key_val, val_val], "mc_set_res");
+                    let cur_map = self
+                        .builder
+                        .build_load(self.runtime.value_i64_type, out_alloca, "mc_cur_map")
+                        .unwrap()
+                        .into_int_value();
+                    let new_map = self.call_bridged(
+                        self.runtime.map_set,
+                        &[cur_map, key_val, val_val],
+                        "mc_set_res",
+                    );
                     self.builder.build_store(out_alloca, new_map).unwrap();
-                    if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-                        let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "mc_i_upd")
-                            .unwrap().into_float_value();
-                        let next = self.builder.build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_next").unwrap();
+                    if self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_terminator()
+                        .is_none()
+                    {
+                        let cur_f64 = self
+                            .builder
+                            .build_load(self.f64_type, counter_alloca, "mc_i_upd")
+                            .unwrap()
+                            .into_float_value();
+                        let next = self
+                            .builder
+                            .build_float_add(cur_f64, self.f64_type.const_float(1.0), "mc_next")
+                            .unwrap();
                         self.builder.build_store(counter_alloca, next).unwrap();
-                        self.builder.build_unconditional_branch(loop_header).unwrap();
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
                     }
                 }
 
                 self.builder.position_at_end(loop_exit);
-                let final_map = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "mc_result")
-                    .unwrap().into_int_value();
+                let final_map = self
+                    .builder
+                    .build_load(self.runtime.value_i64_type, out_alloca, "mc_result")
+                    .unwrap()
+                    .into_int_value();
                 Ok(final_map)
             }
             Expression::ErrorPropagate { expr, span: _ } => {
-                // Error propagation: `expr ! return err`
-                // 1. Evaluate the expression
-                // 2. Check if it's an error
-                // 3. If error, return it from the current function
-                // 4. Otherwise, continue with the value
-                
                 let value = self.emit_expression(ctx, expr)?;
-                
-                // Call coral_nb_is_err to check if value is an error (returns i8)
-                let is_err = self.builder
+
+                let is_err = self
+                    .builder
                     .build_call(self.runtime.nb_is_err, &[value.into()], "is_err_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
                     .unwrap()
                     .into_int_value();
-                
-                let is_err_bool = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    is_err,
-                    self.i8_type.const_zero(),
-                    "is_err_bool",
-                ).unwrap();
-                
-                // Create basic blocks for the branch
+
+                let is_err_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_err,
+                        self.i8_type.const_zero(),
+                        "is_err_bool",
+                    )
+                    .unwrap();
+
                 let current_fn = ctx.function;
                 let err_return_bb = self.context.append_basic_block(current_fn, "err_return");
                 let continue_bb = self.context.append_basic_block(current_fn, "err_continue");
-                
-                self.builder.build_conditional_branch(is_err_bool, err_return_bb, continue_bb).unwrap();
-                
-                // Error return block: return the error value
+
+                self.builder
+                    .build_conditional_branch(is_err_bool, err_return_bb, continue_bb)
+                    .unwrap();
+
                 self.builder.position_at_end(err_return_bb);
                 self.builder.build_return(Some(&value)).unwrap();
-                
-                // Continue block: value is not an error, use it
+
                 self.builder.position_at_end(continue_bb);
-                
+
                 Ok(value)
             }
         }
@@ -2630,7 +2972,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let args = &[null_ptr.into(), len_value.into()];
             return Ok(self.call_list_with_hint(args, hint));
         }
-        // Convert NaN-boxed i64 values to pointers for old API
+
         let ptrs: Vec<PointerValue<'ctx>> = values.iter().map(|v| self.nb_to_ptr(*v)).collect();
         let element_type = self.runtime.value_ptr_type;
         let array_type = element_type.array_type(ptrs.len() as u32);
@@ -2649,11 +2991,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.build_store(alloca, temp_array).unwrap();
         let ptr = self
             .builder
-            .build_pointer_cast(
-                alloca,
-                handles_ptr_type,
-                "list_ptr",
-            )
+            .build_pointer_cast(alloca, handles_ptr_type, "list_ptr")
             .unwrap();
         let len_value = self.usize_type.const_int(ptrs.len() as u64, false);
         let args = &[ptr.into(), len_value.into()];
@@ -2661,8 +2999,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(list_ptr)
     }
 
-    /// Emit a list literal that contains at least one spread element.
-    /// Uses incremental push/concat instead of a stack array.
     fn emit_list_literal_with_spread(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -2673,17 +3009,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             .runtime
             .value_ptr_type
             .ptr_type(AddressSpace::default());
-        // Start with an empty list
+
         let null_ptr = handles_ptr_type.const_null();
         let len_zero = self.usize_type.const_zero();
         let mut list = self.call_list_with_hint(&[null_ptr.into(), len_zero.into()], hint);
         for element in elements {
             if let Expression::Spread(inner, _) = element {
-                // Emit the spread operand (should be a list) and concat
                 let spread_val = self.emit_expression(ctx, inner)?;
-                list = self.call_bridged(self.runtime.list_concat, &[list, spread_val], "spread_concat");
+                list = self.call_bridged(
+                    self.runtime.list_concat,
+                    &[list, spread_val],
+                    "spread_concat",
+                );
             } else {
-                // Normal element: push onto the list
                 let val = self.emit_expression(ctx, element)?;
                 list = self.call_bridged(self.runtime.list_push, &[list, val], "spread_push");
             }
@@ -2746,7 +3084,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .unwrap()
                 .into_array_value();
         }
-        let alloca = self.builder.build_alloca(array_type, "map_literal").unwrap();
+        let alloca = self
+            .builder
+            .build_alloca(array_type, "map_literal")
+            .unwrap();
         self.builder.build_store(alloca, temp_array).unwrap();
         let ptr = self
             .builder
@@ -2757,23 +3098,37 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(self.call_map_with_hint(args, hint))
     }
 
-    /// C2.1: Infer whether an expression is statically known to be numeric.
-    /// Returns true for number literals and variables resolved to Float/Int.
     fn expr_is_numeric(&self, expr: &Expression) -> bool {
         match expr {
-            Expression::Float(_, _) => true,
+            Expression::Float(_, _) | Expression::Integer(_, _) => true,
             Expression::Identifier(name, _) => {
                 matches!(
                     self.resolved_types.get(name.as_str()),
-                    Some(TypeId::Primitive(Primitive::Float)) | Some(TypeId::Primitive(Primitive::Int))
+                    Some(TypeId::Primitive(Primitive::Float))
+                        | Some(TypeId::Primitive(Primitive::Int))
                 )
             }
-            Expression::Unary { op: UnaryOp::Neg, .. } => true, // negation always yields a number
+            Expression::Unary {
+                op: UnaryOp::Neg, ..
+            } => true,
+            Expression::Binary {
+                op, left, right, ..
+            } => {
+                // Arithmetic results are numeric if both operands are numeric
+                matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                ) && self.expr_is_numeric(left)
+                    && self.expr_is_numeric(right)
+            }
             _ => false,
         }
     }
 
-    /// C2.2: Infer whether an expression is statically known to be boolean.
     fn expr_is_bool(&self, expr: &Expression) -> bool {
         match expr {
             Expression::Bool(_, _) => true,
@@ -2787,7 +3142,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Build a Message map { name: <name_value>, data: <payload_value> } from already-evaluated values.
     fn emit_numeric_binary(
         &mut self,
         op: BinaryOp,
@@ -2796,61 +3150,127 @@ impl<'ctx> CodeGenerator<'ctx> {
         both_numeric: bool,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         use BinaryOp::*;
-        if matches!(op, Add) {
-            if both_numeric {
-                // C2.1: Specialize Add for known-numeric operands — bypass runtime polymorphic add.
-                let lhs_num = self.value_to_number(lhs);
-                let rhs_num = self.value_to_number(rhs);
-                return Ok(self.wrap_number(self.builder.build_float_add(lhs_num, rhs_num, "add_spec").unwrap()));
-            }
-            return Ok(self.call_nb(self.runtime.nb_add, &[lhs.into(), rhs.into()], "nb_add"));
-        }
-        if matches!(op, BinaryOp::Equals) {
-            if both_numeric {
-                // C2.1: Specialize Equals for known-numeric operands.
-                let lhs_num = self.value_to_number(lhs);
-                let rhs_num = self.value_to_number(rhs);
-                return Ok(self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::OEQ, lhs_num, rhs_num, "eq_spec").unwrap(),
-                ));
-            }
-            return Ok(self.call_nb(self.runtime.nb_equals, &[lhs.into(), rhs.into()], "nb_equals"));
-        }
-        if matches!(op, BinaryOp::NotEquals) {
-            if both_numeric {
-                // C2.1: Specialize NotEquals for known-numeric operands.
-                let lhs_num = self.value_to_number(lhs);
-                let rhs_num = self.value_to_number(rhs);
-                return Ok(self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::ONE, lhs_num, rhs_num, "ne_spec").unwrap(),
-                ));
-            }
-            return Ok(self.call_nb(self.runtime.nb_not_equals, &[lhs.into(), rhs.into()], "nb_not_equals"));
+
+        // Fast path: when both operands are known numeric, use inline bitcasts
+        // instead of runtime function calls for unboxing/boxing
+        if both_numeric {
+            let lhs_num = self.value_to_number_fast(lhs);
+            let rhs_num = self.value_to_number_fast(rhs);
+            return Ok(match op {
+                Add => self.wrap_number_fast(
+                    self.builder.build_float_add(lhs_num, rhs_num, "add_fast").unwrap(),
+                ),
+                Sub => self.wrap_number_fast(
+                    self.builder.build_float_sub(lhs_num, rhs_num, "sub_fast").unwrap(),
+                ),
+                Mul => self.wrap_number_fast(
+                    self.builder.build_float_mul(lhs_num, rhs_num, "mul_fast").unwrap(),
+                ),
+                Div => self.wrap_number_fast(
+                    self.builder.build_float_div(lhs_num, rhs_num, "div_fast").unwrap(),
+                ),
+                Mod => self.wrap_number_fast(
+                    self.builder.build_float_rem(lhs_num, rhs_num, "rem_fast").unwrap(),
+                ),
+                Equals => self.wrap_bool(
+                    self.builder.build_float_compare(FloatPredicate::OEQ, lhs_num, rhs_num, "eq_fast").unwrap(),
+                ),
+                NotEquals => self.wrap_bool(
+                    self.builder.build_float_compare(FloatPredicate::ONE, lhs_num, rhs_num, "ne_fast").unwrap(),
+                ),
+                Greater => self.wrap_bool(
+                    self.builder.build_float_compare(FloatPredicate::OGT, lhs_num, rhs_num, "gt_fast").unwrap(),
+                ),
+                GreaterEq => self.wrap_bool(
+                    self.builder.build_float_compare(FloatPredicate::OGE, lhs_num, rhs_num, "ge_fast").unwrap(),
+                ),
+                Less => self.wrap_bool(
+                    self.builder.build_float_compare(FloatPredicate::OLT, lhs_num, rhs_num, "lt_fast").unwrap(),
+                ),
+                LessEq => self.wrap_bool(
+                    self.builder.build_float_compare(FloatPredicate::OLE, lhs_num, rhs_num, "le_fast").unwrap(),
+                ),
+                // Bitwise and logical ops don't benefit from numeric fast-path
+                _ => {
+                    // Fall through to general path below
+                    return self.emit_numeric_binary_general(op, lhs, rhs);
+                }
+            });
         }
 
-        if matches!(op, BinaryOp::BitAnd) {
+        // General path for non-numeric or mixed types
+        if matches!(op, Add) {
+            return Ok(self.call_nb(self.runtime.nb_add, &[lhs.into(), rhs.into()], "nb_add"));
+        }
+        if matches!(op, Equals) {
+            return Ok(self.call_nb(
+                self.runtime.nb_equals,
+                &[lhs.into(), rhs.into()],
+                "nb_equals",
+            ));
+        }
+        if matches!(op, NotEquals) {
+            return Ok(self.call_nb(
+                self.runtime.nb_not_equals,
+                &[lhs.into(), rhs.into()],
+                "nb_not_equals",
+            ));
+        }
+
+        self.emit_numeric_binary_general(op, lhs, rhs)
+    }
+
+    fn emit_numeric_binary_general(
+        &mut self,
+        op: BinaryOp,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        use BinaryOp::*;
+
+        if matches!(op, BitAnd) {
             return Ok(self.call_bridged(self.runtime.value_bitand, &[lhs, rhs], "bitand"));
         }
-        if matches!(op, BinaryOp::BitOr) {
+        if matches!(op, BitOr) {
             return Ok(self.call_bridged(self.runtime.value_bitor, &[lhs, rhs], "bitor"));
         }
-        if matches!(op, BinaryOp::BitXor) {
+        if matches!(op, BitXor) {
             return Ok(self.call_bridged(self.runtime.value_bitxor, &[lhs, rhs], "bitxor"));
         }
-        if matches!(op, BinaryOp::ShiftLeft) {
+        if matches!(op, ShiftLeft) {
             return Ok(self.call_bridged(self.runtime.value_shift_left, &[lhs, rhs], "shift_left"));
         }
-        if matches!(op, BinaryOp::ShiftRight) {
-            return Ok(self.call_bridged(self.runtime.value_shift_right, &[lhs, rhs], "shift_right"));
+        if matches!(op, ShiftRight) {
+            return Ok(self.call_bridged(
+                self.runtime.value_shift_right,
+                &[lhs, rhs],
+                "shift_right",
+            ));
         }
         let lhs_num = self.value_to_number(lhs);
         let rhs_num = self.value_to_number(rhs);
         Ok(match op {
-            Add => unreachable!(),
-            Sub => self.wrap_number(self.builder.build_float_sub(lhs_num, rhs_num, "sub").unwrap()),
-            Mul => self.wrap_number(self.builder.build_float_mul(lhs_num, rhs_num, "mul").unwrap()),
-            Div => self.wrap_number(self.builder.build_float_div(lhs_num, rhs_num, "div").unwrap()),
-            Mod => self.wrap_number(self.builder.build_float_rem(lhs_num, rhs_num, "rem").unwrap()),
+            Add | Equals | NotEquals => unreachable!(),
+            Sub => self.wrap_number(
+                self.builder
+                    .build_float_sub(lhs_num, rhs_num, "sub")
+                    .unwrap(),
+            ),
+            Mul => self.wrap_number(
+                self.builder
+                    .build_float_mul(lhs_num, rhs_num, "mul")
+                    .unwrap(),
+            ),
+            Div => self.wrap_number(
+                self.builder
+                    .build_float_div(lhs_num, rhs_num, "div")
+                    .unwrap(),
+            ),
+            Mod => self.wrap_number(
+                self.builder
+                    .build_float_rem(lhs_num, rhs_num, "rem")
+                    .unwrap(),
+            ),
             BitAnd | BitOr | BitXor | ShiftLeft | ShiftRight => unreachable!(),
             Greater => self.wrap_bool(
                 self.builder
@@ -2872,7 +3292,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_float_compare(FloatPredicate::OLE, lhs_num, rhs_num, "le")
                     .unwrap(),
             ),
-            Equals | NotEquals | And | Or => unreachable!(),
+            And | Or => unreachable!(),
         })
     }
 
@@ -2883,10 +3303,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         left: &Expression,
         right: &Expression,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
-        // C3.3: Operands of logical ops are not in tail position
         let saved_tail = ctx.in_tail_position;
         ctx.in_tail_position = false;
-        // C2.2: Use fast bool extraction when operand is known-boolean.
+
         let left_is_bool = self.expr_is_bool(left);
         let right_is_bool = self.expr_is_bool(right);
         let left_value = self.emit_expression(ctx, left)?;
@@ -2934,9 +3353,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BinaryOp::Or => self.boolean_to_int(true),
             _ => unreachable!(),
         };
-        self.builder
-            .build_unconditional_branch(cont_bb)
-            .unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
 
         self.builder.position_at_end(rhs_bb);
         let right_value = self.emit_expression(ctx, right)?;
@@ -2945,17 +3362,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             self.value_to_bool(right_value)
         };
-        // Capture the actual current block — nested and/or may have created sub-blocks
+
         let rhs_end_bb = self.builder.get_insert_block().unwrap();
-        self.builder
-            .build_unconditional_branch(cont_bb)
-            .unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
 
         self.builder.position_at_end(cont_bb);
-        let phi = self
-            .builder
-            .build_phi(self.bool_type, "logic_phi")
-            .unwrap();
+        let phi = self.builder.build_phi(self.bool_type, "logic_phi").unwrap();
         phi.add_incoming(&[
             (&short_value as &dyn BasicValue<'ctx>, short_bb),
             (&right_bool as &dyn BasicValue<'ctx>, rhs_end_bb),
@@ -2989,13 +3401,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap();
 
         self.builder.position_at_end(then_bb);
-        ctx.cse_cache.clear(); // C3.4
+        ctx.cse_cache.clear();
         let then_value = self.emit_expression(ctx, then_branch)?;
         self.builder.build_unconditional_branch(cont_bb).unwrap();
         let then_end = self.builder.get_insert_block().unwrap();
 
         self.builder.position_at_end(else_bb);
-        ctx.cse_cache.clear(); // C3.4
+        ctx.cse_cache.clear();
         let else_value = self.emit_expression(ctx, else_branch)?;
         self.builder.build_unconditional_branch(cont_bb).unwrap();
         let else_end = self.builder.get_insert_block().unwrap();
@@ -3018,7 +3430,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         ctx: &FunctionContext<'ctx>,
         name: &str,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
-        // Check alloca-based variables first (these can be mutated in loops)
         if let Some(alloca) = ctx.variable_allocas.get(name) {
             let loaded = self
                 .builder
@@ -3047,15 +3458,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.call_nb_void(self.runtime.nb_retain, &[loaded.into()]);
             return Ok(loaded);
         }
-        // Check if this is a nullary enum constructor (e.g., None)
+
         if let Some((_, field_count)) = self.enum_constructors.get(name).cloned() {
             if field_count == 0 {
-                // Emit a nullary constructor call
                 return self.emit_enum_constructor_nullary(name);
             }
         }
-        // Check if this is a named function used as a value (function reference).
-        // Wrap it in a closure so it can be passed around and invoked via coral_closure_invoke.
+
         if let Some(target_fn) = self.functions.get(name).copied() {
             return self.emit_function_as_closure(ctx, name, target_fn);
         }
@@ -3071,17 +3480,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         value: IntValue<'ctx>,
     ) {
-        // If there's already an alloca for this variable, store to it (mutation/rebinding)
         if let Some(alloca) = ctx.variable_allocas.get(name) {
             self.builder.build_store(*alloca, value).unwrap();
             return;
         }
-        // Create an alloca for the variable in the function's entry block.
-        // This ensures proper SSA behavior for variables that may be rebound in loops.
+
         let entry_bb = ctx.function.get_first_basic_block().unwrap();
         let current_bb = self.builder.get_insert_block().unwrap();
-        
-        // Position at the start of the entry block for the alloca
+
         if let Some(first_instr) = entry_bb.get_first_instruction() {
             self.builder.position_before(&first_instr);
         } else {
@@ -3091,8 +3497,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_alloca(self.runtime.value_i64_type, &format!("{name}_slot"))
             .unwrap();
-        
-        // Restore position and store the value
+
         self.builder.position_at_end(current_bb);
         self.builder.build_store(alloca, value).unwrap();
         ctx.variable_allocas.insert(name.to_string(), alloca);
@@ -3100,6 +3505,39 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn wrap_number(&mut self, value: FloatValue<'ctx>) -> IntValue<'ctx> {
         self.call_nb(self.runtime.nb_make_number, &[value.into()], "nb_num")
+    }
+
+    /// Inline NaN-boxing for numbers: bitcast f64 → i64 with NaN canonicalization.
+    /// Avoids the overhead of a runtime function call when we know we're working with numbers.
+    fn wrap_number_fast(&mut self, value: FloatValue<'ctx>) -> IntValue<'ctx> {
+        let bits = self
+            .builder
+            .build_bitcast(value, self.runtime.value_i64_type, "nb_bits")
+            .unwrap()
+            .into_int_value();
+        // Check if result is a quiet NaN (which would collide with tagged values)
+        let qnan_mask = self.runtime.value_i64_type.const_int(0xFFF8_0000_0000_0000, false);
+        let qnan_prefix = self.runtime.value_i64_type.const_int(0x7FF8_0000_0000_0000, false);
+        let masked = self.builder.build_and(bits, qnan_mask, "nan_check").unwrap();
+        let is_nan = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, masked, qnan_prefix, "is_nan")
+            .unwrap();
+        // Canonical NaN: QNAN_PREFIX | (TAG_CANONICAL_NAN << 48) = 0x7FFB_8000_0000_0000
+        let canonical_nan = self.runtime.value_i64_type.const_int(0x7FFB_8000_0000_0000, false);
+        self.builder
+            .build_select(is_nan, canonical_nan, bits, "nb_num_fast")
+            .unwrap()
+            .into_int_value()
+    }
+
+    /// Inline unboxing for known-numeric values: direct bitcast i64 → f64.
+    /// Only safe when the value is guaranteed to be a number (not a tagged value).
+    fn value_to_number_fast(&mut self, value: IntValue<'ctx>) -> FloatValue<'ctx> {
+        self.builder
+            .build_bitcast(value, self.f64_type, "nb_f64_fast")
+            .unwrap()
+            .into_float_value()
     }
 
     fn wrap_bool(&mut self, value: IntValue<'ctx>) -> IntValue<'ctx> {
@@ -3133,18 +3571,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_bytes_from_global(global, literal.len())
     }
 
-    fn build_bytes_from_global(
-        &mut self,
-        global: GlobalValue<'ctx>,
-        len: usize,
-    ) -> IntValue<'ctx> {
+    fn build_bytes_from_global(&mut self, global: GlobalValue<'ctx>, len: usize) -> IntValue<'ctx> {
         let i8_ptr_type = self.i8_type.ptr_type(AddressSpace::default());
         let data_ptr = self
             .builder
             .build_pointer_cast(global.as_pointer_value(), i8_ptr_type, "bytes_ptr")
             .unwrap();
         let len_value = self.usize_type.const_int(len as u64, false);
-        // bytes still heap-allocate; bridge through old API
+
         let ptr = self.call_runtime_ptr(
             self.runtime.make_bytes,
             &[data_ptr.into(), len_value.into()],
@@ -3157,13 +3591,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.call_nb(self.runtime.nb_make_unit, &[], "nb_unit")
     }
 
-    /// Wrap an absent/none value
     fn wrap_none(&mut self) -> IntValue<'ctx> {
         self.call_nb(self.runtime.nb_make_none, &[], "nb_none")
     }
 
-    /// Get or create a raw string constant (global) for use in runtime calls.
-    /// Returns the GlobalValue which can be cast to i8* for runtime functions.
     fn get_or_create_string_constant(&mut self, literal: &str) -> GlobalValue<'ctx> {
         if let Some(global) = self.string_pool.get(literal) {
             *global
@@ -3185,22 +3616,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_pointer_cast(global.as_pointer_value(), i8_ptr_type, "str_ptr")
             .unwrap();
-        let len_value = self
-            .usize_type
-            .const_int(literal.len() as u64, false);
+        let len_value = self.usize_type.const_int(literal.len() as u64, false);
         let args = &[cast_ptr.into(), len_value.into()];
         self.call_nb(self.runtime.nb_make_string, args, "nb_str")
     }
 
-    /// Call a coral_nb_* function that returns i64 (NaN-boxed value).
     fn call_nb(
         &mut self,
         function: FunctionValue<'ctx>,
         args: &[BasicMetadataValueEnum<'ctx>],
         name: &str,
     ) -> IntValue<'ctx> {
-        self
-            .builder
+        self.builder
             .build_call(function, args, name)
             .unwrap()
             .try_as_basic_value()
@@ -3209,7 +3636,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value()
     }
 
-    /// Call a coral_nb_* void function (e.g., retain, release, print).
     fn call_nb_void(
         &mut self,
         function: FunctionValue<'ctx>,
@@ -3218,52 +3644,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.build_call(function, args, "").unwrap();
     }
 
-    /// Convert a NaN-boxed i64 to a legacy pointer via coral_nb_to_handle.
-    /// Used when calling old-API functions that still take %CoralValue*.
     fn nb_to_ptr(&mut self, value: IntValue<'ctx>) -> PointerValue<'ctx> {
-        self.call_runtime_ptr(
-            self.runtime.nb_to_handle,
-            &[value.into()],
-            "nb_to_ptr",
-        )
+        self.call_runtime_ptr(self.runtime.nb_to_handle, &[value.into()], "nb_to_ptr")
     }
 
-    /// Convert a legacy pointer to a NaN-boxed i64 via coral_nb_from_handle.
-    /// Used when receiving results from old-API functions.
     fn ptr_to_nb(&mut self, ptr: PointerValue<'ctx>) -> IntValue<'ctx> {
-        self.call_nb(
-            self.runtime.nb_from_handle,
-            &[ptr.into()],
-            "ptr_to_nb",
-        )
+        self.call_nb(self.runtime.nb_from_handle, &[ptr.into()], "ptr_to_nb")
     }
 
-    /// Call a legacy pointer-based runtime function, bridging NaN-boxed i64 args.
-    /// Converts all IntValue args to pointers, calls the function, converts result back.
     fn call_bridged(
         &mut self,
         function: FunctionValue<'ctx>,
         nb_args: &[IntValue<'ctx>],
         name: &str,
     ) -> IntValue<'ctx> {
-        let ptr_args: Vec<BasicMetadataValueEnum<'ctx>> = nb_args
-            .iter()
-            .map(|v| self.nb_to_ptr(*v).into())
-            .collect();
+        let ptr_args: Vec<BasicMetadataValueEnum<'ctx>> =
+            nb_args.iter().map(|v| self.nb_to_ptr(*v).into()).collect();
         let ptr_result = self.call_runtime_ptr(function, &ptr_args, name);
         self.ptr_to_nb(ptr_result)
     }
 
-    /// Call a legacy function with mixed args (some NaN-boxed, some raw).
-    /// The caller must construct the args with proper bridging.
     fn call_runtime_ptr(
         &mut self,
         function: FunctionValue<'ctx>,
         args: &[BasicMetadataValueEnum<'ctx>],
         name: &str,
     ) -> PointerValue<'ctx> {
-        self
-            .builder
+        self.builder
             .build_call(function, args, name)
             .unwrap()
             .try_as_basic_value()
@@ -3317,8 +3724,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn value_to_number(&mut self, value: IntValue<'ctx>) -> FloatValue<'ctx> {
-        self
-            .builder
+        self.builder
             .build_call(self.runtime.nb_as_number, &[value.into()], "nb_as_number")
             .unwrap()
             .try_as_basic_value()
@@ -3342,10 +3748,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             fn_type,
             template.to_string(),
             constraints.to_string(),
-            true,  // side effects
-            false, // align stack
+            true,
+            false,
             Some(InlineAsmDialect::ATT),
-            false, // can_throw
+            false,
         );
         let _ = self
             .builder
@@ -3381,7 +3787,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok(int.into())
             }
             _ => Err(Diagnostic::new(
-                format!("extern argument type not supported: `{}`", self.format_type_enum(target)),
+                format!(
+                    "extern argument type not supported: `{}`",
+                    self.format_type_enum(target)
+                ),
                 span,
             )),
         }
@@ -3413,18 +3822,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let as_float = self
                         .builder
                         .build_unsigned_int_to_float(iv, self.f64_type, "extern_ret_int")
-                        .map_err(|e| Diagnostic::new(format!("int->float cast failed: {e}"), span))?;
+                        .map_err(|e| {
+                            Diagnostic::new(format!("int->float cast failed: {e}"), span)
+                        })?;
                     Ok(self.wrap_number(as_float))
                 }
             }
             _ => Err(Diagnostic::new(
-                format!("extern return type not supported: `{}`", self.format_type_enum(ret_ty)),
+                format!(
+                    "extern return type not supported: `{}`",
+                    self.format_type_enum(ret_ty)
+                ),
                 span,
             )),
         }
     }
 
-    /// Check if an expression contains a $ placeholder (for pipeline desugaring)
     fn contains_placeholder(&self, expr: &Expression) -> bool {
         match expr {
             Expression::Placeholder(_, _) => true,
@@ -3433,20 +3846,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expression::Unary { expr, .. } => self.contains_placeholder(expr),
             Expression::Call { callee, args, .. } => {
-                self.contains_placeholder(callee) || args.iter().any(|a| self.contains_placeholder(a))
+                self.contains_placeholder(callee)
+                    || args.iter().any(|a| self.contains_placeholder(a))
             }
             Expression::List(items, _) => items.iter().any(|i| self.contains_placeholder(i)),
-            Expression::Map(entries, _) => entries.iter().any(|(k, v)| {
-                self.contains_placeholder(k) || self.contains_placeholder(v)
-            }),
+            Expression::Map(entries, _) => entries
+                .iter()
+                .any(|(k, v)| self.contains_placeholder(k) || self.contains_placeholder(v)),
             Expression::Member { target, .. } => self.contains_placeholder(target),
             Expression::Index { target, index, .. } => {
                 self.contains_placeholder(target) || self.contains_placeholder(index)
             }
-            Expression::Slice { target, start, end, .. } => {
-                self.contains_placeholder(target) || self.contains_placeholder(start) || self.contains_placeholder(end)
+            Expression::Slice {
+                target, start, end, ..
+            } => {
+                self.contains_placeholder(target)
+                    || self.contains_placeholder(start)
+                    || self.contains_placeholder(end)
             }
-            Expression::Ternary { condition, then_branch, else_branch, .. } => {
+            Expression::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.contains_placeholder(condition)
                     || self.contains_placeholder(then_branch)
                     || self.contains_placeholder(else_branch)
@@ -3456,7 +3879,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Statement::Binding(b) => self.contains_placeholder(&b.value),
                     Statement::Expression(e) => self.contains_placeholder(e),
                     Statement::Return(e, _) => self.contains_placeholder(e),
-                    Statement::If { condition, body, elif_branches, else_body, .. } => {
+                    Statement::If {
+                        condition,
+                        body,
+                        elif_branches,
+                        else_body,
+                        ..
+                    } => {
                         self.contains_placeholder(condition)
                             || body.statements.iter().any(|s2| match s2 {
                                 Statement::Expression(e) => self.contains_placeholder(e),
@@ -3476,7 +3905,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 })
                             })
                     }
-                    Statement::While { condition, body, .. } => {
+                    Statement::While {
+                        condition, body, ..
+                    } => {
                         self.contains_placeholder(condition)
                             || body.statements.iter().any(|s2| match s2 {
                                 Statement::Expression(e) => self.contains_placeholder(e),
@@ -3497,10 +3928,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 _ => false,
                             })
                     }
-                    Statement::ForRange { start, end, step, body, .. } => {
+                    Statement::ForRange {
+                        start,
+                        end,
+                        step,
+                        body,
+                        ..
+                    } => {
                         self.contains_placeholder(start)
                             || self.contains_placeholder(end)
-                            || step.as_ref().map_or(false, |s| self.contains_placeholder(s))
+                            || step
+                                .as_ref()
+                                .map_or(false, |s| self.contains_placeholder(s))
                             || body.statements.iter().any(|s2| match s2 {
                                 Statement::Expression(e) => self.contains_placeholder(e),
                                 _ => false,
@@ -3509,66 +3948,109 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Statement::Break(_) | Statement::Continue(_) => false,
                     Statement::FieldAssign { value, .. } => self.contains_placeholder(value),
                     Statement::PatternBinding { value, .. } => self.contains_placeholder(value),
-                }) || body.value.as_ref().map_or(false, |v| self.contains_placeholder(v))
+                }) || body
+                    .value
+                    .as_ref()
+                    .map_or(false, |v| self.contains_placeholder(v))
             }
             _ => false,
         }
     }
 
-    /// Replace $ placeholders in an expression with a replacement expression
     fn replace_placeholder_with(&self, expr: &Expression, replacement: &Expression) -> Expression {
         match expr {
             Expression::Placeholder(_, _) => replacement.clone(),
-            Expression::Binary { op, left, right, span } => Expression::Binary {
+            Expression::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => Expression::Binary {
                 op: *op,
                 left: Box::new(self.replace_placeholder_with(left, replacement)),
                 right: Box::new(self.replace_placeholder_with(right, replacement)),
                 span: *span,
             },
-            Expression::Unary { op, expr: inner, span } => Expression::Unary {
+            Expression::Unary {
+                op,
+                expr: inner,
+                span,
+            } => Expression::Unary {
                 op: *op,
                 expr: Box::new(self.replace_placeholder_with(inner, replacement)),
                 span: *span,
             },
-            Expression::Call { callee, args, span, .. } => Expression::Call {
+            Expression::Call {
+                callee, args, span, ..
+            } => Expression::Call {
                 callee: Box::new(self.replace_placeholder_with(callee, replacement)),
-                args: args.iter().map(|a| self.replace_placeholder_with(a, replacement)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| self.replace_placeholder_with(a, replacement))
+                    .collect(),
                 arg_names: vec![],
                 span: *span,
             },
             Expression::List(items, span) => Expression::List(
-                items.iter().map(|i| self.replace_placeholder_with(i, replacement)).collect(),
+                items
+                    .iter()
+                    .map(|i| self.replace_placeholder_with(i, replacement))
+                    .collect(),
                 *span,
             ),
             Expression::Map(entries, span) => Expression::Map(
-                entries.iter().map(|(k, v)| {
-                    (self.replace_placeholder_with(k, replacement), self.replace_placeholder_with(v, replacement))
-                }).collect(),
+                entries
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            self.replace_placeholder_with(k, replacement),
+                            self.replace_placeholder_with(v, replacement),
+                        )
+                    })
+                    .collect(),
                 *span,
             ),
-            Expression::Member { target, property, span } => Expression::Member {
+            Expression::Member {
+                target,
+                property,
+                span,
+            } => Expression::Member {
                 target: Box::new(self.replace_placeholder_with(target, replacement)),
                 property: property.clone(),
                 span: *span,
             },
-            Expression::Index { target, index, span } => Expression::Index {
+            Expression::Index {
+                target,
+                index,
+                span,
+            } => Expression::Index {
                 target: Box::new(self.replace_placeholder_with(target, replacement)),
                 index: Box::new(self.replace_placeholder_with(index, replacement)),
                 span: *span,
             },
-            Expression::Slice { target, start, end, span } => Expression::Slice {
+            Expression::Slice {
+                target,
+                start,
+                end,
+                span,
+            } => Expression::Slice {
                 target: Box::new(self.replace_placeholder_with(target, replacement)),
                 start: Box::new(self.replace_placeholder_with(start, replacement)),
                 end: Box::new(self.replace_placeholder_with(end, replacement)),
                 span: *span,
             },
-            Expression::Ternary { condition, then_branch, else_branch, span } => Expression::Ternary {
+            Expression::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            } => Expression::Ternary {
                 condition: Box::new(self.replace_placeholder_with(condition, replacement)),
                 then_branch: Box::new(self.replace_placeholder_with(then_branch, replacement)),
                 else_branch: Box::new(self.replace_placeholder_with(else_branch, replacement)),
                 span: *span,
             },
-            // For expressions that don't contain placeholders or shouldn't be traversed, return as-is
+
             other => other.clone(),
         }
     }
@@ -3587,8 +4069,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap()
     }
 
-    /// C2.2: Fast boolean extraction when value is statically known to be a NaN-boxed Bool.
-    /// Extracts bit 0 of the NaN-boxed representation directly, avoiding the runtime `is_truthy` call.
     fn value_to_bool_fast(&mut self, value: IntValue<'ctx>) -> IntValue<'ctx> {
         let one = self.runtime.value_i64_type.const_int(1, false);
         let masked = self.builder.build_and(value, one, "bool_extract").unwrap();
@@ -3608,7 +4088,9 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn ensure_globals_initialized(&mut self) {
         if let Some(init_fn) = self.global_init_fn {
-            self.builder.build_call(init_fn, &[], "init_globals").unwrap();
+            self.builder
+                .build_call(init_fn, &[], "init_globals")
+                .unwrap();
         }
     }
 
@@ -3636,9 +4118,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         if globals.is_empty() {
             return Ok(());
         }
-        let init_fn = self
-            .module
-            .add_function("__coral_init_globals", self.context.void_type().fn_type(&[], false), None);
+        let init_fn = self.module.add_function(
+            "__coral_init_globals",
+            self.context.void_type().fn_type(&[], false),
+            None,
+        );
         self.global_init_fn = Some(init_fn);
         let entry = self.context.append_basic_block(init_fn, "entry");
         let body = self.context.append_basic_block(init_fn, "body");
@@ -3708,23 +4192,19 @@ impl<'ctx> CodeGenerator<'ctx> {
 
 struct FunctionContext<'ctx> {
     variables: HashMap<String, IntValue<'ctx>>,
-    /// Stack-allocated slots for variables (alloca i64) that support mutation/rebinding in loops.
+
     variable_allocas: HashMap<String, PointerValue<'ctx>>,
     function: FunctionValue<'ctx>,
-    /// Stack of (loop_header_bb, loop_exit_bb) for break/continue support
+
     loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
-    /// CC2.3: Debug info scope for this function (if debug info is enabled).
+
     di_scope: Option<DIScope<'ctx>>,
-    /// C3.3: The Coral-level function name (used for tail call detection).
+
     fn_name: String,
-    /// C3.3: When true, the expression being emitted is in tail position.
-    /// Self-recursive calls in this position are marked as tail calls.
+
     in_tail_position: bool,
-    /// C3.4: Common subexpression elimination cache.
-    /// Maps a normalized expression key to the previously emitted LLVM value.
-    /// Cleared on mutation (variable assignment, store field write, etc.).
+
     cse_cache: HashMap<String, IntValue<'ctx>>,
-    /// S4.6: When inside a lambda invoke function, holds the `out` pointer.
-    /// `return` stores to this pointer and emits `ret void` instead of `ret i64`.
+
     lambda_out_param: Option<PointerValue<'ctx>>,
 }

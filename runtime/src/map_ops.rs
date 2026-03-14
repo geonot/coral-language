@@ -1,7 +1,4 @@
-//! Map operations FFI functions for the Coral runtime.
-
 use crate::*;
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_iter(map: ValueHandle) -> ValueHandle {
@@ -26,7 +23,6 @@ pub extern "C" fn coral_map_iter(map: ValueHandle) -> ValueHandle {
     ))
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_iter(value: ValueHandle) -> ValueHandle {
     if value.is_null() {
@@ -39,7 +35,6 @@ pub extern "C" fn coral_value_iter(value: ValueHandle) -> ValueHandle {
         _ => coral_make_unit(),
     }
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_iter_next(iter: ValueHandle) -> ValueHandle {
@@ -59,17 +54,20 @@ pub extern "C" fn coral_map_iter_next(iter: ValueHandle) -> ValueHandle {
         let idx = iter_obj.index;
         iter_obj.index += 1;
         let bucket = &iter_obj.buckets[idx];
-        if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() && !bucket.value.is_null() {
+        if bucket.state == MapBucketState::Occupied
+            && !bucket.key.is_null()
+            && !bucket.value.is_null()
+        {
             unsafe {
                 coral_value_retain(bucket.key);
+                coral_value_retain(bucket.value);
             }
-            // Return just the key — use map_entries() for key-value pairs
-            return bucket.key;
+            let pair = [bucket.key, bucket.value];
+            return coral_make_list(pair.as_ptr(), 2);
         }
     }
     coral_make_unit()
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_get(map: ValueHandle, key: ValueHandle) -> ValueHandle {
@@ -98,7 +96,6 @@ pub extern "C" fn coral_map_get(map: ValueHandle, key: ValueHandle) -> ValueHand
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_keys(map: ValueHandle) -> ValueHandle {
     if map.is_null() {
@@ -116,12 +113,14 @@ pub extern "C" fn coral_map_keys(map: ValueHandle) -> ValueHandle {
     let mut keys: Vec<ValueHandle> = Vec::with_capacity(map_obj.len);
     for bucket in &map_obj.buckets {
         if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() {
-            unsafe { coral_value_retain(bucket.key); }
+            unsafe {
+                coral_value_retain(bucket.key);
+            }
             keys.push(bucket.key);
         }
     }
     let handle = coral_make_list(keys.as_ptr(), keys.len());
-    // the list constructor retained each element; release our Vec-held references
+
     unsafe {
         for key in keys {
             coral_value_release(key);
@@ -129,7 +128,6 @@ pub extern "C" fn coral_map_keys(map: ValueHandle) -> ValueHandle {
     }
     handle
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_set(
@@ -166,7 +164,6 @@ pub extern "C" fn coral_map_set(
     map
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_length(map: ValueHandle) -> ValueHandle {
     if map.is_null() {
@@ -184,18 +181,25 @@ pub extern "C" fn coral_map_length(map: ValueHandle) -> ValueHandle {
     coral_make_number(map_obj.len as f64)
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_remove(map: ValueHandle, key: ValueHandle) -> ValueHandle {
-    if map.is_null() || key.is_null() { return map; }
+    if map.is_null() || key.is_null() {
+        return map;
+    }
     let mv = unsafe { &mut *map };
-    if mv.tag != ValueTag::Map as u8 { return map; }
+    if mv.tag != ValueTag::Map as u8 {
+        return map;
+    }
     let ptr = mv.heap_ptr();
-    if ptr.is_null() { return map; }
+    if ptr.is_null() {
+        return map;
+    }
     let map_obj = unsafe { &mut *(ptr as *mut MapObject) };
     let hash = hash_value(key);
     let capacity = map_obj.buckets.len();
-    if capacity == 0 { return map; }
+    if capacity == 0 {
+        return map;
+    }
     let mut idx = (hash as usize) & (capacity - 1);
     for _ in 0..capacity {
         let bucket = &mut map_obj.buckets[idx];
@@ -203,8 +207,16 @@ pub extern "C" fn coral_map_remove(map: ValueHandle, key: ValueHandle) -> ValueH
             MapBucketState::Empty => return map,
             MapBucketState::Occupied => {
                 if bucket.hash == hash && values_equal_handles(bucket.key, key) {
-                    if !bucket.key.is_null() { unsafe { coral_value_release(bucket.key); } }
-                    if !bucket.value.is_null() { unsafe { coral_value_release(bucket.value); } }
+                    if !bucket.key.is_null() {
+                        unsafe {
+                            coral_value_release(bucket.key);
+                        }
+                    }
+                    if !bucket.value.is_null() {
+                        unsafe {
+                            coral_value_release(bucket.value);
+                        }
+                    }
                     bucket.state = MapBucketState::Tombstone;
                     bucket.key = ptr::null_mut();
                     bucket.value = ptr::null_mut();
@@ -220,35 +232,48 @@ pub extern "C" fn coral_map_remove(map: ValueHandle, key: ValueHandle) -> ValueH
     map
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_values(map: ValueHandle) -> ValueHandle {
-    if map.is_null() { return coral_make_list(ptr::null(), 0); }
+    if map.is_null() {
+        return coral_make_list(ptr::null(), 0);
+    }
     let mv = unsafe { &*map };
-    let Some(mo) = map_from_value(mv) else { return coral_make_list(ptr::null(), 0); };
+    let Some(mo) = map_from_value(mv) else {
+        return coral_make_list(ptr::null(), 0);
+    };
     let mut values: Vec<ValueHandle> = Vec::with_capacity(mo.len);
     for bucket in &mo.buckets {
         if bucket.state == MapBucketState::Occupied && !bucket.value.is_null() {
-            unsafe { coral_value_retain(bucket.value); }
+            unsafe {
+                coral_value_retain(bucket.value);
+            }
             values.push(bucket.value);
         }
     }
     let result = coral_make_list(values.as_ptr(), values.len());
     for &h in &values {
-        unsafe { coral_value_release(h); }
+        unsafe {
+            coral_value_release(h);
+        }
     }
     result
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_entries(map: ValueHandle) -> ValueHandle {
-    if map.is_null() { return coral_make_list(ptr::null(), 0); }
+    if map.is_null() {
+        return coral_make_list(ptr::null(), 0);
+    }
     let mv = unsafe { &*map };
-    let Some(mo) = map_from_value(mv) else { return coral_make_list(ptr::null(), 0); };
+    let Some(mo) = map_from_value(mv) else {
+        return coral_make_list(ptr::null(), 0);
+    };
     let mut entries: Vec<ValueHandle> = Vec::with_capacity(mo.len);
     for bucket in &mo.buckets {
-        if bucket.state == MapBucketState::Occupied && !bucket.key.is_null() && !bucket.value.is_null() {
+        if bucket.state == MapBucketState::Occupied
+            && !bucket.key.is_null()
+            && !bucket.value.is_null()
+        {
             unsafe {
                 coral_value_retain(bucket.key);
                 coral_value_retain(bucket.value);
@@ -264,25 +289,30 @@ pub extern "C" fn coral_map_entries(map: ValueHandle) -> ValueHandle {
     }
     let result = coral_make_list(entries.as_ptr(), entries.len());
     for &h in &entries {
-        unsafe { coral_value_release(h); }
+        unsafe {
+            coral_value_release(h);
+        }
     }
     result
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_has_key(map: ValueHandle, key: ValueHandle) -> ValueHandle {
-    if map.is_null() || key.is_null() { return coral_make_bool(0); }
+    if map.is_null() || key.is_null() {
+        return coral_make_bool(0);
+    }
     let result = coral_map_get(map, key);
     let has = !result.is_null() && unsafe { &*result }.tag != ValueTag::Unit as u8;
-    if !result.is_null() { unsafe { coral_value_release(result); } }
+    if !result.is_null() {
+        unsafe {
+            coral_value_release(result);
+        }
+    }
     coral_make_bool(if has { 1 } else { 0 })
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_map_merge(a: ValueHandle, b: ValueHandle) -> ValueHandle {
-    // Start with a copy of a, then overlay b
     let mut result = if a.is_null() {
         coral_make_map(ptr::null(), 0)
     } else {
@@ -311,4 +341,3 @@ pub extern "C" fn coral_map_merge(a: ValueHandle, b: ValueHandle) -> ValueHandle
     }
     result
 }
-

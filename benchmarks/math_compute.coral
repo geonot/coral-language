@@ -1,0 +1,38 @@
+# Benchmark: Math and numeric computation
+# Tests: floating point, trigonometry, mixed int/float
+
+*main()
+    start is time_now()
+
+    # Leibniz formula for pi
+    pi_approx is 0.0
+    i is 0
+    while i < 1000000
+        term is 1.0 / (2.0 * i + 1.0)
+        if i % 2 is 0
+            pi_approx is pi_approx + term
+        else
+            pi_approx is pi_approx - term
+        i is i + 1
+    pi_approx is pi_approx * 4.0
+
+    # Trig computation
+    trig_sum is 0.0
+    j is 0
+    while j < 100000
+        angle is j * 0.001
+        trig_sum is trig_sum + sin(angle) * sin(angle) + cos(angle) * cos(angle)
+        j is j + 1
+
+    # Sqrt and power operations
+    sqrt_sum is 0.0
+    k is 1
+    while k < 100000
+        sqrt_sum is sqrt_sum + sqrt(k * 1.0)
+        k is k + 1
+
+    elapsed is time_now() - start
+    log("pi_approx = " + to_string(pi_approx))
+    log("trig_sum = " + to_string(trig_sum))
+    log("sqrt_sum = " + to_string(sqrt_sum))
+    log("elapsed_ms: " + to_string(elapsed))

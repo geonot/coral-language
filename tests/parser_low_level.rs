@@ -1,6 +1,6 @@
+use coralc::ast::Expression;
 use coralc::lexer;
 use coralc::parser::Parser;
-use coralc::ast::Expression;
 
 #[test]
 fn test_extern_fn_declaration() {
@@ -10,7 +10,11 @@ extern fn coral_free(p: usize)
 "#;
     let tokens = lexer::lex(source).unwrap();
     let program = Parser::new(tokens, source.len()).parse();
-    assert!(program.is_ok(), "extern fn should parse: {:?}", program.err());
+    assert!(
+        program.is_ok(),
+        "extern fn should parse: {:?}",
+        program.err()
+    );
     let prog = program.unwrap();
     assert_eq!(prog.items.len(), 2);
 }
@@ -24,7 +28,11 @@ fn test_unsafe_block() {
 "#;
     let tokens = lexer::lex(source).unwrap();
     let program = Parser::new(tokens, source.len()).parse();
-    assert!(program.is_ok(), "unsafe block should parse: {:?}", program.err());
+    assert!(
+        program.is_ok(),
+        "unsafe block should parse: {:?}",
+        program.err()
+    );
 }
 
 #[test]
@@ -35,7 +43,11 @@ fn test_asm_expression() {
 "#;
     let tokens = lexer::lex(source).unwrap();
     let program = Parser::new(tokens, source.len()).parse();
-    assert!(program.is_ok(), "asm expression should parse: {:?}", program.err());
+    assert!(
+        program.is_ok(),
+        "asm expression should parse: {:?}",
+        program.err()
+    );
 }
 
 #[test]
@@ -46,7 +58,11 @@ fn test_ptr_load() {
 "#;
     let tokens = lexer::lex(source).unwrap();
     let program = Parser::new(tokens, source.len()).parse();
-    assert!(program.is_ok(), "ptr load should parse: {:?}", program.err());
+    assert!(
+        program.is_ok(),
+        "ptr load should parse: {:?}",
+        program.err()
+    );
 }
 
 #[test]
@@ -58,7 +74,11 @@ fn test_none_keyword() {
 "#;
     let tokens = lexer::lex(source).unwrap();
     let program = Parser::new(tokens, source.len()).parse();
-    assert!(program.is_ok(), "none keyword should parse: {:?}", program.err());
+    assert!(
+        program.is_ok(),
+        "none keyword should parse: {:?}",
+        program.err()
+    );
     let prog = program.unwrap();
     // Check that we got a function with a body that has the none expression
     if let coralc::ast::Item::Function(func) = &prog.items[0] {

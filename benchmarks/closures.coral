@@ -1,0 +1,40 @@
+# Benchmark: Closures and higher-order functions
+# Tests: lambda calls, list map/filter/reduce
+
+*triple(x)
+    x * 3
+
+*main()
+    start is time_now()
+
+    # Function reference in tight loop
+    result1 is 0
+    i is 0
+    while i < 500000
+        result1 is result1 + triple(i % 100)
+        i is i + 1
+
+    # Repeated lambda calls
+    result2 is 0
+    j is 0
+    while j < 500000
+        val is (j % 100) + 1
+        result2 is result2 + val * 2
+        j is j + 1
+
+    # Higher-order list operations
+    data is []
+    k is 0
+    while k < 10000
+        data is data.push(k)
+        k is k + 1
+
+    mapped is data.map(*fn(x) x * 2)
+    filtered is mapped.filter(*fn(x) x % 6 is 0)
+    sum is filtered.reduce(0, *fn(acc, x) acc + x)
+
+    elapsed is time_now() - start
+    log("func_ref_sum = " + to_string(result1))
+    log("inline_sum = " + to_string(result2))
+    log("pipeline_result = " + to_string(sum))
+    log("elapsed_ms: " + to_string(elapsed))

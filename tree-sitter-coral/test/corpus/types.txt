@@ -1,0 +1,151 @@
+================================================================================
+Type Definition With Fields
+================================================================================
+
+type Point
+    x
+    y
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (type_definition
+    name: (identifier)
+    body: (type_body
+      (field_definition
+        name: (identifier))
+      (field_definition
+        name: (identifier)))))
+
+================================================================================
+Type With Default Values
+================================================================================
+
+type Config
+    host ? 'localhost'
+    port ? 8080
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (type_definition
+    name: (identifier)
+    body: (type_body
+      (field_definition
+        name: (identifier)
+        default: (template_string
+          (template_content)))
+      (field_definition
+        name: (identifier)
+        default: (integer)))))
+
+================================================================================
+Enum Definition
+================================================================================
+
+enum Color
+    Red
+    Green
+    Blue
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_definition
+    name: (identifier)
+    body: (enum_body
+      (variant_definition
+        name: (identifier))
+      (variant_definition
+        name: (identifier))
+      (variant_definition
+        name: (identifier)))))
+
+================================================================================
+Enum With Data
+================================================================================
+
+enum Shape
+    Circle(radius)
+    Rect(width, height)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_definition
+    name: (identifier)
+    body: (enum_body
+      (variant_definition
+        name: (identifier)
+        (identifier))
+      (variant_definition
+        name: (identifier)
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Trait Definition
+================================================================================
+
+trait Printable
+    *to_string()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (trait_definition
+    name: (identifier)
+    body: (trait_body
+      (trait_method_signature
+        name: (identifier)))))
+
+================================================================================
+Error Definition
+================================================================================
+
+err NotFound
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (error_definition
+    name: (identifier)))
+
+================================================================================
+Error With Variants
+================================================================================
+
+err Http
+    err BadRequest
+    err NotFound
+    err ServerError
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (error_definition
+    name: (identifier)
+    body: (error_body
+      (error_variant
+        name: (identifier))
+      (error_variant
+        name: (identifier))
+      (error_variant
+        name: (identifier)))))
+
+================================================================================
+Type With Mutable Field
+================================================================================
+
+type Counter
+    &count ? 0
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (type_definition
+    name: (identifier)
+    body: (type_body
+      (field_definition
+        name: (identifier)
+        default: (integer)))))

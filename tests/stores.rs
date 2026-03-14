@@ -17,8 +17,13 @@ fn run_coral(source: &str) -> (String, String, i32) {
     };
     let tmp_dir = std::env::temp_dir().join(format!("coral_store_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
-    let ir_path = tmp_dir.join(format!("test_{:x}.ll",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let ir_path = tmp_dir.join(format!(
+        "test_{:x}.ll",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::write(&ir_path, &ir).unwrap();
     let runtime_path = std::env::current_dir()
         .unwrap()
@@ -47,7 +52,9 @@ fn assert_output(source: &str, expected: &[&str]) {
 
 fn compile(source: &str) -> Result<String, String> {
     let compiler = coralc::compiler::Compiler;
-    compiler.compile_to_ir(source).map_err(|e| format!("{:?}", e))
+    compiler
+        .compile_to_ir(source)
+        .map_err(|e| format!("{:?}", e))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -56,7 +63,8 @@ fn compile(source: &str) -> Result<String, String> {
 
 #[test]
 fn store_create_with_defaults() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Config
     host ? "localhost"
     port ? 8080
@@ -67,12 +75,15 @@ store Config
     log(c.host)
     log(c.port)
     log(c.debug)
-"#, &["localhost", "8080", "false"]);
+"#,
+        &["localhost", "8080", "false"],
+    );
 }
 
 #[test]
 fn store_create_multiple_instances() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Point
     x ? 0
     y ? 0
@@ -88,12 +99,15 @@ store Point
     b.set_x(20)
     log(a.x)
     log(b.x)
-"#, &["10", "20"]);
+"#,
+        &["10", "20"],
+    );
 }
 
 #[test]
 fn store_numeric_defaults() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Stats
     n ? 0
     sum ? 0
@@ -104,7 +118,9 @@ store Stats
     log(s.n)
     log(s.sum)
     log(s.avg)
-"#, &["0", "0", "0"]);
+"#,
+        &["0", "0", "0"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -113,7 +129,8 @@ store Stats
 
 #[test]
 fn store_update_numeric_field() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Counter
     val ? 0
     *set_val(v)
@@ -128,12 +145,15 @@ store Counter
     log(c.val)
     c.increment()
     log(c.val)
-"#, &["0", "42", "43"]);
+"#,
+        &["0", "42", "43"],
+    );
 }
 
 #[test]
 fn store_update_string_field() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store User
     name ? "anonymous"
     email ? ""
@@ -149,12 +169,15 @@ store User
     u.set_email("alice@example.com")
     log(u.name)
     log(u.email)
-"#, &["anonymous", "Alice", "alice@example.com"]);
+"#,
+        &["anonymous", "Alice", "alice@example.com"],
+    );
 }
 
 #[test]
 fn store_update_boolean_field() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Toggle
     active ? false
     *activate()
@@ -165,12 +188,15 @@ store Toggle
     log(t.active)
     t.activate()
     log(t.active)
-"#, &["false", "true"]);
+"#,
+        &["false", "true"],
+    );
 }
 
 #[test]
 fn store_multiple_field_updates() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Rect
     x ? 0
     y ? 0
@@ -191,7 +217,9 @@ store Rect
     log(r.y)
     log(r.w)
     log(r.h)
-"#, &["10", "20", "200", "150"]);
+"#,
+        &["10", "20", "200", "150"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -200,7 +228,8 @@ store Rect
 
 #[test]
 fn store_method_reads_self() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Greeter
     name ? "World"
     *set_name(n)
@@ -213,12 +242,15 @@ store Greeter
     g.greet()
     g.set_name("Coral")
     g.greet()
-"#, &["Hello, World!", "Hello, Coral!"]);
+"#,
+        &["Hello, World!", "Hello, Coral!"],
+    );
 }
 
 #[test]
 fn store_method_mutates_self() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Accumulator
     sum ? 0
     *add(n)
@@ -232,12 +264,15 @@ store Accumulator
     a.add(20)
     a.add(30)
     log(a.get_total())
-"#, &["60"]);
+"#,
+        &["60"],
+    );
 }
 
 #[test]
 fn store_method_with_return_value() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Stack
     items ? []
     *push_item(val)
@@ -251,12 +286,15 @@ store Stack
     s.push_item("b")
     s.push_item("c")
     log(s.size())
-"#, &["3"]);
+"#,
+        &["3"],
+    );
 }
 
 #[test]
 fn store_method_with_conditional_logic() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store BoundedCounter
     val ? 0
     limit ? 10
@@ -273,12 +311,15 @@ store BoundedCounter
         bc.increment()
         i is i + 1
     log(bc.get_val())
-"#, &["10"]);
+"#,
+        &["10"],
+    );
 }
 
 #[test]
 fn store_method_calls_another_method() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Calculator
     result ? 0
     *reset()
@@ -296,7 +337,9 @@ store Calculator
 *main()
     c is make_Calculator()
     log(c.compute())
-"#, &["15"]);
+"#,
+        &["15"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -305,7 +348,8 @@ store Calculator
 
 #[test]
 fn store_implements_trait() {
-    assert_output(r#"
+    assert_output(
+        r#"
 trait Describable
     *describe()
         log("unknown")
@@ -322,12 +366,15 @@ store Dog with Describable
     d.describe()
     d.set_breed("labrador")
     d.describe()
-"#, &["Dog: mutt", "Dog: labrador"]);
+"#,
+        &["Dog: mutt", "Dog: labrador"],
+    );
 }
 
 #[test]
 fn store_trait_multiple_methods() {
-    assert_output(r#"
+    assert_output(
+        r#"
 trait Shape
     *area()
         return 0
@@ -349,7 +396,9 @@ store Circle with Shape
     log(c.area())
     c.set_radius(5)
     log(c.area())
-"#, &["circle", "3", "75"]);
+"#,
+        &["circle", "3", "75"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -358,7 +407,8 @@ store Circle with Shape
 
 #[test]
 fn store_passed_to_function() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Account
     balance ? 0
     *deposit(amount)
@@ -376,12 +426,15 @@ store Account
     acc is make_Account()
     process_deposits(acc, [100, 200, 50])
     log(acc.get_balance())
-"#, &["350"]);
+"#,
+        &["350"],
+    );
 }
 
 #[test]
 fn store_returned_from_function() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Pair
     first ? ""
     second ? ""
@@ -400,7 +453,9 @@ store Pair
     p is make_pair("hello", "world")
     log(p.first)
     log(p.second)
-"#, &["hello", "world"]);
+"#,
+        &["hello", "world"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -409,7 +464,8 @@ store Pair
 
 #[test]
 fn store_list_field_operations() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store TodoList
     items ? []
     *add(item)
@@ -423,12 +479,15 @@ store TodoList
     todos.add("Write code")
     todos.add("Walk dog")
     log(todos.how_many())
-"#, &["3"]);
+"#,
+        &["3"],
+    );
 }
 
 #[test]
 fn store_nested_field_access() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Registry
     entries ? []
     *register(label)
@@ -445,7 +504,9 @@ store Registry
     r.register("beta")
     r.register("gamma")
     r.list_all()
-"#, &["alpha", "beta", "gamma"]);
+"#,
+        &["alpha", "beta", "gamma"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -454,7 +515,8 @@ store Registry
 
 #[test]
 fn multiple_stores_interaction() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Wallet
     balance ? 0
     *deposit(n)
@@ -476,12 +538,15 @@ store Wallet
     transfer(alice, bob, 300)
     log(alice.get_balance())
     log(bob.get_balance())
-"#, &["700", "800"]);
+"#,
+        &["700", "800"],
+    );
 }
 
 #[test]
 fn store_loop_accumulation() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store RunningAvg
     sum ? 0
     n ? 0
@@ -500,7 +565,9 @@ store RunningAvg
     avg.add_sample(30)
     avg.add_sample(40)
     log(avg.get_average())
-"#, &["25"]);
+"#,
+        &["25"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -509,7 +576,8 @@ store RunningAvg
 
 #[test]
 fn store_field_reassign_cycle() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store State
     value ? 0
     *update(v)
@@ -525,12 +593,15 @@ store State
     log(s.read())
     s.update(3)
     log(s.read())
-"#, &["1", "2", "3"]);
+"#,
+        &["1", "2", "3"],
+    );
 }
 
 #[test]
 fn store_complex_lifecycle() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Contact
     name ? ""
     phone ? ""
@@ -546,7 +617,9 @@ store Contact
     log(c.info())
     c.set_info("Alice Smith", "555-5678")
     log(c.info())
-"#, &["Alice (555-1234)", "Alice Smith (555-5678)"]);
+"#,
+        &["Alice (555-1234)", "Alice Smith (555-5678)"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -555,14 +628,17 @@ store Contact
 
 #[test]
 fn store_type_of() {
-    assert_output(r#"
+    assert_output(
+        r#"
 store Widget
     label ? "button"
 
 *main()
     w is make_Widget()
     log(type_of(w))
-"#, &["map"]);
+"#,
+        &["map"],
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -571,7 +647,8 @@ store Widget
 
 #[test]
 fn store_many_fields_compiles() {
-    compile(r#"
+    compile(
+        r#"
 store BigStore
     a ? 0
     b ? 0
@@ -583,12 +660,15 @@ store BigStore
 
 *main()
     log("ok")
-"#).expect("Store with many fields should compile");
+"#,
+    )
+    .expect("Store with many fields should compile");
 }
 
 #[test]
 fn store_with_method_only_compiles() {
-    compile(r#"
+    compile(
+        r#"
 store Service
     status ? "idle"
     *start()
@@ -600,12 +680,15 @@ store Service
 
 *main()
     log("ok")
-"#).expect("Store with methods should compile");
+"#,
+    )
+    .expect("Store with methods should compile");
 }
 
 #[test]
 fn store_with_trait_compiles() {
-    compile(r#"
+    compile(
+        r#"
 trait Printable
     *print_info()
         log("printable")
@@ -617,5 +700,7 @@ store Document with Printable
 
 *main()
     log("ok")
-"#).expect("Store with trait should compile");
+"#,
+    )
+    .expect("Store with trait should compile");
 }

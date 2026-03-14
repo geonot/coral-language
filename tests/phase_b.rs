@@ -12,12 +12,15 @@ use coralc::compiler::Compiler;
 
 fn compile(source: &str) -> Result<String, String> {
     let compiler = Compiler;
-    compiler.compile_to_ir(source).map_err(|e| format!("{:?}", e))
+    compiler
+        .compile_to_ir(source)
+        .map_err(|e| format!("{:?}", e))
 }
 
 fn compile_with_warnings(source: &str) -> Result<(String, Vec<String>), String> {
     let compiler = Compiler;
-    compiler.compile_to_ir_with_warnings(source)
+    compiler
+        .compile_to_ir_with_warnings(source)
         .map(|(ir, warnings)| (ir, warnings.iter().map(|w| w.message.clone()).collect()))
         .map_err(|e| format!("{:?}", e))
 }
@@ -39,8 +42,15 @@ enum Shape
     Triangle(a, b, c) ? a
 "#;
     let (_, warnings) = compile_with_warnings(source).expect("Should compile");
-    let exhaust_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("non-exhaustive")).collect();
-    assert!(exhaust_warnings.is_empty(), "All variants covered, no warnings expected. Got: {:?}", exhaust_warnings);
+    let exhaust_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("non-exhaustive"))
+        .collect();
+    assert!(
+        exhaust_warnings.is_empty(),
+        "All variants covered, no warnings expected. Got: {:?}",
+        exhaust_warnings
+    );
 }
 
 #[test]
@@ -55,9 +65,14 @@ enum Option
     Some(v) ? v
 "#;
     // Should compile (warning, not error)
-    let (_, warnings) = compile_with_warnings(source).expect("Should compile with warning, not error");
+    let (_, warnings) =
+        compile_with_warnings(source).expect("Should compile with warning, not error");
     let has_warning = warnings.iter().any(|w| w.contains("non-exhaustive"));
-    assert!(has_warning, "Expected non-exhaustive warning, got warnings: {:?}", warnings);
+    assert!(
+        has_warning,
+        "Expected non-exhaustive warning, got warnings: {:?}",
+        warnings
+    );
 }
 
 #[test]
@@ -74,8 +89,15 @@ enum Color
     ! "other"
 "#;
     let (_, warnings) = compile_with_warnings(source).expect("Should compile");
-    let exhaust_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("non-exhaustive")).collect();
-    assert!(exhaust_warnings.is_empty(), "Default branch should satisfy exhaustiveness. Got: {:?}", exhaust_warnings);
+    let exhaust_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("non-exhaustive"))
+        .collect();
+    assert!(
+        exhaust_warnings.is_empty(),
+        "Default branch should satisfy exhaustiveness. Got: {:?}",
+        exhaust_warnings
+    );
 }
 
 #[test]
@@ -90,8 +112,14 @@ enum Option
     other ? 0
 "#;
     let (_, warnings) = compile_with_warnings(source).expect("Should compile");
-    let exhaust_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("non-exhaustive")).collect();
-    assert!(exhaust_warnings.is_empty(), "Identifier catch-all should satisfy exhaustiveness");
+    let exhaust_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("non-exhaustive"))
+        .collect();
+    assert!(
+        exhaust_warnings.is_empty(),
+        "Identifier catch-all should satisfy exhaustiveness"
+    );
 }
 
 #[test]
@@ -111,8 +139,11 @@ enum Direction
     let warning = warnings.iter().find(|w| w.contains("non-exhaustive"));
     assert!(warning.is_some(), "Expected non-exhaustive warning");
     let w = warning.unwrap();
-    assert!(w.contains("South") || w.contains("East") || w.contains("West"),
-        "Warning should mention missing variants, got: {}", w);
+    assert!(
+        w.contains("South") || w.contains("East") || w.contains("West"),
+        "Warning should mention missing variants, got: {}",
+        w
+    );
 }
 
 #[test]
@@ -129,8 +160,15 @@ enum Option
     None ? 0
 "#;
     let (_, warnings) = compile_with_warnings(source).expect("Should compile");
-    let exhaust_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("non-exhaustive")).collect();
-    assert!(exhaust_warnings.is_empty(), "Nested exhaustive match should have no warnings. Got: {:?}", exhaust_warnings);
+    let exhaust_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("non-exhaustive"))
+        .collect();
+    assert!(
+        exhaust_warnings.is_empty(),
+        "Nested exhaustive match should have no warnings. Got: {:?}",
+        exhaust_warnings
+    );
 }
 
 #[test]
@@ -147,8 +185,14 @@ enum Option
 "#;
     // Some(None) is missing - should warn about nested non-exhaustiveness
     let (_, warnings) = compile_with_warnings(source).expect("Should compile");
-    let has_warning = warnings.iter().any(|w| w.contains("non-exhaustive") || w.contains("None"));
-    assert!(has_warning, "Expected warning about missing Some(None) pattern. Got: {:?}", warnings);
+    let has_warning = warnings
+        .iter()
+        .any(|w| w.contains("non-exhaustive") || w.contains("None"));
+    assert!(
+        has_warning,
+        "Expected warning about missing Some(None) pattern. Got: {:?}",
+        warnings
+    );
 }
 
 // ========== SL-14: Error Propagation Operator ==========

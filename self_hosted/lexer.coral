@@ -345,6 +345,16 @@ use std.char
 		return "keyword_when"
 	if text is "use"
 		return "keyword_use"
+	if text is "do"
+		return "keyword_do"
+	if text is "end"
+		return "keyword_end"
+	if text is "extend"
+		return "keyword_extend"
+	if text is "const"
+		return "keyword_const"
+	if text is "not"
+		return "keyword_not"
 	return "identifier"
 
 # ─── Comment Handling ───────────────────────────────────────────────
@@ -386,6 +396,9 @@ use std.char
 		if current_char(state) is "!"
 			advance(state)
 			return make_token("bang_bang", "!!", start, state.get("pos"))
+		if current_char(state) is "="
+			advance(state)
+			return make_token("not_eq", "!=", start, state.get("pos"))
 		return make_token("bang", "!", start, state.get("pos"))
 
 	# Single-character operators
@@ -398,7 +411,12 @@ use std.char
 	c is "?" ? return make_token("question", "?", start, state.get("pos"))
 	c is ":" ? return make_token("colon", ":", start, state.get("pos"))
 	c is "," ? return make_token("comma", ",", start, state.get("pos"))
-	c is "." ? return make_token("dot", ".", start, state.get("pos"))
+	if c is "."
+		if current_char(state) is "." and peek_char(state, 1) is "."
+			advance(state)
+			advance(state)
+			return make_token("ellipsis", "...", start, state.get("pos"))
+		return make_token("dot", ".", start, state.get("pos"))
 	c is "+" ? return make_token("plus", "+", start, state.get("pos"))
 	c is "-" ? return make_token("minus", "-", start, state.get("pos"))
 	c is "/" ? return make_token("slash", "/", start, state.get("pos"))

@@ -1,8 +1,3 @@
-//! Lambda, closure, and enum constructor codegen for Coral.
-//!
-//! Contains lambda emission, closure environment building,
-//! capture analysis, and enum/ADT constructor generation.
-
 use super::*;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -39,19 +34,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.runtime.closure_invoke_type,
             None,
         );
-        self.build_lambda_invoke(
-            invoke_fn,
-            env_struct,
-            &capture_names,
-            params,
-            body,
-        )?;
+        self.build_lambda_invoke(invoke_fn, env_struct, &capture_names, params, body)?;
 
-        // C3.2: Mark small lambda invoke functions as alwaysinline so LLVM can
-        // inline them at call sites, especially inside map/filter/reduce loops.
         {
-            let stmt_count = body.statements.len()
-                + if body.value.is_some() { 1 } else { 0 };
+            let stmt_count = body.statements.len() + if body.value.is_some() { 1 } else { 0 };
             if stmt_count <= 5 {
                 let kind_id = Attribute::get_named_enum_kind_id("alwaysinline");
                 let attr = self.context.create_enum_attribute(kind_id, 0);
@@ -71,7 +57,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             None
         };
 
-    let env_ptr = self.build_closure_env(env_struct, &capture_values, span)?;
+        let env_ptr = self.build_closure_env(env_struct, &capture_values, span)?;
         let invoke_ptr = invoke_fn.as_global_value().as_pointer_value();
         let release_ptr_type = self
             .runtime
@@ -81,14 +67,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|f| f.as_global_value().as_pointer_value())
             .unwrap_or_else(|| release_ptr_type.const_null());
         let capture_count_val = self.usize_type.const_int(capture_names.len() as u64, false);
-        let args = &[invoke_ptr.into(), release_ptr.into(), env_ptr.into(), capture_count_val.into()];
+        let args = &[
+            invoke_ptr.into(),
+            release_ptr.into(),
+            env_ptr.into(),
+            capture_count_val.into(),
+        ];
         let closure_ptr = self.call_runtime_ptr(self.runtime.make_closure, args, "make_closure");
         Ok(self.ptr_to_nb(closure_ptr))
     }
 
-    /// Wrap a named function in a closure so it can be used as a first-class value.
-    /// Generates a thunk function matching the closure invoke signature that
-    /// extracts args from the args array and delegates to the original function.
     pub(super) fn emit_function_as_closure(
         &mut self,
         _ctx: &FunctionContext<'ctx>,
@@ -98,20 +86,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let param_count = target_fn.count_params();
         let saved_block = self.builder.get_insert_block();
 
-        // Generate a thunk: void thunk(i8* env, Value** args, i64 nargs, Value** out)
         let thunk_name = format!("__fn_thunk_{name}");
-        let thunk_fn = self.module.add_function(
-            &thunk_name,
-            self.runtime.closure_invoke_type,
-            None,
-        );
+        let thunk_fn =
+            self.module
+                .add_function(&thunk_name, self.runtime.closure_invoke_type, None);
         let entry = self.context.append_basic_block(thunk_fn, "entry");
         self.builder.position_at_end(entry);
 
         let args_param = thunk_fn.get_nth_param(1).unwrap().into_pointer_value();
         let out_param = thunk_fn.get_nth_param(3).unwrap().into_pointer_value();
 
-        // Extract each argument from the args array
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         for i in 0..param_count {
             let index = self.usize_type.const_int(i as u64, false);
@@ -127,22 +111,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             };
             let arg_val = self
                 .builder
-                .build_load(
-                    self.runtime.value_ptr_type,
-                    arg_ptr,
-                    &format!("arg_{i}"),
-                )
+                .build_load(self.runtime.value_ptr_type, arg_ptr, &format!("arg_{i}"))
                 .unwrap()
                 .into_pointer_value();
-            // Retain before converting: nb_from_handle releases immediates,
-            // but args are borrowed from the runtime
-            self.call_runtime_void(self.runtime.value_retain, &[arg_val.into()], "retain_borrowed_arg");
-            // Convert Value* to NaN-boxed i64 for the target function
+
+            self.call_runtime_void(
+                self.runtime.value_retain,
+                &[arg_val.into()],
+                "retain_borrowed_arg",
+            );
+
             let arg_nb = self.ptr_to_nb(arg_val);
             call_args.push(arg_nb.into());
         }
 
-        // Call the original function (returns NaN-boxed i64)
         let result = self
             .builder
             .build_call(target_fn, &call_args, "thunk_call")
@@ -152,18 +134,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap()
             .into_int_value();
 
-        // Convert NaN-boxed i64 back to Value* for closure protocol
         let result_ptr = self.nb_to_ptr(result);
-        // Store result and return
+
         self.builder.build_store(out_param, result_ptr).unwrap();
         self.builder.build_return(None).unwrap();
 
-        // Restore builder position
         if let Some(block) = saved_block {
             self.builder.position_at_end(block);
         }
 
-        // Create the closure with nil env and nil release
         let invoke_ptr = thunk_fn.as_global_value().as_pointer_value();
         let release_ptr_type = self
             .runtime
@@ -172,34 +151,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         let null_release = release_ptr_type.const_null();
         let null_env = self.runtime.value_ptr_type.const_null();
         let zero_captures = self.usize_type.const_zero();
-        let closure_args = &[invoke_ptr.into(), null_release.into(), null_env.into(), zero_captures.into()];
-        let closure_ptr = self.call_runtime_ptr(self.runtime.make_closure, closure_args, "fn_as_closure");
+        let closure_args = &[
+            invoke_ptr.into(),
+            null_release.into(),
+            null_env.into(),
+            zero_captures.into(),
+        ];
+        let closure_ptr =
+            self.call_runtime_ptr(self.runtime.make_closure, closure_args, "fn_as_closure");
         Ok(self.ptr_to_nb(closure_ptr))
     }
 
-    /// Emit code to construct an enum (ADT) variant value.
     pub(super) fn emit_enum_constructor(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
         variant_name: &str,
         args: &[Expression],
     ) -> Result<IntValue<'ctx>, Diagnostic> {
-        // Create tag name as a global string constant
         let tag_name_bytes = variant_name.as_bytes();
         let tag_name_global = self.get_or_create_string_constant(variant_name);
-        let tag_name_ptr = self.builder
+        let tag_name_ptr = self
+            .builder
             .build_pointer_cast(
                 tag_name_global.as_pointer_value(),
                 self.i8_type.ptr_type(AddressSpace::default()),
                 "tag_name_ptr",
             )
             .unwrap();
-        let tag_name_len = self.usize_type.const_int(tag_name_bytes.len() as u64, false);
-        
-        // Build array of field values
+        let tag_name_len = self
+            .usize_type
+            .const_int(tag_name_bytes.len() as u64, false);
+
         let field_count = args.len();
         let (fields_ptr, field_count_val) = if field_count == 0 {
-            let null_ptr = self.runtime.value_ptr_type
+            let null_ptr = self
+                .runtime
+                .value_ptr_type
                 .ptr_type(AddressSpace::default())
                 .const_null();
             (null_ptr, self.usize_type.const_zero())
@@ -209,7 +196,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let value = self.emit_expression(ctx, arg)?;
                 field_values.push(value);
             }
-            
+
             let array_type = self.runtime.value_ptr_type.array_type(field_count as u32);
             let mut temp_array = array_type.get_undef();
             for (idx, value) in field_values.iter().enumerate() {
@@ -220,53 +207,72 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap()
                     .into_array_value();
             }
-            
-            let alloca = self.builder.build_alloca(array_type, "tagged_fields").unwrap();
+
+            let alloca = self
+                .builder
+                .build_alloca(array_type, "tagged_fields")
+                .unwrap();
             self.builder.build_store(alloca, temp_array).unwrap();
-            
-            let ptr = self.builder
+
+            let ptr = self
+                .builder
                 .build_pointer_cast(
                     alloca,
-                    self.runtime.value_ptr_type.ptr_type(AddressSpace::default()),
+                    self.runtime
+                        .value_ptr_type
+                        .ptr_type(AddressSpace::default()),
                     "fields_ptr",
                 )
                 .unwrap();
             (ptr, self.usize_type.const_int(field_count as u64, false))
         };
-        
-        // Call coral_make_tagged(tag_name, tag_name_len, fields, field_count)
+
         let tagged_ptr = self.call_runtime_ptr(
             self.runtime.make_tagged,
-            &[tag_name_ptr.into(), tag_name_len.into(), fields_ptr.into(), field_count_val.into()],
+            &[
+                tag_name_ptr.into(),
+                tag_name_len.into(),
+                fields_ptr.into(),
+                field_count_val.into(),
+            ],
             "make_tagged",
         );
         Ok(self.ptr_to_nb(tagged_ptr))
     }
-    
-    /// Emit a nullary enum constructor (no fields, e.g., None)
+
     pub(super) fn emit_enum_constructor_nullary(
         &mut self,
         variant_name: &str,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         let tag_name_bytes = variant_name.as_bytes();
         let tag_name_global = self.get_or_create_string_constant(variant_name);
-        let tag_name_ptr = self.builder
+        let tag_name_ptr = self
+            .builder
             .build_pointer_cast(
                 tag_name_global.as_pointer_value(),
                 self.i8_type.ptr_type(AddressSpace::default()),
                 "tag_name_ptr",
             )
             .unwrap();
-        let tag_name_len = self.usize_type.const_int(tag_name_bytes.len() as u64, false);
-        
-        let null_ptr = self.runtime.value_ptr_type
+        let tag_name_len = self
+            .usize_type
+            .const_int(tag_name_bytes.len() as u64, false);
+
+        let null_ptr = self
+            .runtime
+            .value_ptr_type
             .ptr_type(AddressSpace::default())
             .const_null();
         let zero = self.usize_type.const_zero();
-        
+
         let tagged_ptr = self.call_runtime_ptr(
             self.runtime.make_tagged,
-            &[tag_name_ptr.into(), tag_name_len.into(), null_ptr.into(), zero.into()],
+            &[
+                tag_name_ptr.into(),
+                tag_name_len.into(),
+                null_ptr.into(),
+                zero.into(),
+            ],
             "make_tagged_nullary",
         );
         Ok(self.ptr_to_nb(tagged_ptr))
@@ -302,18 +308,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap()
                     .into_array_value();
             }
+            // Place the alloca in the entry block so it isn't repeated
+            // on every loop iteration (LLVM allocas inside loops grow
+            // the stack each iteration and never reclaim).
+            let current_bb = self.builder.get_insert_block().unwrap();
+            let entry_bb = ctx.function.get_first_basic_block().unwrap();
+            if let Some(first_instr) = entry_bb.get_first_instruction() {
+                self.builder.position_before(&first_instr);
+            } else {
+                self.builder.position_at_end(entry_bb);
+            }
             let alloca = self
                 .builder
                 .build_alloca(array_type, "closure_args")
                 .unwrap();
+            self.builder.position_at_end(current_bb);
             self.builder.build_store(alloca, temp_array).unwrap();
             let ptr = self
                 .builder
                 .build_pointer_cast(alloca, arg_ptr_type, "closure_args_ptr")
                 .unwrap();
-            let len = self
-                .usize_type
-                .const_int(arg_values.len() as u64, false);
+            let len = self.usize_type.const_int(arg_values.len() as u64, false);
             (ptr, len)
         };
         let closure_ptr = self.nb_to_ptr(closure);
@@ -357,21 +372,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     );
                     locals.insert(binding.name.clone());
                 }
-                Statement::Expression(expr) => self.collect_captures_expr(
-                    expr,
-                    available,
-                    &mut locals,
-                    captures,
-                    seen,
-                ),
-                Statement::Return(expr, _) => self.collect_captures_expr(
-                    expr,
-                    available,
-                    &mut locals,
-                    captures,
-                    seen,
-                ),
-                Statement::If { condition, body, elif_branches, else_body, .. } => {
+                Statement::Expression(expr) => {
+                    self.collect_captures_expr(expr, available, &mut locals, captures, seen)
+                }
+                Statement::Return(expr, _) => {
+                    self.collect_captures_expr(expr, available, &mut locals, captures, seen)
+                }
+                Statement::If {
+                    condition,
+                    body,
+                    elif_branches,
+                    else_body,
+                    ..
+                } => {
                     self.collect_captures_expr(condition, available, &mut locals, captures, seen);
                     self.collect_captures_block(body, available, &mut locals, captures, seen);
                     for (cond, blk) in elif_branches {
@@ -379,25 +392,51 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.collect_captures_block(blk, available, &mut locals, captures, seen);
                     }
                     if let Some(else_blk) = else_body {
-                        self.collect_captures_block(else_blk, available, &mut locals, captures, seen);
+                        self.collect_captures_block(
+                            else_blk,
+                            available,
+                            &mut locals,
+                            captures,
+                            seen,
+                        );
                     }
                 }
-                Statement::While { condition, body, .. } => {
+                Statement::While {
+                    condition, body, ..
+                } => {
                     self.collect_captures_expr(condition, available, &mut locals, captures, seen);
                     self.collect_captures_block(body, available, &mut locals, captures, seen);
                 }
-                Statement::For { variable, iterable, body, .. } => {
+                Statement::For {
+                    variable,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     self.collect_captures_expr(iterable, available, &mut locals, captures, seen);
                     locals.insert(variable.clone());
                     self.collect_captures_block(body, available, &mut locals, captures, seen);
                 }
-                Statement::ForKV { key_var, value_var, iterable, body, .. } => {
+                Statement::ForKV {
+                    key_var,
+                    value_var,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     self.collect_captures_expr(iterable, available, &mut locals, captures, seen);
                     locals.insert(key_var.clone());
                     locals.insert(value_var.clone());
                     self.collect_captures_block(body, available, &mut locals, captures, seen);
                 }
-                Statement::ForRange { variable, start, end, step, body, .. } => {
+                Statement::ForRange {
+                    variable,
+                    start,
+                    end,
+                    step,
+                    body,
+                    ..
+                } => {
                     self.collect_captures_expr(start, available, &mut locals, captures, seen);
                     self.collect_captures_expr(end, available, &mut locals, captures, seen);
                     if let Some(s) = step {
@@ -440,10 +479,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.collect_captures_expr(left, available, locals, captures, seen);
                 self.collect_captures_expr(right, available, locals, captures, seen);
             }
-            Expression::Unary { expr, .. } =>
-                self.collect_captures_expr(expr, available, locals, captures, seen),
-            Expression::Spread(inner, _) =>
-                self.collect_captures_expr(inner, available, locals, captures, seen),
+            Expression::Unary { expr, .. } => {
+                self.collect_captures_expr(expr, available, locals, captures, seen)
+            }
+            Expression::Spread(inner, _) => {
+                self.collect_captures_expr(inner, available, locals, captures, seen)
+            }
             Expression::List(items, _) => {
                 for item in items {
                     self.collect_captures_expr(item, available, locals, captures, seen);
@@ -462,13 +503,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.collect_captures_expr(arg, available, locals, captures, seen);
                 }
             }
-            Expression::Member { target, .. } =>
-                self.collect_captures_expr(target, available, locals, captures, seen),
+            Expression::Member { target, .. } => {
+                self.collect_captures_expr(target, available, locals, captures, seen)
+            }
             Expression::Index { target, index, .. } => {
                 self.collect_captures_expr(target, available, locals, captures, seen);
                 self.collect_captures_expr(index, available, locals, captures, seen);
             }
-            Expression::Slice { target, start, end, .. } => {
+            Expression::Slice {
+                target, start, end, ..
+            } => {
                 self.collect_captures_expr(target, available, locals, captures, seen);
                 self.collect_captures_expr(start, available, locals, captures, seen);
                 self.collect_captures_expr(end, available, locals, captures, seen);
@@ -486,7 +530,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Match(match_expr) => {
                 self.collect_captures_expr(&match_expr.value, available, locals, captures, seen);
                 for arm in &match_expr.arms {
-                    // S3.2: Guard expression may capture variables
                     if let Some(guard) = &arm.guard {
                         self.collect_captures_expr(guard, available, locals, captures, seen);
                     }
@@ -503,26 +546,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 self.collect_captures_block(body, available, &mut nested, captures, seen);
             }
-            Expression::Throw { value, .. } =>
-                self.collect_captures_expr(value, available, locals, captures, seen),
+            Expression::Throw { value, .. } => {
+                self.collect_captures_expr(value, available, locals, captures, seen)
+            }
             Expression::Pipeline { left, right, .. } => {
                 self.collect_captures_expr(left, available, locals, captures, seen);
                 self.collect_captures_expr(right, available, locals, captures, seen);
             }
-            Expression::ErrorValue { .. } => {
-                // Error values don't capture any variables
-            }
+            Expression::ErrorValue { .. } => {}
             Expression::ErrorPropagate { expr, .. } => {
                 self.collect_captures_expr(expr, available, locals, captures, seen);
             }
-            Expression::ListComprehension { body, iterable, condition, .. } => {
+            Expression::ListComprehension {
+                body,
+                iterable,
+                condition,
+                ..
+            } => {
                 self.collect_captures_expr(iterable, available, locals, captures, seen);
                 self.collect_captures_expr(body, available, locals, captures, seen);
                 if let Some(cond) = condition {
                     self.collect_captures_expr(cond, available, locals, captures, seen);
                 }
             }
-            Expression::MapComprehension { key, value, iterable, condition, .. } => {
+            Expression::MapComprehension {
+                key,
+                value,
+                iterable,
+                condition,
+                ..
+            } => {
                 self.collect_captures_expr(iterable, available, locals, captures, seen);
                 self.collect_captures_expr(key, available, locals, captures, seen);
                 self.collect_captures_expr(value, available, locals, captures, seen);
@@ -601,6 +654,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         .unwrap()
                         .into_int_value();
+                    // Retain captured values so they survive the lambda body.
+                    // Without this, operations in the body can release the
+                    // capture below the env's own reference, causing
+                    // use-after-free on subsequent invocations.
+                    self.call_nb_void(self.runtime.nb_retain, &[value.into()]);
                     self.store_variable(&mut lambda_ctx, name, value);
                 }
             }
@@ -627,15 +685,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
                 .unwrap()
                 .into_pointer_value();
-            // Retain before converting: nb_from_handle releases immediates,
-            // but args are borrowed from the runtime (reduce, closure_invoke, etc.)
-            self.call_runtime_void(self.runtime.value_retain, &[arg_ptr_val.into()], "retain_borrowed_arg");
-            // Convert Value* to NaN-boxed i64
+
+            self.call_runtime_void(
+                self.runtime.value_retain,
+                &[arg_ptr_val.into()],
+                "retain_borrowed_arg",
+            );
+
             let arg_value = self.ptr_to_nb(arg_ptr_val);
             self.store_variable(&mut lambda_ctx, &param.name, arg_value);
         }
 
-    let result = self.emit_block(&mut lambda_ctx, body)?;
+        let result = self.emit_block(&mut lambda_ctx, body)?;
         let result_ptr = self.nb_to_ptr(result);
         self.builder.build_store(out_param, result_ptr).unwrap();
         self.builder.build_return(None).unwrap();
@@ -704,11 +765,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "release_env_raw",
             )
             .unwrap();
-        self.call_runtime_void(self.runtime.heap_free, &[raw_ptr.into()], "closure_env_free");
-        self
-            .builder
-            .build_unconditional_branch(exit_block)
-            .unwrap();
+        self.call_runtime_void(
+            self.runtime.heap_free,
+            &[raw_ptr.into()],
+            "closure_env_free",
+        );
+        self.builder.build_unconditional_branch(exit_block).unwrap();
 
         self.builder.position_at_end(exit_block);
         self.builder.build_return(None).unwrap();
@@ -758,18 +820,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap();
                 self.builder.build_store(field_ptr, *value).unwrap();
             }
-            Ok(
-                self.builder
-                    .build_pointer_cast(typed_ptr, i8_ptr_type, "closure_env_raw")
-                    .unwrap(),
-            )
+            Ok(self
+                .builder
+                .build_pointer_cast(typed_ptr, i8_ptr_type, "closure_env_raw")
+                .unwrap())
         } else {
             Ok(i8_ptr_type.const_null())
         }
     }
 }
 
-/// Collect variable names introduced by a destructuring pattern into a locals set.
 fn collect_pattern_locals(pattern: &crate::ast::MatchPattern, locals: &mut HashSet<String>) {
     match pattern {
         crate::ast::MatchPattern::Identifier(name) => {

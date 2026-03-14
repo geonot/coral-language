@@ -1,6 +1,6 @@
 //! Extended parser tests for Phase B — edge cases, error recovery, and complex syntax.
 
-use coralc::ast::{Expression, Item, BinaryOp, MatchPattern};
+use coralc::ast::{BinaryOp, Expression, Item, MatchPattern};
 use coralc::lexer;
 use coralc::parser::Parser;
 
@@ -32,7 +32,8 @@ fn first_binding_expr(source: &str) -> Expression {
 #[test]
 fn parse_nested_ternary() {
     // Ternary in the else-branch works
-    let expr = first_binding_expr("x is a > 0 ? \"positive\" ! a > -10 ? \"small neg\" ! \"big neg\"\n");
+    let expr =
+        first_binding_expr("x is a > 0 ? \"positive\" ! a > -10 ? \"small neg\" ! \"big neg\"\n");
     match expr {
         Expression::Ternary { .. } => {}
         _ => panic!("expected ternary expression"),
@@ -143,7 +144,9 @@ fn parse_function_three_params() {
 
 #[test]
 fn parse_function_with_if() {
-    let program = parse_ok("*check(x)\n    if x > 0\n        \"positive\"\n    else\n        \"non-positive\"\n");
+    let program = parse_ok(
+        "*check(x)\n    if x > 0\n        \"positive\"\n    else\n        \"non-positive\"\n",
+    );
     match &program.items[0] {
         Item::Function(f) => {
             assert_eq!(f.name, "check");
@@ -168,7 +171,9 @@ fn parse_store_definition() {
 
 #[test]
 fn parse_store_with_method() {
-    let program = parse_ok("store Counter\n    count ? 0\n\n    *inc()\n        self.count is self.count + 1\n");
+    let program = parse_ok(
+        "store Counter\n    count ? 0\n\n    *inc()\n        self.count is self.count + 1\n",
+    );
     match &program.items[0] {
         Item::Store(s) => {
             assert_eq!(s.name, "Counter");
@@ -195,7 +200,9 @@ fn parse_error_definition() {
 
 #[test]
 fn parse_match_with_wildcards() {
-    let program = parse_ok("*test(x)\n    return match x\n        1 ? \"one\"\n        2 ? \"two\"\n        ! \"other\"\n");
+    let program = parse_ok(
+        "*test(x)\n    return match x\n        1 ? \"one\"\n        2 ? \"two\"\n        ! \"other\"\n",
+    );
     match &program.items[0] {
         Item::Function(f) => {
             assert_eq!(f.name, "test");
@@ -238,12 +245,16 @@ fn parse_type_definition() {
 fn parse_mul_before_add() {
     let expr = first_binding_expr("x is 1 + 2 * 3\n");
     match expr {
-        Expression::Binary { op: BinaryOp::Add, right, .. } => {
-            match *right {
-                Expression::Binary { op: BinaryOp::Mul, .. } => {}
-                _ => panic!("expected multiplication on right side"),
-            }
-        }
+        Expression::Binary {
+            op: BinaryOp::Add,
+            right,
+            ..
+        } => match *right {
+            Expression::Binary {
+                op: BinaryOp::Mul, ..
+            } => {}
+            _ => panic!("expected multiplication on right side"),
+        },
         _ => panic!("expected addition at top level"),
     }
 }
@@ -252,7 +263,10 @@ fn parse_mul_before_add() {
 fn parse_comparison_in_binding() {
     let expr = first_binding_expr("result is x > 5\n");
     match expr {
-        Expression::Binary { op: BinaryOp::Greater, .. } => {}
+        Expression::Binary {
+            op: BinaryOp::Greater,
+            ..
+        } => {}
         _ => panic!("expected comparison"),
     }
 }
@@ -262,7 +276,9 @@ fn parse_logical_and_or() {
     let expr = first_binding_expr("result is a and b or c\n");
     // `or` should be at the top (lower precedence)
     match expr {
-        Expression::Binary { op: BinaryOp::Or, .. } => {}
+        Expression::Binary {
+            op: BinaryOp::Or, ..
+        } => {}
         _ => panic!("expected `or` at top level, got {:?}", expr),
     }
 }
@@ -357,7 +373,8 @@ fn parse_enum_with_trait_bound() {
 
 #[test]
 fn parse_enum_with_multiple_trait_bounds() {
-    let program = parse_ok("enum Index[K with Hashable with Comparable]\n    Entry(key, value)\n    Empty\n");
+    let program =
+        parse_ok("enum Index[K with Hashable with Comparable]\n    Entry(key, value)\n    Empty\n");
     match &program.items[0] {
         Item::Type(t) => {
             assert_eq!(t.name, "Index");
@@ -386,7 +403,10 @@ fn parse_type_annotation_with_type_args() {
     let program = parse_ok("*foo(x: Option[Int])\n    x\n");
     match &program.items[0] {
         Item::Function(f) => {
-            let ann = f.params[0].type_annotation.as_ref().expect("expected annotation");
+            let ann = f.params[0]
+                .type_annotation
+                .as_ref()
+                .expect("expected annotation");
             assert_eq!(ann.segments, vec!["Option"]);
             assert_eq!(ann.type_args.len(), 1);
             assert_eq!(ann.type_args[0].segments, vec!["Int"]);
@@ -401,7 +421,10 @@ fn parse_nested_type_annotation_args() {
     let program = parse_ok("*foo(x: Map[String, List[Int]])\n    x\n");
     match &program.items[0] {
         Item::Function(f) => {
-            let ann = f.params[0].type_annotation.as_ref().expect("expected annotation");
+            let ann = f.params[0]
+                .type_annotation
+                .as_ref()
+                .expect("expected annotation");
             assert_eq!(ann.segments, vec!["Map"]);
             assert_eq!(ann.type_args.len(), 2);
             assert_eq!(ann.type_args[0].segments, vec!["String"]);
@@ -417,7 +440,9 @@ fn parse_nested_type_annotation_args() {
 
 #[test]
 fn parse_range_pattern() {
-    let program = parse_ok("*test(x)\n    return match x\n        200 to 299 ? \"ok\"\n        _ ? \"other\"\n");
+    let program = parse_ok(
+        "*test(x)\n    return match x\n        200 to 299 ? \"ok\"\n        _ ? \"other\"\n",
+    );
     match &program.items[0] {
         Item::Function(f) => {
             let body_stmt = &f.body.statements[0];
@@ -446,7 +471,9 @@ fn parse_range_pattern() {
 #[test]
 fn parse_range_pattern_in_or() {
     // Range patterns can appear inside or-patterns
-    let program = parse_ok("*test(x)\n    return match x\n        1 to 9 or 100 ? \"special\"\n        _ ? \"other\"\n");
+    let program = parse_ok(
+        "*test(x)\n    return match x\n        1 to 9 or 100 ? \"special\"\n        _ ? \"other\"\n",
+    );
     match &program.items[0] {
         Item::Function(f) => {
             if let coralc::ast::Statement::Return(expr, _) = &f.body.statements[0] {
@@ -454,7 +481,14 @@ fn parse_range_pattern_in_or() {
                     match &m.arms[0].pattern {
                         MatchPattern::Or(alts) => {
                             assert_eq!(alts.len(), 2);
-                            assert!(matches!(&alts[0], MatchPattern::Range { start: 1, end: 9, .. }));
+                            assert!(matches!(
+                                &alts[0],
+                                MatchPattern::Range {
+                                    start: 1,
+                                    end: 9,
+                                    ..
+                                }
+                            ));
                             assert!(matches!(&alts[1], MatchPattern::Integer(100)));
                         }
                         other => panic!("expected Or pattern, got {:?}", other),
@@ -473,7 +507,8 @@ fn parse_range_pattern_in_or() {
 #[test]
 fn parse_list_rest_pattern() {
     // List pattern with ...rest spread syntax
-    let program = parse_ok("*test(xs)\n    return match xs\n        [a, ...rest] ? rest\n        _ ? []\n");
+    let program =
+        parse_ok("*test(xs)\n    return match xs\n        [a, ...rest] ? rest\n        _ ? []\n");
     match &program.items[0] {
         Item::Function(f) => {
             if let coralc::ast::Statement::Return(expr, _) = &f.body.statements[0] {

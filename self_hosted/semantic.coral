@@ -353,6 +353,11 @@
 			known_names.set(item.get("name"), true)
 		elif kind is "error_def"
 			known_names.set(item.get("name"), true)
+		elif kind is "extension"
+			methods is item.get("methods")
+			if methods isnt none
+				for method in methods
+					known_names.set(method.get("name"), true)
 
 	# ── Pass 2: Registration ─────────────────────────────────────
 	seen_functions is map()
@@ -480,6 +485,17 @@
 
 		elif kind is "error_def"
 			error_defs.push(item)
+
+		elif kind is "extension"
+			# Scope-check extension methods
+			methods is item.get("methods")
+			if methods isnt none
+				for method in methods
+					result is check_function(method, known_names)
+					if result.get("ok") is false
+						return result
+			# Extensions are stored alongside type_defs for codegen
+			type_defs.push(item)
 
 	# ── Pass 3: Constraint Collection ────────────────────────────
 	for g in globals
@@ -646,6 +662,12 @@
 		if result.get("ok") is false
 			return result
 		return check_block(stmt.get("body"), ss, known_names)
+	if kind is "pattern_binding"
+		result is check_expression(stmt.get("value"), ss, known_names)
+		if result.get("ok") is false
+			return result
+		declare_pattern_bindings(stmt.get("pattern"), ss)
+		return sem_ok(none)
 	return sem_ok(none)
 
 *check_expression(expr, ss, known_names)
@@ -730,6 +752,71 @@
 		return check_expression(expr.get("expr"), ss, known_names)
 	if kind is "error_value" or kind is "placeholder"
 		return sem_ok(none)
+	if kind is "list_comprehension"
+		result is check_expression(expr.get("iterable"), ss, known_names)
+		if result.get("ok") is false
+			return result
+		scope_push(ss)
+		scope_declare(ss, expr.get("variable"), expr.get("span"))
+		result is check_expression(expr.get("body"), ss, known_names)
+		if result.get("ok") is false
+			scope_pop(ss)
+			return result
+		if expr.get("condition") isnt none
+			result is check_expression(expr.get("condition"), ss, known_names)
+			if result.get("ok") is false
+				scope_pop(ss)
+				return result
+		scope_pop(ss)
+		return sem_ok(none)
+	if kind is "map_comprehension"
+		result is check_expression(expr.get("iterable"), ss, known_names)
+		if result.get("ok") is false
+			return result
+		scope_push(ss)
+		scope_declare(ss, expr.get("variable"), expr.get("span"))
+		result is check_expression(expr.get("key"), ss, known_names)
+		if result.get("ok") is false
+			scope_pop(ss)
+			return result
+		result is check_expression(expr.get("value"), ss, known_names)
+		if result.get("ok") is false
+			scope_pop(ss)
+			return result
+		if expr.get("condition") isnt none
+			result is check_expression(expr.get("condition"), ss, known_names)
+			if result.get("ok") is false
+				scope_pop(ss)
+				return result
+		scope_pop(ss)
+		return sem_ok(none)
+	if kind is "spread"
+		return check_expression(expr.get("expr"), ss, known_names)
+	if kind is "slice"
+		result is check_expression(expr.get("target"), ss, known_names)
+		if result.get("ok") is false
+			return result
+		if expr.get("start") isnt none
+			result is check_expression(expr.get("start"), ss, known_names)
+			if result.get("ok") is false
+				return result
+		if expr.get("end") isnt none
+			result is check_expression(expr.get("end"), ss, known_names)
+			if result.get("ok") is false
+				return result
+		return sem_ok(none)
+	if kind is "unsafe"
+		return check_block(expr.get("block"), ss, known_names)
+	if kind is "inline_asm"
+		inputs is expr.get("inputs")
+		if inputs isnt none
+			for inp in inputs
+				result is check_expression(inp.get("expr"), ss, known_names)
+				if result.get("ok") is false
+					return result
+		return sem_ok(none)
+	if kind is "ptr_load"
+		return check_expression(expr.get("address"), ss, known_names)
 	return sem_ok(none)
 
 *check_lambda(expr, ss, known_names)
@@ -970,6 +1057,11 @@
 			span is map("start" is 0, "end" is 0)
 		constraints.push(constraint_boolean(result.get("value"), span))
 		return collect_block_constraints(stmt.get("body"), constraints, types, graph, return_ty)
+	if kind is "pattern_binding"
+		result is collect_constraints_expr(stmt.get("value"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		return sem_ok(type_unit())
 	return sem_ok(type_unit())
 
 # ─── Expression Constraint Collection ──────────────────────────────
@@ -1102,6 +1194,48 @@
 
 	if kind is "placeholder"
 		return sem_ok(type_unknown())
+
+	if kind is "list_comprehension"
+		iter_result is collect_constraints_expr(expr.get("iterable"), constraints, types, graph)
+		if iter_result.get("ok") is false
+			return iter_result
+		body_result is collect_constraints_expr(expr.get("body"), constraints, types, graph)
+		if body_result.get("ok") is false
+			return body_result
+		if expr.get("condition") isnt none
+			cond_result is collect_constraints_expr(expr.get("condition"), constraints, types, graph)
+			if cond_result.get("ok") is false
+				return cond_result
+		return sem_ok(type_list(body_result.get("value")))
+
+	if kind is "map_comprehension"
+		iter_result is collect_constraints_expr(expr.get("iterable"), constraints, types, graph)
+		if iter_result.get("ok") is false
+			return iter_result
+		key_result is collect_constraints_expr(expr.get("key"), constraints, types, graph)
+		if key_result.get("ok") is false
+			return key_result
+		val_result is collect_constraints_expr(expr.get("value"), constraints, types, graph)
+		if val_result.get("ok") is false
+			return val_result
+		if expr.get("condition") isnt none
+			cond_result is collect_constraints_expr(expr.get("condition"), constraints, types, graph)
+			if cond_result.get("ok") is false
+				return cond_result
+		return sem_ok(type_map(key_result.get("value"), val_result.get("value")))
+
+	if kind is "spread"
+		return collect_constraints_expr(expr.get("expr"), constraints, types, graph)
+
+	if kind is "slice"
+		target_result is collect_constraints_expr(expr.get("target"), constraints, types, graph)
+		if target_result.get("ok") is false
+			return target_result
+		if expr.get("start") isnt none
+			collect_constraints_expr(expr.get("start"), constraints, types, graph)
+		if expr.get("end") isnt none
+			collect_constraints_expr(expr.get("end"), constraints, types, graph)
+		return sem_ok(target_result.get("value"))
 
 	return sem_ok(type_unknown())
 

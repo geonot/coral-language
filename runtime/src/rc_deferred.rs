@@ -1,4 +1,3 @@
-//! Deferred release queue placeholder for future RC batching.
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 
@@ -9,7 +8,10 @@ pub struct ReleaseQueue {
 
 impl ReleaseQueue {
     pub fn with_limit(limit: usize) -> Self {
-        Self { queue: VecDeque::with_capacity(limit.min(4096)), limit }
+        Self {
+            queue: VecDeque::with_capacity(limit.min(4096)),
+            limit,
+        }
     }
 
     pub fn push(&mut self, ptr: NonNull<core::ffi::c_void>) {

@@ -1,12 +1,6 @@
-//! Type environment and related utilities.
-//!
-//! Provides scope management, mutability tracking, type environment operations,
-//! and type parameter tracking for generic types.
-
-use super::core::{TypeId, Primitive};
+use super::core::{Primitive, TypeId};
 use std::collections::{HashMap, HashSet};
 
-/// Binding information for a name in scope.
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub ty: TypeId,
@@ -40,7 +34,6 @@ impl Binding {
     }
 }
 
-/// Lexical scope containing variable bindings.
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     bindings: HashMap<String, Binding>,
@@ -68,27 +61,23 @@ impl Scope {
     }
 }
 
-/// Type environment with nested scopes.
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
     scopes: Vec<Scope>,
-    /// Tracking undefined names
+
     pub undefined: HashSet<String>,
-    /// Type parameter bindings: maps type parameter names to their instantiated types
-    /// e.g., when instantiating List[Int], maps "T" -> Int
+
     type_params: HashMap<String, TypeId>,
-    /// Type parameter stack for nested generic contexts
+
     type_param_stack: Vec<HashMap<String, TypeId>>,
-    /// Generic type definitions: maps type name to its type parameter names
-    /// e.g., "List" -> ["T"], "Map" -> ["K", "V"]
+
     generic_types: HashMap<String, Vec<String>>,
-    /// T2.4: Trait bounds on generic type parameters.
-    /// Maps (type_name, param_name) → list of required trait names.
-    /// e.g., ("SortedList", "T") → ["Comparable"]
+
     generic_type_bounds: HashMap<(String, String), Vec<String>>,
-    /// T2.2: Generic ADT constructor info: constructor_name → (enum_name, type_params, field_count)
-    /// Used for let-polymorphism: each call site gets fresh type variables.
+
     generic_constructors: HashMap<String, (String, Vec<String>, usize)>,
+
+    const_type_params: HashSet<(String, String)>,
 }
 
 impl Default for TypeEnv {
@@ -101,6 +90,7 @@ impl Default for TypeEnv {
             generic_types: HashMap::new(),
             generic_type_bounds: HashMap::new(),
             generic_constructors: HashMap::new(),
+            const_type_params: HashSet::new(),
         }
     }
 }
@@ -115,8 +105,9 @@ impl TypeEnv {
             generic_types: HashMap::new(),
             generic_type_bounds: HashMap::new(),
             generic_constructors: HashMap::new(),
+            const_type_params: HashSet::new(),
         };
-        // Register built-in generic types
+
         env.register_generic_type("List", vec!["T"]);
         env.register_generic_type("Map", vec!["K", "V"]);
         env.register_generic_type("Set", vec!["T"]);
@@ -125,81 +116,86 @@ impl TypeEnv {
         env
     }
 
-    /// Register a generic type with its type parameters.
     pub fn register_generic_type(&mut self, name: impl Into<String>, params: Vec<&str>) {
-        self.generic_types.insert(
-            name.into(),
-            params.into_iter().map(String::from).collect(),
-        );
+        self.generic_types
+            .insert(name.into(), params.into_iter().map(String::from).collect());
     }
 
-    /// T2.4: Register trait bounds for a generic type parameter.
-    pub fn register_type_param_bounds(&mut self, type_name: &str, param_name: &str, bounds: Vec<String>) {
+    pub fn register_const_param(&mut self, type_name: &str, param_name: &str) {
+        self.const_type_params
+            .insert((type_name.to_string(), param_name.to_string()));
+    }
+
+    pub fn is_const_param(&self, type_name: &str, param_name: &str) -> bool {
+        self.const_type_params
+            .contains(&(type_name.to_string(), param_name.to_string()))
+    }
+
+    pub fn register_type_param_bounds(
+        &mut self,
+        type_name: &str,
+        param_name: &str,
+        bounds: Vec<String>,
+    ) {
         if !bounds.is_empty() {
-            self.generic_type_bounds.insert(
-                (type_name.to_string(), param_name.to_string()),
-                bounds,
-            );
+            self.generic_type_bounds
+                .insert((type_name.to_string(), param_name.to_string()), bounds);
         }
     }
 
-    /// T2.4: Get the trait bounds for a specific type parameter of a generic type.
     pub fn get_type_param_bounds(&self, type_name: &str, param_name: &str) -> Option<&Vec<String>> {
-        self.generic_type_bounds.get(&(type_name.to_string(), param_name.to_string()))
+        self.generic_type_bounds
+            .get(&(type_name.to_string(), param_name.to_string()))
     }
 
-    /// Get the type parameter names for a generic type.
     pub fn get_generic_params(&self, type_name: &str) -> Option<&Vec<String>> {
         self.generic_types.get(type_name)
     }
 
-    /// Check if a type is a registered generic type.
     pub fn is_generic_type(&self, type_name: &str) -> bool {
         self.generic_types.contains_key(type_name)
     }
 
-    /// T2.2: Register a generic ADT constructor for let-polymorphism.
-    /// Each call site will get fresh type variables instead of sharing one monomorphic type.
-    pub fn register_generic_constructor(&mut self, ctor_name: impl Into<String>, enum_name: String, type_params: Vec<String>, field_count: usize) {
-        self.generic_constructors.insert(ctor_name.into(), (enum_name, type_params, field_count));
+    pub fn register_generic_constructor(
+        &mut self,
+        ctor_name: impl Into<String>,
+        enum_name: String,
+        type_params: Vec<String>,
+        field_count: usize,
+    ) {
+        self.generic_constructors
+            .insert(ctor_name.into(), (enum_name, type_params, field_count));
     }
 
-    /// T2.2: Get generic constructor info: (enum_name, type_params, field_count).
-    pub fn get_generic_constructor(&self, ctor_name: &str) -> Option<&(String, Vec<String>, usize)> {
+    pub fn get_generic_constructor(
+        &self,
+        ctor_name: &str,
+    ) -> Option<&(String, Vec<String>, usize)> {
         self.generic_constructors.get(ctor_name)
     }
 
-    /// Push a new type parameter scope for entering a generic context.
     pub fn push_type_params(&mut self) {
         self.type_param_stack.push(self.type_params.clone());
         self.type_params.clear();
     }
 
-    /// Pop a type parameter scope when leaving a generic context.
     pub fn pop_type_params(&mut self) {
         if let Some(params) = self.type_param_stack.pop() {
             self.type_params = params;
         }
     }
 
-    /// Bind a type parameter to a concrete type.
     pub fn bind_type_param(&mut self, param: impl Into<String>, ty: TypeId) {
         self.type_params.insert(param.into(), ty);
     }
 
-    /// Look up a type parameter binding.
     pub fn get_type_param(&self, param: &str) -> Option<&TypeId> {
         self.type_params.get(param)
     }
 
-    /// Resolve a type, substituting type parameters with their bindings.
     pub fn resolve_type(&self, ty: &TypeId) -> TypeId {
         match ty {
-            TypeId::TypeVar(var) => {
-                // Check if this var corresponds to a named type parameter
-                // For now, just return as-is - the solver handles type vars
-                TypeId::TypeVar(*var)
-            }
+            TypeId::TypeVar(var) => TypeId::TypeVar(*var),
             TypeId::List(elem) => TypeId::List(Box::new(self.resolve_type(elem))),
             TypeId::Map(k, v) => TypeId::Map(
                 Box::new(self.resolve_type(k)),
@@ -217,20 +213,17 @@ impl TypeEnv {
         }
     }
 
-    /// Instantiate a generic type with concrete type arguments.
-    /// e.g., instantiate_generic("List", [TypeId::Primitive(Primitive::Int)]) -> List[Int]
-    pub fn instantiate_generic(&mut self, type_name: &str, type_args: Vec<TypeId>) -> Option<TypeId> {
+    pub fn instantiate_generic(
+        &mut self,
+        type_name: &str,
+        type_args: Vec<TypeId>,
+    ) -> Option<TypeId> {
         let params = self.generic_types.get(type_name)?.clone();
-        
+
         if type_args.len() != params.len() {
-            return None; // Arity mismatch
+            return None;
         }
 
-        // Bind type parameters (note: we don't actually need these insertions
-        // since the return type is constructed directly from type_args below)
-        // The insertions were previously leaked into self.type_params.
-
-        // Return the instantiated type
         match type_name {
             "List" | "Set" => Some(TypeId::List(Box::new(type_args.into_iter().next()?))),
             "Map" => {
@@ -241,17 +234,15 @@ impl TypeEnv {
             }
             "Option" => Some(TypeId::Adt("Option".to_string(), type_args)),
             "Result" => Some(TypeId::Adt("Result".to_string(), type_args)),
-            // For any other registered generic type, return Adt with type args
+
             _ => Some(TypeId::Adt(type_name.to_string(), type_args)),
         }
     }
 
-    /// Push a new scope onto the stack.
     pub fn push_scope(&mut self) {
         self.scopes.push(Scope::new());
     }
 
-    /// Pop the innermost scope.
     pub fn pop_scope(&mut self) -> Option<Scope> {
         if self.scopes.len() > 1 {
             self.scopes.pop()
@@ -260,33 +251,28 @@ impl TypeEnv {
         }
     }
 
-    /// Insert a binding into the current (innermost) scope.
     pub fn insert(&mut self, name: String, ty: TypeId) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, Binding::immutable(ty));
         }
     }
 
-    /// Insert a binding with explicit mutability.
     pub fn insert_binding(&mut self, name: String, binding: Binding) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, binding);
         }
     }
 
-    /// Define an immutable variable.
     pub fn define(&mut self, name: String, ty: TypeId) {
         self.insert(name, ty);
     }
 
-    /// Define a mutable variable.
     pub fn define_mut(&mut self, name: String, ty: TypeId) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, Binding::mutable(ty));
         }
     }
 
-    /// Look up a binding by name, searching from innermost to outermost scope.
     pub fn get_binding(&self, name: &str) -> Option<&Binding> {
         for scope in self.scopes.iter().rev() {
             if let Some(binding) = scope.get(name) {
@@ -296,7 +282,6 @@ impl TypeEnv {
         None
     }
 
-    /// Look up the type of a name (searches from innermost to outermost scope).
     pub fn get(&self, name: &str) -> Option<&TypeId> {
         for scope in self.scopes.iter().rev() {
             if let Some(binding) = scope.get(name) {
@@ -306,33 +291,29 @@ impl TypeEnv {
         None
     }
 
-    /// Look up the type of a name.
     pub fn get_type(&self, name: &str) -> Option<TypeId> {
         self.get(name).cloned()
     }
 
-    /// Check if a name is defined in any scope.
     pub fn contains(&self, name: &str) -> bool {
         self.scopes.iter().rev().any(|s| s.contains(name))
     }
 
-    /// Check if a name is mutable.
     pub fn is_mutable(&self, name: &str) -> bool {
         self.get_binding(name).map(|b| b.mutable).unwrap_or(false)
     }
 
-    /// Check if a name is defined in the current scope (for shadowing detection).
     pub fn defined_in_current_scope(&self, name: &str) -> bool {
-        self.scopes.last().map(|s| s.contains(name)).unwrap_or(false)
+        self.scopes
+            .last()
+            .map(|s| s.contains(name))
+            .unwrap_or(false)
     }
 
-    /// Current scope depth (0 = global).
     pub fn depth(&self) -> usize {
         self.scopes.len().saturating_sub(1)
     }
 
-    /// Iterate over all bindings across all scopes (innermost first, deduplicating by name).
-    /// Returns (name, type) pairs for each unique binding.
     pub fn iter_all(&self) -> Vec<(String, TypeId)> {
         let mut seen = HashSet::new();
         let mut result = Vec::new();
@@ -347,7 +328,6 @@ impl TypeEnv {
     }
 }
 
-/// Function signature for type checking.
 #[derive(Debug, Clone)]
 pub struct FunctionSig {
     pub name: String,
@@ -385,7 +365,6 @@ impl FunctionSig {
     }
 }
 
-/// Global function registry.
 #[derive(Debug, Clone, Default)]
 pub struct FunctionRegistry {
     functions: HashMap<String, FunctionSig>,
@@ -412,30 +391,25 @@ impl FunctionRegistry {
         self.functions.values()
     }
 
-    /// Register built-in functions.
     pub fn register_builtins(&mut self) {
-        // print(value: Any) -> Unit
         self.register(FunctionSig::new(
             "print".to_string(),
             vec![("value".to_string(), TypeId::Primitive(Primitive::Any))],
             TypeId::Primitive(Primitive::Unit),
         ));
 
-        // println(value: Any) -> Unit
         self.register(FunctionSig::new(
             "println".to_string(),
             vec![("value".to_string(), TypeId::Primitive(Primitive::Any))],
             TypeId::Primitive(Primitive::Unit),
         ));
 
-        // len(collection: Any) -> Int
         self.register(FunctionSig::new(
             "len".to_string(),
             vec![("collection".to_string(), TypeId::Primitive(Primitive::Any))],
             TypeId::Primitive(Primitive::Int),
         ));
 
-        // str(value: Any) -> String
         self.register(FunctionSig::new(
             "str".to_string(),
             vec![("value".to_string(), TypeId::Primitive(Primitive::Any))],
@@ -444,11 +418,6 @@ impl FunctionRegistry {
     }
 }
 
-// =============================================================================
-// Mutability and Allocation tracking (for optimization hints)
-// =============================================================================
-
-/// Mutability classification for variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mutability {
     Immutable,
@@ -457,7 +426,6 @@ pub enum Mutability {
     Unknown,
 }
 
-/// Tracks mutability of symbols in scope.
 #[derive(Debug, Clone, Default)]
 pub struct MutabilityEnv {
     pub symbols: HashMap<String, Mutability>,
@@ -469,7 +437,6 @@ impl MutabilityEnv {
     }
 }
 
-/// Allocation strategy hints for optimization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AllocationStrategy {
     Stack,
@@ -479,7 +446,6 @@ pub enum AllocationStrategy {
     Unknown,
 }
 
-/// Maps symbols to their allocation hints.
 #[derive(Debug, Clone, Default)]
 pub struct AllocationHints {
     pub symbols: HashMap<String, AllocationStrategy>,
@@ -491,20 +457,18 @@ impl AllocationHints {
     }
 }
 
-/// Usage statistics for a single symbol.
 #[derive(Debug, Clone, Default)]
 pub struct SymbolUsage {
     pub reads: u64,
     pub mutations: u64,
     pub escapes: u64,
     pub calls: u64,
-    /// Number of times this symbol is captured by a closure/lambda.
+
     pub closure_captures: u64,
-    /// Number of times this symbol is returned from its defining scope.
+
     pub returned: u64,
 }
 
-/// Aggregated usage metrics for all symbols.
 #[derive(Debug, Clone, Default)]
 pub struct UsageMetrics {
     pub symbols: HashMap<String, SymbolUsage>,
@@ -518,7 +482,7 @@ mod tests {
     fn type_env_basic() {
         let mut env = TypeEnv::new();
         env.define("x".to_string(), TypeId::Primitive(Primitive::Int));
-        
+
         assert!(env.contains("x"));
         assert_eq!(env.get_type("x"), Some(TypeId::Primitive(Primitive::Int)));
         assert!(!env.is_mutable("x"));
@@ -528,7 +492,7 @@ mod tests {
     fn type_env_mutable() {
         let mut env = TypeEnv::new();
         env.define_mut("x".to_string(), TypeId::Primitive(Primitive::Int));
-        
+
         assert!(env.is_mutable("x"));
     }
 
@@ -536,17 +500,17 @@ mod tests {
     fn type_env_scoping() {
         let mut env = TypeEnv::new();
         env.define("outer".to_string(), TypeId::Primitive(Primitive::Int));
-        
+
         env.push_scope();
         env.define("inner".to_string(), TypeId::Primitive(Primitive::Bool));
-        
+
         assert!(env.contains("outer"));
         assert!(env.contains("inner"));
-        
+
         env.pop_scope();
-        
+
         assert!(env.contains("outer"));
-        // After pop, inner scope is gone - contains properly returns false
+
         assert!(!env.contains("inner"));
         assert!(env.get_binding("inner").is_none());
     }
@@ -555,18 +519,16 @@ mod tests {
     fn type_env_shadowing() {
         let mut env = TypeEnv::new();
         env.define("x".to_string(), TypeId::Primitive(Primitive::Int));
-        
+
         env.push_scope();
         assert!(!env.defined_in_current_scope("x"));
         env.define("x".to_string(), TypeId::Primitive(Primitive::Bool));
         assert!(env.defined_in_current_scope("x"));
-        
-        // get_type uses scope-based lookup, so it sees the shadowed value.
+
         assert_eq!(env.get_type("x"), Some(TypeId::Primitive(Primitive::Bool)));
-        
+
         env.pop_scope();
-        
-        // After pop, both get_binding and get_type show the outer value.
+
         let outer_binding = env.get_binding("x");
         assert!(outer_binding.is_some());
         assert_eq!(outer_binding.unwrap().ty, TypeId::Primitive(Primitive::Int));
@@ -583,9 +545,9 @@ mod tests {
             ],
             TypeId::Primitive(Primitive::Int),
         );
-        
+
         assert_eq!(sig.arity(), 2);
-        
+
         let fn_type = sig.to_type();
         match fn_type {
             TypeId::Func(args, ret) => {
@@ -600,7 +562,7 @@ mod tests {
     fn function_registry_builtins() {
         let mut reg = FunctionRegistry::new();
         reg.register_builtins();
-        
+
         assert!(reg.contains("print"));
         assert!(reg.contains("println"));
         assert!(reg.contains("len"));

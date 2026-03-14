@@ -1,10 +1,7 @@
-//! I/O operations for the Coral runtime.
-
+use crate::list_ops::{coral_list_get_index, coral_list_len};
 use crate::*;
-use crate::list_ops::{coral_list_len, coral_list_get_index};
 use std::io::BufRead;
 use std::io::Write;
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_read(path: ValueHandle) -> ValueHandle {
@@ -21,7 +18,6 @@ pub extern "C" fn coral_fs_read(path: ValueHandle) -> ValueHandle {
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_exists(path: ValueHandle) -> ValueHandle {
     if path.is_null() {
@@ -34,7 +30,6 @@ pub extern "C" fn coral_fs_exists(path: ValueHandle) -> ValueHandle {
     let exists = pb.exists();
     coral_make_bool(if exists { 1 } else { 0 })
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_write(path: ValueHandle, data: ValueHandle) -> ValueHandle {
@@ -53,7 +48,6 @@ pub extern "C" fn coral_fs_write(path: ValueHandle, data: ValueHandle) -> ValueH
     coral_make_bool(if result.is_ok() { 1 } else { 0 })
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_args() -> ValueHandle {
     let args: Vec<String> = env::args().collect();
@@ -63,11 +57,12 @@ pub extern "C" fn coral_process_args() -> ValueHandle {
     }
     let list = coral_make_list(handles.as_ptr(), handles.len());
     for h in &handles {
-        unsafe { coral_value_release(*h); }
+        unsafe {
+            coral_value_release(*h);
+        }
     }
     list
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_exit(code: ValueHandle) -> ValueHandle {
@@ -84,12 +79,15 @@ pub extern "C" fn coral_process_exit(code: ValueHandle) -> ValueHandle {
     std::process::exit(exit_code);
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_env_get(name: ValueHandle) -> ValueHandle {
-    if name.is_null() { return coral_make_unit(); }
+    if name.is_null() {
+        return coral_make_unit();
+    }
     let v = unsafe { &*name };
-    if v.tag != ValueTag::String as u8 { return coral_make_unit(); }
+    if v.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
     let key = value_to_rust_string(v);
     match env::var(&key) {
         Ok(val) => coral_make_string(val.as_ptr(), val.len()),
@@ -97,26 +95,34 @@ pub extern "C" fn coral_env_get(name: ValueHandle) -> ValueHandle {
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_env_set(name: ValueHandle, val: ValueHandle) -> ValueHandle {
-    if name.is_null() || val.is_null() { return coral_make_unit(); }
+    if name.is_null() || val.is_null() {
+        return coral_make_unit();
+    }
     let nv = unsafe { &*name };
     let vv = unsafe { &*val };
-    if nv.tag != ValueTag::String as u8 || vv.tag != ValueTag::String as u8 { return coral_make_unit(); }
+    if nv.tag != ValueTag::String as u8 || vv.tag != ValueTag::String as u8 {
+        return coral_make_unit();
+    }
     let key = value_to_rust_string(nv);
     let value = value_to_rust_string(vv);
-    unsafe { env::set_var(&key, &value); }
+    unsafe {
+        env::set_var(&key, &value);
+    }
     coral_make_unit()
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_append(path: ValueHandle, data: ValueHandle) -> ValueHandle {
-    if path.is_null() || data.is_null() { return coral_make_unit(); }
+    if path.is_null() || data.is_null() {
+        return coral_make_unit();
+    }
     let pv = unsafe { &*path };
     let dv = unsafe { &*data };
-    let Some(p) = value_to_path(pv) else { return coral_make_unit(); };
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_unit();
+    };
     let content = if dv.tag == ValueTag::String as u8 {
         value_to_rust_string(dv).into_bytes()
     } else if dv.tag == ValueTag::Bytes as u8 {
@@ -125,23 +131,28 @@ pub extern "C" fn coral_fs_append(path: ValueHandle, data: ValueHandle) -> Value
         return coral_make_unit();
     };
     use std::io::Write;
-    match std::fs::OpenOptions::new().append(true).create(true).open(&p) {
-        Ok(mut f) => {
-            match f.write_all(&content) {
-                Ok(_) => coral_make_bool(1),
-                Err(_) => coral_make_bool(0),
-            }
-        }
+    match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&p)
+    {
+        Ok(mut f) => match f.write_all(&content) {
+            Ok(_) => coral_make_bool(1),
+            Err(_) => coral_make_bool(0),
+        },
         Err(_) => coral_make_bool(0),
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_read_dir(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_list(ptr::null(), 0); }
+    if path.is_null() {
+        return coral_make_list(ptr::null(), 0);
+    }
     let pv = unsafe { &*path };
-    let Some(p) = value_to_path(pv) else { return coral_make_list(ptr::null(), 0); };
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_list(ptr::null(), 0);
+    };
     let entries: Vec<ValueHandle> = match fs::read_dir(&p) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
@@ -154,29 +165,37 @@ pub extern "C" fn coral_fs_read_dir(path: ValueHandle) -> ValueHandle {
     };
     let list = coral_make_list(entries.as_ptr(), entries.len());
     for h in &entries {
-        unsafe { coral_value_release(*h); }
+        unsafe {
+            coral_value_release(*h);
+        }
     }
     list
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_mkdir(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_bool(0); }
+    if path.is_null() {
+        return coral_make_bool(0);
+    }
     let pv = unsafe { &*path };
-    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_bool(0);
+    };
     match fs::create_dir_all(&p) {
         Ok(_) => coral_make_bool(1),
         Err(_) => coral_make_bool(0),
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_delete(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_bool(0); }
+    if path.is_null() {
+        return coral_make_bool(0);
+    }
     let pv = unsafe { &*path };
-    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_bool(0);
+    };
     let result = if p.is_dir() {
         fs::remove_dir_all(&p)
     } else {
@@ -188,36 +207,40 @@ pub extern "C" fn coral_fs_delete(path: ValueHandle) -> ValueHandle {
     }
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_is_dir(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_bool(0); }
+    if path.is_null() {
+        return coral_make_bool(0);
+    }
     let pv = unsafe { &*path };
-    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_bool(0);
+    };
     coral_make_bool(if p.is_dir() { 1 } else { 0 })
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_stdin_read_line() -> ValueHandle {
     let mut buf = String::new();
     match std::io::stdin().read_line(&mut buf) {
         Ok(_) => {
-            // Trim trailing newline
-            if buf.ends_with('\n') { buf.pop(); }
-            if buf.ends_with('\r') { buf.pop(); }
+            if buf.ends_with('\n') {
+                buf.pop();
+            }
+            if buf.ends_with('\r') {
+                buf.pop();
+            }
             coral_make_string(buf.as_ptr(), buf.len())
         }
         Err(_) => coral_make_unit(),
     }
 }
 
-
-// ─── L2.4: std.io enhancements ─────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_stderr_write(msg: ValueHandle) -> ValueHandle {
-    if msg.is_null() { return coral_make_unit(); }
+    if msg.is_null() {
+        return coral_make_unit();
+    }
     let mv = unsafe { &*msg };
     let s = value_to_rust_string(mv);
     let _ = std::io::stderr().write_all(s.as_bytes());
@@ -227,9 +250,13 @@ pub extern "C" fn coral_stderr_write(msg: ValueHandle) -> ValueHandle {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_size(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_number(0.0); }
+    if path.is_null() {
+        return coral_make_number(0.0);
+    }
     let pv = unsafe { &*path };
-    let Some(p) = value_to_path(pv) else { return coral_make_number(-1.0); };
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_number(-1.0);
+    };
     match std::fs::metadata(&p) {
         Ok(meta) => coral_make_number(meta.len() as f64),
         Err(_) => coral_make_number(-1.0),
@@ -238,30 +265,58 @@ pub extern "C" fn coral_fs_size(path: ValueHandle) -> ValueHandle {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_rename(old: ValueHandle, new: ValueHandle) -> ValueHandle {
-    if old.is_null() || new.is_null() { return coral_make_bool(0); }
+    if old.is_null() || new.is_null() {
+        return coral_make_bool(0);
+    }
     let ov = unsafe { &*old };
     let nv = unsafe { &*new };
-    let Some(old_path) = value_to_path(ov) else { return coral_make_bool(0); };
-    let Some(new_path) = value_to_path(nv) else { return coral_make_bool(0); };
-    coral_make_bool(if std::fs::rename(old_path, new_path).is_ok() { 1 } else { 0 })
+    let Some(old_path) = value_to_path(ov) else {
+        return coral_make_bool(0);
+    };
+    let Some(new_path) = value_to_path(nv) else {
+        return coral_make_bool(0);
+    };
+    coral_make_bool(if std::fs::rename(old_path, new_path).is_ok() {
+        1
+    } else {
+        0
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_copy(src: ValueHandle, dst: ValueHandle) -> ValueHandle {
-    if src.is_null() || dst.is_null() { return coral_make_bool(0); }
+    if src.is_null() || dst.is_null() {
+        return coral_make_bool(0);
+    }
     let sv = unsafe { &*src };
     let dv = unsafe { &*dst };
-    let Some(src_path) = value_to_path(sv) else { return coral_make_bool(0); };
-    let Some(dst_path) = value_to_path(dv) else { return coral_make_bool(0); };
-    coral_make_bool(if std::fs::copy(src_path, dst_path).is_ok() { 1 } else { 0 })
+    let Some(src_path) = value_to_path(sv) else {
+        return coral_make_bool(0);
+    };
+    let Some(dst_path) = value_to_path(dv) else {
+        return coral_make_bool(0);
+    };
+    coral_make_bool(if std::fs::copy(src_path, dst_path).is_ok() {
+        1
+    } else {
+        0
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_fs_mkdirs(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_bool(0); }
+    if path.is_null() {
+        return coral_make_bool(0);
+    }
     let pv = unsafe { &*path };
-    let Some(p) = value_to_path(pv) else { return coral_make_bool(0); };
-    coral_make_bool(if std::fs::create_dir_all(p).is_ok() { 1 } else { 0 })
+    let Some(p) = value_to_path(pv) else {
+        return coral_make_bool(0);
+    };
+    coral_make_bool(if std::fs::create_dir_all(p).is_ok() {
+        1
+    } else {
+        0
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -271,18 +326,16 @@ pub extern "C" fn coral_fs_temp_dir() -> ValueHandle {
     coral_make_string(s.as_ptr(), s.len())
 }
 
-// ─── L2.5: std.process enhancements ────────────────────────────────
-
-/// Execute a command with arguments, returning a map {stdout, stderr, exit_code}
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_exec(cmd: ValueHandle, args: ValueHandle) -> ValueHandle {
-    if cmd.is_null() { return coral_make_unit(); }
+    if cmd.is_null() {
+        return coral_make_unit();
+    }
     let cv = unsafe { &*cmd };
     let cmd_str = value_to_rust_string(cv);
 
     let mut command = std::process::Command::new(&cmd_str);
 
-    // If args is a list, add each element as an argument
     if !args.is_null() {
         let av = unsafe { &*args };
         if av.tag == ValueTag::List as u8 {
@@ -312,9 +365,18 @@ pub extern "C" fn coral_process_exec(cmd: ValueHandle, args: ValueHandle) -> Val
             let val_exit = coral_make_number(exit_code);
 
             let entries = [
-                MapEntry { key: key_stdout, value: val_stdout },
-                MapEntry { key: key_stderr, value: val_stderr },
-                MapEntry { key: key_exit, value: val_exit },
+                MapEntry {
+                    key: key_stdout,
+                    value: val_stdout,
+                },
+                MapEntry {
+                    key: key_stderr,
+                    value: val_stderr,
+                },
+                MapEntry {
+                    key: key_exit,
+                    value: val_exit,
+                },
             ];
             coral_make_map(entries.as_ptr(), entries.len())
         }
@@ -322,7 +384,6 @@ pub extern "C" fn coral_process_exec(cmd: ValueHandle, args: ValueHandle) -> Val
     }
 }
 
-/// Return current working directory as a string
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_cwd() -> ValueHandle {
     match std::env::current_dir() {
@@ -334,10 +395,11 @@ pub extern "C" fn coral_process_cwd() -> ValueHandle {
     }
 }
 
-/// Change the current working directory
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_chdir(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_bool(0); }
+    if path.is_null() {
+        return coral_make_bool(0);
+    }
     let pv = unsafe { &*path };
     let s = value_to_rust_string(pv);
     match std::env::set_current_dir(&s) {
@@ -346,22 +408,20 @@ pub extern "C" fn coral_process_chdir(path: ValueHandle) -> ValueHandle {
     }
 }
 
-/// Return current process ID as a number
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_pid() -> ValueHandle {
     coral_make_number(std::process::id() as f64)
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// L4.2: std.path operations
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Normalize a path (resolve . and .. lexically)
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_path_normalize(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_unit(); }
+    if path.is_null() {
+        return coral_make_unit();
+    }
     let path_ref = unsafe { &*path };
-    let Some(pb) = value_to_path(path_ref) else { return coral_make_unit(); };
+    let Some(pb) = value_to_path(path_ref) else {
+        return coral_make_unit();
+    };
     use std::path::{Component, PathBuf};
     let mut result = PathBuf::new();
     for component in pb.components() {
@@ -379,12 +439,15 @@ pub extern "C" fn coral_path_normalize(path: ValueHandle) -> ValueHandle {
     coral_make_string(s.as_ptr(), s.len())
 }
 
-/// Resolve a path to absolute canonical form
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_path_resolve(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_unit(); }
+    if path.is_null() {
+        return coral_make_unit();
+    }
     let path_ref = unsafe { &*path };
-    let Some(pb) = value_to_path(path_ref) else { return coral_make_unit(); };
+    let Some(pb) = value_to_path(path_ref) else {
+        return coral_make_unit();
+    };
     match std::fs::canonicalize(&pb) {
         Ok(p) => {
             let s = p.to_string_lossy();
@@ -397,21 +460,31 @@ pub extern "C" fn coral_path_resolve(path: ValueHandle) -> ValueHandle {
     }
 }
 
-/// Check if a path is absolute
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_path_is_absolute(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_bool(0); }
+    if path.is_null() {
+        return coral_make_bool(0);
+    }
     let path_ref = unsafe { &*path };
-    let Some(pb) = value_to_path(path_ref) else { return coral_make_bool(0); };
-    if pb.is_absolute() { coral_make_bool(1) } else { coral_make_bool(0) }
+    let Some(pb) = value_to_path(path_ref) else {
+        return coral_make_bool(0);
+    };
+    if pb.is_absolute() {
+        coral_make_bool(1)
+    } else {
+        coral_make_bool(0)
+    }
 }
 
-/// Get parent directory of a path
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_path_parent(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_unit(); }
+    if path.is_null() {
+        return coral_make_unit();
+    }
     let path_ref = unsafe { &*path };
-    let Some(pb) = value_to_path(path_ref) else { return coral_make_unit(); };
+    let Some(pb) = value_to_path(path_ref) else {
+        return coral_make_unit();
+    };
     match pb.parent() {
         Some(parent) => {
             let s = parent.to_string_lossy();
@@ -424,12 +497,15 @@ pub extern "C" fn coral_path_parent(path: ValueHandle) -> ValueHandle {
     }
 }
 
-/// Get filename stem (without extension)
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_path_stem(path: ValueHandle) -> ValueHandle {
-    if path.is_null() { return coral_make_unit(); }
+    if path.is_null() {
+        return coral_make_unit();
+    }
     let path_ref = unsafe { &*path };
-    let Some(pb) = value_to_path(path_ref) else { return coral_make_unit(); };
+    let Some(pb) = value_to_path(path_ref) else {
+        return coral_make_unit();
+    };
     match pb.file_stem() {
         Some(stem) => {
             let s = stem.to_string_lossy();
@@ -442,10 +518,8 @@ pub extern "C" fn coral_path_stem(path: ValueHandle) -> ValueHandle {
     }
 }
 
-/// Return the system hostname
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_process_hostname() -> ValueHandle {
-    // Read from /etc/hostname on Linux, fall back to "unknown"
     match std::fs::read_to_string("/etc/hostname") {
         Ok(name) => {
             let trimmed = name.trim();

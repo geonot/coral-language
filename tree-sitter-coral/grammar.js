@@ -42,6 +42,7 @@ module.exports = grammar({
     [$.binding, $._primary_expression],
     [$._primary_expression, $.named_argument],
     [$.taxonomy_definition, $.taxonomy_path],
+    [$.field_assignment, $._expression],
   ],
 
   rules: {
@@ -224,6 +225,7 @@ module.exports = grammar({
       choice(
         $.binding,
         $.typed_binding,
+        $.field_assignment,
         $.return_statement,
         $.if_statement,
         $.unless_statement,
@@ -231,6 +233,7 @@ module.exports = grammar({
         $.until_statement,
         $.loop_statement,
         $.for_statement,
+        $.for_range_statement,
         $.break_statement,
         $.continue_statement,
         $.unsafe_block,
@@ -248,6 +251,14 @@ module.exports = grammar({
 
     break_statement: ($) => seq("break", $._newline),
     continue_statement: ($) => seq("continue", $._newline),
+
+    field_assignment: ($) =>
+      seq(
+        field("target", $.member_expression),
+        "is",
+        field("value", $._expression),
+        $._newline,
+      ),
 
     if_statement: ($) =>
       seq("if", field("condition", $._expression), $._newline,
@@ -276,6 +287,12 @@ module.exports = grammar({
     for_statement: ($) =>
       seq("for", field("variable", $.identifier), "in", field("iterable", $._expression), $._newline,
         field("body", $.block)),
+
+    for_range_statement: ($) =>
+      seq("for", field("variable", $.identifier), "in",
+        field("start", $._expression), "..", field("end", $._expression),
+        optional(seq("by", field("step", $._expression))),
+        $._newline, field("body", $.block)),
 
     match_block: ($) =>
       seq($._indent, repeat1(choice($.match_arm, $._newline)), $._dedent),
@@ -322,11 +339,14 @@ module.exports = grammar({
         $.binary_expression,
         $.unary_expression,
         $.call_expression,
+        $.do_end_call,
         $.member_expression,
         $.index_expression,
         $.lambda_expression,
         $.match_expression,
         $.when_expression,
+        $.spread_expression,
+        $.list_comprehension,
         $.inline_asm,
         $.ptr_load,
         $._primary_expression,
@@ -420,6 +440,31 @@ module.exports = grammar({
         seq("*", "fn", "(", optional(field("parameters", $.parameter_list)), ")", field("body", $._expression)),
         seq("*", "fn", "(", optional(field("parameters", $.parameter_list)), ")", $._newline, field("body", $.block)),
       ),
+
+    do_end_call: ($) =>
+      prec(PREC.CALL, seq(
+        field("function", $._expression),
+        "(", optional(field("arguments", $.argument_list)), ")",
+        "do",
+        optional($._newline),
+        field("block_body", $.do_end_body),
+      )),
+
+    do_end_body: ($) =>
+      seq(
+        repeat(choice($._statement, $._newline)),
+        "end",
+      ),
+
+    spread_expression: ($) =>
+      prec(PREC.UNARY, seq("...", field("expression", $._expression))),
+
+    list_comprehension: ($) =>
+      seq("[",
+        field("body", $._expression),
+        "for", field("variable", $.identifier), "in", field("iterable", $._expression),
+        optional(seq("if", field("condition", $._expression))),
+        "]"),
 
     match_expression: ($) =>
       seq("match", field("value", $._expression), $._newline, field("arms", $.match_block)),

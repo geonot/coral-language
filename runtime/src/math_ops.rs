@@ -1,9 +1,5 @@
-//! Math operations FFI functions for the Coral runtime.
-
 use crate::*;
 
-
-/// Extract f64 from a number Value, or return None if not a number.
 #[inline]
 fn handle_to_f64(handle: ValueHandle) -> Option<f64> {
     if handle.is_null() {
@@ -17,8 +13,6 @@ fn handle_to_f64(handle: ValueHandle) -> Option<f64> {
     }
 }
 
-
-/// Absolute value of a number.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_abs(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -30,8 +24,6 @@ pub extern "C" fn coral_math_abs(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Square root of a number.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_sqrt(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -43,8 +35,6 @@ pub extern "C" fn coral_math_sqrt(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Floor of a number.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_floor(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -56,8 +46,6 @@ pub extern "C" fn coral_math_floor(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Ceiling of a number.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_ceil(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -69,8 +57,6 @@ pub extern "C" fn coral_math_ceil(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Round a number to nearest integer.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_round(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -82,8 +68,6 @@ pub extern "C" fn coral_math_round(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Sine of a number (radians).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_sin(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -95,8 +79,6 @@ pub extern "C" fn coral_math_sin(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Cosine of a number (radians).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_cos(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -108,8 +90,6 @@ pub extern "C" fn coral_math_cos(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Tangent of a number (radians).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_tan(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -121,8 +101,6 @@ pub extern "C" fn coral_math_tan(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Power: a^b
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_pow(a: ValueHandle, b: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_binary_error(a, b) {
@@ -134,8 +112,6 @@ pub extern "C" fn coral_math_pow(a: ValueHandle, b: ValueHandle) -> ValueHandle 
     }
 }
 
-
-/// Minimum of two numbers.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_min(a: ValueHandle, b: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_binary_error(a, b) {
@@ -147,8 +123,6 @@ pub extern "C" fn coral_math_min(a: ValueHandle, b: ValueHandle) -> ValueHandle 
     }
 }
 
-
-/// Maximum of two numbers.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_max(a: ValueHandle, b: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_binary_error(a, b) {
@@ -160,8 +134,6 @@ pub extern "C" fn coral_math_max(a: ValueHandle, b: ValueHandle) -> ValueHandle 
     }
 }
 
-
-/// Natural logarithm (ln).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_ln(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -173,8 +145,6 @@ pub extern "C" fn coral_math_ln(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Base-10 logarithm.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_log10(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -186,8 +156,6 @@ pub extern "C" fn coral_math_log10(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Exponential (e^x).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_exp(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -199,8 +167,6 @@ pub extern "C" fn coral_math_exp(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Arc sine (inverse sine).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_asin(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -212,8 +178,6 @@ pub extern "C" fn coral_math_asin(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Arc cosine (inverse cosine).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_acos(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -225,8 +189,6 @@ pub extern "C" fn coral_math_acos(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Arc tangent (inverse tangent).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_atan(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -238,8 +200,6 @@ pub extern "C" fn coral_math_atan(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Two-argument arc tangent (atan2).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_atan2(y: ValueHandle, x: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_binary_error(y, x) {
@@ -251,8 +211,6 @@ pub extern "C" fn coral_math_atan2(y: ValueHandle, x: ValueHandle) -> ValueHandl
     }
 }
 
-
-/// Hyperbolic sine.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_sinh(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -264,8 +222,6 @@ pub extern "C" fn coral_math_sinh(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Hyperbolic cosine.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_cosh(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -277,8 +233,6 @@ pub extern "C" fn coral_math_cosh(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Hyperbolic tangent.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_tanh(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -290,8 +244,6 @@ pub extern "C" fn coral_math_tanh(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Truncate to integer (towards zero).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_trunc(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -303,8 +255,6 @@ pub extern "C" fn coral_math_trunc(value: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Sign of a number: -1, 0, or 1.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_math_sign(value: ValueHandle) -> ValueHandle {
     if let Some(err) = propagate_unary_error(value) {
@@ -315,4 +265,3 @@ pub extern "C" fn coral_math_sign(value: ValueHandle) -> ValueHandle {
         None => coral_make_unit(),
     }
 }
-

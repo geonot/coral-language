@@ -6,11 +6,11 @@
 //! - S5.6: Postfix `if` / `unless`
 //! - T4.4: Branch type unification warnings
 
+use coralc::Compiler;
 use coralc::ast::{Expression, Item, Statement, UnaryOp};
 use coralc::lexer;
 use coralc::parser::Parser;
 use coralc::semantic;
-use coralc::Compiler;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,7 +21,10 @@ const WORKSPACE: &str = env!("CARGO_MANIFEST_DIR");
 
 fn runtime_lib() -> PathBuf {
     let lib = PathBuf::from(WORKSPACE).join("target/debug/libruntime.so");
-    assert!(lib.exists(), "Runtime library not found. Run `cargo build -p runtime` first.");
+    assert!(
+        lib.exists(),
+        "Runtime library not found. Run `cargo build -p runtime` first."
+    );
     lib
 }
 
@@ -77,15 +80,22 @@ fn parse_func_body(source: &str) -> Vec<Statement> {
 fn parse_unless_desugars_to_negated_if() {
     let stmts = parse_func_body("*f()\n    unless x\n        log(1)\n");
     match &stmts[0] {
-        Statement::If { condition, elif_branches, else_body, .. } => {
+        Statement::If {
+            condition,
+            elif_branches,
+            else_body,
+            ..
+        } => {
             // Condition should be Unary(Not, Identifier("x"))
             match condition {
-                Expression::Unary { op: UnaryOp::Not, expr, .. } => {
-                    match expr.as_ref() {
-                        Expression::Identifier(name, _) => assert_eq!(name, "x"),
-                        other => panic!("expected identifier in unless condition, got {:?}", other),
-                    }
-                }
+                Expression::Unary {
+                    op: UnaryOp::Not,
+                    expr,
+                    ..
+                } => match expr.as_ref() {
+                    Expression::Identifier(name, _) => assert_eq!(name, "x"),
+                    other => panic!("expected identifier in unless condition, got {:?}", other),
+                },
                 other => panic!("expected negated condition, got {:?}", other),
             }
             assert!(elif_branches.is_empty());
@@ -142,17 +152,17 @@ fn e2e_unless_with_comparison() {
 fn parse_until_desugars_to_negated_while() {
     let stmts = parse_func_body("*f()\n    until done\n        log(1)\n");
     match &stmts[0] {
-        Statement::While { condition, .. } => {
-            match condition {
-                Expression::Unary { op: UnaryOp::Not, expr, .. } => {
-                    match expr.as_ref() {
-                        Expression::Identifier(name, _) => assert_eq!(name, "done"),
-                        other => panic!("expected identifier in until condition, got {:?}", other),
-                    }
-                }
-                other => panic!("expected negated condition, got {:?}", other),
-            }
-        }
+        Statement::While { condition, .. } => match condition {
+            Expression::Unary {
+                op: UnaryOp::Not,
+                expr,
+                ..
+            } => match expr.as_ref() {
+                Expression::Identifier(name, _) => assert_eq!(name, "done"),
+                other => panic!("expected identifier in until condition, got {:?}", other),
+            },
+            other => panic!("expected negated condition, got {:?}", other),
+        },
         other => panic!("expected While from until, got {:?}", other),
     }
 }
@@ -255,13 +265,20 @@ fn e2e_loop_with_continue() {
 
 #[test]
 fn parse_when_desugars_to_nested_ternary() {
-    let stmts = parse_func_body("*f()\n    result is when\n        x > 10 ? \"big\"\n        _ ? \"small\"\n");
+    let stmts = parse_func_body(
+        "*f()\n    result is when\n        x > 10 ? \"big\"\n        _ ? \"small\"\n",
+    );
     match &stmts[0] {
         Statement::Binding(b) => {
             assert_eq!(b.name, "result");
             // Value should be a ternary: (x > 10) ? "big" ! "small"
             match &b.value {
-                Expression::Ternary { condition, then_branch, else_branch, .. } => {
+                Expression::Ternary {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
                     match condition.as_ref() {
                         Expression::Binary { .. } => {} // x > 10
                         other => panic!("expected binary condition, got {:?}", other),
@@ -387,7 +404,13 @@ fn e2e_when_with_function_calls() {
 fn parse_postfix_if_desugars_to_if_statement() {
     let stmts = parse_func_body("*f()\n    log(1) if x\n");
     match &stmts[0] {
-        Statement::If { condition, body, elif_branches, else_body, .. } => {
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
             match condition {
                 Expression::Identifier(name, _) => assert_eq!(name, "x"),
                 other => panic!("expected identifier condition, got {:?}", other),
@@ -404,14 +427,21 @@ fn parse_postfix_if_desugars_to_if_statement() {
 fn parse_postfix_unless_desugars_to_negated_if() {
     let stmts = parse_func_body("*f()\n    log(1) unless x\n");
     match &stmts[0] {
-        Statement::If { condition, elif_branches, else_body, .. } => {
+        Statement::If {
+            condition,
+            elif_branches,
+            else_body,
+            ..
+        } => {
             match condition {
-                Expression::Unary { op: UnaryOp::Not, expr, .. } => {
-                    match expr.as_ref() {
-                        Expression::Identifier(name, _) => assert_eq!(name, "x"),
-                        other => panic!("expected identifier in unless condition, got {:?}", other),
-                    }
-                }
+                Expression::Unary {
+                    op: UnaryOp::Not,
+                    expr,
+                    ..
+                } => match expr.as_ref() {
+                    Expression::Identifier(name, _) => assert_eq!(name, "x"),
+                    other => panic!("expected identifier in unless condition, got {:?}", other),
+                },
                 other => panic!("expected negated condition, got {:?}", other),
             }
             assert!(elif_branches.is_empty());
@@ -493,53 +523,75 @@ fn analyze_diagnostics(source: &str) -> Vec<coralc::diagnostics::Diagnostic> {
 
 #[test]
 fn t44_warns_on_mismatched_branch_types() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *main()
     x is true
     if x
         42
     else
         "hello"
-"#);
-    let branch_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let branch_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("if/else branches return different types"))
         .collect();
-    assert!(!branch_warnings.is_empty(), "Should warn on Int vs String branches, got: {:?}", warnings);
+    assert!(
+        !branch_warnings.is_empty(),
+        "Should warn on Int vs String branches, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t44_no_warning_for_matching_branch_types() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *main()
     x is true
     if x
         42
     else
         99
-"#);
-    let branch_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let branch_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("if/else branches return different types"))
         .collect();
-    assert!(branch_warnings.is_empty(), "Should not warn when both branches return Int, got: {:?}", warnings);
+    assert!(
+        branch_warnings.is_empty(),
+        "Should not warn when both branches return Int, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t44_no_warning_without_else() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *main()
     x is true
     if x
         log("yes")
-"#);
-    let branch_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let branch_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("if/else branches return different types"))
         .collect();
-    assert!(branch_warnings.is_empty(), "Should not warn on if without else, got: {:?}", warnings);
+    assert!(
+        branch_warnings.is_empty(),
+        "Should not warn on if without else, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t44_warns_on_elif_type_mismatch() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *classify(x)
     if x > 100
         "big"
@@ -547,53 +599,86 @@ fn t44_warns_on_elif_type_mismatch() {
         42
     else
         "none"
-"#);
-    let branch_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let branch_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("if/else branches return different types"))
         .collect();
-    assert!(!branch_warnings.is_empty(), "Should warn on elif type mismatch, got: {:?}", warnings);
+    assert!(
+        !branch_warnings.is_empty(),
+        "Should warn on elif type mismatch, got: {:?}",
+        warnings
+    );
 }
 
 // ========== CC2.4: Warning Categories ==========
 
 #[test]
 fn cc24_branch_type_warning_has_category() {
-    let diags = analyze_diagnostics(r#"
+    let diags = analyze_diagnostics(
+        r#"
 *main()
     x is true
     if x
         42
     else
         "hello"
-"#);
-    let cat_warnings: Vec<_> = diags.iter()
+"#,
+    );
+    let cat_warnings: Vec<_> = diags
+        .iter()
         .filter(|d| d.category == Some(coralc::diagnostics::WarningCategory::TypeMismatchBranch))
         .collect();
-    assert!(!cat_warnings.is_empty(), "Branch type mismatch should have TypeMismatchBranch category");
+    assert!(
+        !cat_warnings.is_empty(),
+        "Branch type mismatch should have TypeMismatchBranch category"
+    );
 }
 
 #[test]
 fn cc24_unreachable_code_warning_has_category() {
-    let diags = analyze_diagnostics(r#"
+    let diags = analyze_diagnostics(
+        r#"
 *main()
     return 1
     x is 2
     x
-"#);
-    let cat_warnings: Vec<_> = diags.iter()
+"#,
+    );
+    let cat_warnings: Vec<_> = diags
+        .iter()
         .filter(|d| d.category == Some(coralc::diagnostics::WarningCategory::UnreachableCode))
         .collect();
-    assert!(!cat_warnings.is_empty(), "Unreachable code should have UnreachableCode category, got: {:?}", 
-        diags.iter().map(|d| (&d.message, &d.category)).collect::<Vec<_>>());
+    assert!(
+        !cat_warnings.is_empty(),
+        "Unreachable code should have UnreachableCode category, got: {:?}",
+        diags
+            .iter()
+            .map(|d| (&d.message, &d.category))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn cc24_warning_category_from_str() {
     use coralc::diagnostics::WarningCategory;
-    assert_eq!(WarningCategory::from_str("dead_code"), Some(WarningCategory::DeadCode));
-    assert_eq!(WarningCategory::from_str("unused_variable"), Some(WarningCategory::UnusedVariable));
-    assert_eq!(WarningCategory::from_str("unreachable"), Some(WarningCategory::UnreachableCode));
-    assert_eq!(WarningCategory::from_str("branch_types"), Some(WarningCategory::TypeMismatchBranch));
+    assert_eq!(
+        WarningCategory::from_str("dead_code"),
+        Some(WarningCategory::DeadCode)
+    );
+    assert_eq!(
+        WarningCategory::from_str("unused_variable"),
+        Some(WarningCategory::UnusedVariable)
+    );
+    assert_eq!(
+        WarningCategory::from_str("unreachable"),
+        Some(WarningCategory::UnreachableCode)
+    );
+    assert_eq!(
+        WarningCategory::from_str("branch_types"),
+        Some(WarningCategory::TypeMismatchBranch)
+    );
     assert_eq!(WarningCategory::from_str("nonsense"), None);
 }
 
@@ -602,68 +687,100 @@ fn cc24_warning_category_display() {
     use coralc::diagnostics::WarningCategory;
     assert_eq!(WarningCategory::DeadCode.name(), "dead_code");
     assert_eq!(WarningCategory::UnreachableCode.name(), "unreachable_code");
-    assert_eq!(WarningCategory::TypeMismatchBranch.name(), "type_mismatch_branch");
+    assert_eq!(
+        WarningCategory::TypeMismatchBranch.name(),
+        "type_mismatch_branch"
+    );
 }
 
 // ========== T3.2: Definite Assignment Analysis ==========
 
 #[test]
 fn t32_no_warning_for_function_params() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *test(a, b)
     log(a + b)
-"#);
-    let da_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let da_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("may not be initialized"))
         .collect();
-    assert!(da_warnings.is_empty(), "Parameters should be definitely assigned, got: {:?}", warnings);
+    assert!(
+        da_warnings.is_empty(),
+        "Parameters should be definitely assigned, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t32_no_warning_for_simple_binding() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *test()
     x is 42
     log(x)
-"#);
-    let da_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let da_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("may not be initialized"))
         .collect();
-    assert!(da_warnings.is_empty(), "x is definitely assigned before use, got: {:?}", warnings);
+    assert!(
+        da_warnings.is_empty(),
+        "x is definitely assigned before use, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t32_no_warning_for_sequential_assignment() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *test()
     a is 1
     b is 2
     c is a + b
     log(c)
-"#);
-    let da_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let da_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("may not be initialized"))
         .collect();
-    assert!(da_warnings.is_empty(), "All sequential assignments are definite, got: {:?}", warnings);
+    assert!(
+        da_warnings.is_empty(),
+        "All sequential assignments are definite, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t32_no_warning_for_for_loop_variable() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 *test()
     for i in 0 to 5
         log(i)
-"#);
-    let da_warnings: Vec<_> = warnings.iter()
+"#,
+    );
+    let da_warnings: Vec<_> = warnings
+        .iter()
         .filter(|w| w.contains("may not be initialized"))
         .collect();
-    assert!(da_warnings.is_empty(), "For loop variable is definitely assigned in its body, got: {:?}", warnings);
+    assert!(
+        da_warnings.is_empty(),
+        "For loop variable is definitely assigned in its body, got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn t32_check_has_warning_category() {
     // Verify the analysis runs without crashing on nested control flow
-    let diags = analyze_diagnostics(r#"
+    let diags = analyze_diagnostics(
+        r#"
 *test(flag)
     x is 0
     if flag
@@ -671,11 +788,16 @@ fn t32_check_has_warning_category() {
     else
         x is 20
     log(x)
-"#);
+"#,
+    );
     // No DA warnings expected here — x is assigned before use
-    let da_warnings: Vec<_> = diags.iter()
+    let da_warnings: Vec<_> = diags
+        .iter()
         .filter(|d| d.message.contains("may not be initialized"))
         .collect();
-    assert!(da_warnings.is_empty(), "No DA warnings expected for pre-assigned variable, got: {:?}",
-        da_warnings.iter().map(|d| &d.message).collect::<Vec<_>>());
+    assert!(
+        da_warnings.is_empty(),
+        "No DA warnings expected for pre-assigned variable, got: {:?}",
+        da_warnings.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
 }

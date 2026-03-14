@@ -10,7 +10,9 @@ use coralc::Compiler;
 
 fn compile_and_verify(source: &str) -> Result<String, String> {
     let compiler = Compiler;
-    compiler.compile_to_ir(source).map_err(|e| format!("{:?}", e))
+    compiler
+        .compile_to_ir(source)
+        .map_err(|e| format!("{:?}", e))
 }
 
 fn expect_compile_error(source: &str, expected_substring: &str) {
@@ -21,9 +23,12 @@ fn expect_compile_error(source: &str, expected_substring: &str) {
         Ok(_) => {
             // TS-9: Exhaustiveness is now a warning, not an error.
             // Check if warnings contain the expected substring via compile_with_warnings.
-            let (_, warnings) = compiler.compile_to_ir_with_warnings(source)
+            let (_, warnings) = compiler
+                .compile_to_ir_with_warnings(source)
                 .expect("Should compile (checking warnings)");
-            let has_warning = warnings.iter().any(|w| w.message.contains(expected_substring));
+            let has_warning = warnings
+                .iter()
+                .any(|w| w.message.contains(expected_substring));
             if !has_warning {
                 let wmsgs: Vec<_> = warnings.iter().map(|w| w.message.as_str()).collect();
                 panic!(

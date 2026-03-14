@@ -1,7 +1,4 @@
-//! Closure operations for the Coral runtime.
-
 use crate::*;
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_make_closure(
@@ -13,13 +10,17 @@ pub extern "C" fn coral_make_closure(
     if invoke.is_none() {
         return coral_make_unit();
     }
-    let object = Box::new(ClosureObject { invoke, release, env, capture_count });
+    let object = Box::new(ClosureObject {
+        invoke,
+        release,
+        env,
+        capture_count,
+    });
     alloc_value(Value::from_heap(
         ValueTag::Closure,
         Box::into_raw(object) as *mut c_void,
     ))
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_closure_invoke(
@@ -53,4 +54,3 @@ pub extern "C" fn coral_closure_invoke(
         out
     }
 }
-

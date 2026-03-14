@@ -12,7 +12,10 @@ const WORKSPACE: &str = env!("CARGO_MANIFEST_DIR");
 
 fn runtime_lib() -> PathBuf {
     let lib = PathBuf::from(WORKSPACE).join("target/debug/libruntime.so");
-    assert!(lib.exists(), "Runtime library not found. Run `cargo build -p runtime` first.");
+    assert!(
+        lib.exists(),
+        "Runtime library not found. Run `cargo build -p runtime` first."
+    );
     lib
 }
 

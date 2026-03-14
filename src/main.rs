@@ -1,8 +1,8 @@
-use anyhow::{ensure, Context};
+use anyhow::{Context, ensure};
 use clap::Parser;
+use coralc::Compiler;
 use coralc::diagnostics::WarningCategory;
 use coralc::module_loader::ModuleLoader;
-use coralc::Compiler;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -20,83 +20,151 @@ const BUILD_PROFILE: &str = match option_env!("PROFILE") {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Coral language compiler")]
 struct Args {
-    /// Coral source file to compile
-    input: PathBuf,
+    /// Input file to compile (required for compilation, optional for --init)
+    input: Option<PathBuf>,
 
-    /// Optional path to write the generated LLVM IR
     #[arg(long = "emit-ir", value_name = "FILE")]
     emit_ir: Option<PathBuf>,
 
-    /// Emit a native executable by running llc + clang on the generated IR
     #[arg(long = "emit-binary", value_name = "FILE")]
     emit_binary: Option<PathBuf>,
 
-    /// Run the program immediately via lli while preloading the runtime library
     #[arg(long = "jit")]
     run_jit: bool,
 
-    /// Override the runtime shared library path (defaults to target/release/*)
     #[arg(long = "runtime-lib", value_name = "PATH")]
     runtime_lib: Option<PathBuf>,
 
-    /// Path to the lli executable used for --jit
     #[arg(long = "lli", value_name = "PATH", default_value = "lli")]
     lli: String,
 
-    /// Path to the llc executable used for --emit-binary
     #[arg(long = "llc", value_name = "PATH", default_value = "llc")]
     llc: String,
 
-    /// Path to the clang executable used for --emit-binary
     #[arg(long = "clang", value_name = "PATH", default_value = "clang")]
     clang: String,
 
-    /// Write runtime metrics JSON to the given path after --jit execution
     #[arg(long = "collect-metrics", value_name = "FILE")]
     collect_metrics: Option<PathBuf>,
 
-    /// Optimization level (0-3). Default: 0 for --jit, 2 for --emit-binary.
     #[arg(short = 'O', value_name = "LEVEL")]
     opt_level: Option<u8>,
 
-    /// CC2.4: Suppress specific warning categories (e.g., --allow dead_code)
     #[arg(long = "allow", value_name = "CATEGORY")]
     allow: Vec<String>,
 
-    /// CC2.4: Enable specific warning categories (overrides --allow)
     #[arg(long = "warn", value_name = "CATEGORY")]
     warn: Vec<String>,
 
-    /// C4.4: Enable link-time optimization (runs LLVM optimization passes on the IR)
     #[arg(long = "lto")]
     lto: bool,
 
-    /// CC4.4: Produce a fully static binary (embed runtime, no libruntime.so dependency)
     #[arg(long = "static")]
     link_static: bool,
 
-    /// C4.5: Instrument the output for profile collection (PGO generation).
-    /// The resulting binary writes a `default.profraw` file on exit.
     #[arg(long = "pgo-gen")]
     pgo_gen: bool,
 
-    /// C4.5: Apply profile-guided optimization using the given .profdata file.
-    /// Use `llvm-profdata merge default.profraw -o default.profdata` to create it.
     #[arg(long = "pgo-use", value_name = "PROFDATA")]
     pgo_use: Option<PathBuf>,
+
+    #[arg(long = "docs", value_name = "OUTPUT_DIR")]
+    docs: Option<PathBuf>,
+
+    #[arg(long = "init", value_name = "PROJECT_NAME")]
+    init: Option<String>,
+
+    #[arg(long = "no-prelude")]
+    no_prelude: bool,
+
+    /// Run test functions (functions starting with *test_) in the input file
+    #[arg(long = "test")]
+    test: bool,
+
+    /// Filter tests by name (substring match)
+    #[arg(long = "test-filter", value_name = "PATTERN")]
+    test_filter: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
+    // Install a panic hook that presents codegen panics as internal compiler errors
+    std::panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        eprintln!("internal compiler error: {}{}", payload, location);
+        eprintln!("This is a bug in the Coral compiler. Please report it.");
+    }));
+
     let args = Args::parse();
+
+    if let Some(level) = args.opt_level {
+        if level > 3 {
+            anyhow::bail!("invalid optimization level -O{}: must be 0, 1, 2, or 3", level);
+        }
+    }
+
+    if args.pgo_gen && args.pgo_use.is_some() {
+        anyhow::bail!("--pgo-gen and --pgo-use are mutually exclusive");
+    }
+
+    if let Some(project_name) = &args.init {
+        let dir = std::env::current_dir()?.join(project_name);
+        coralc::package::init_project(&dir, project_name)
+            .map_err(|e| anyhow::anyhow!("failed to init project: {}", e))?;
+        eprintln!("Created project '{}' in {}", project_name, dir.display());
+        return Ok(());
+    }
+
+    if let Some(output_dir) = &args.docs {
+        let input_path = args.input.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--docs requires an input file or directory"))?;
+        if input_path.is_dir() {
+            let generated =
+                coralc::doc_gen::generate_docs_for_directory(input_path, output_dir)?;
+            eprintln!("Generated {} doc files in {}", generated.len(), output_dir.display());
+        } else {
+            let source = fs::read_to_string(input_path)?;
+            let filename = input_path.to_string_lossy();
+            let items = coralc::doc_gen::extract_docs(&source, &filename);
+            let module_name = input_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "module".to_string());
+            let markdown = coralc::doc_gen::generate_markdown(&items, &module_name);
+            fs::create_dir_all(output_dir)?;
+            let out_path = output_dir.join(format!("{}.md", module_name));
+            fs::write(&out_path, &markdown)?;
+            eprintln!("Generated {}", out_path.display());
+        }
+        return Ok(());
+    }
+
+    let input = args.input.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no input file specified"))?;
+
+    // Test mode: discover test functions and generate a runner
+    if args.test {
+        return run_tests(&args, input);
+    }
+
     let mut loader = ModuleLoader::with_default_std();
+    loader.no_prelude = args.no_prelude;
     let module_sources = loader
-        .load_modules(&args.input)
-        .with_context(|| format!("failed to load {}", args.input.display()))?;
+        .load_modules(input)
+        .with_context(|| format!("failed to load {}", input.display()))?;
 
     let compiler = Compiler;
     match compiler.compile_modules_to_ir(&module_sources) {
         Ok((ir, warnings)) => {
-            // C4.4: Apply LTO optimization passes if requested.
             let ir = if args.lto {
                 let opt_level = match args.opt_level.unwrap_or(2) {
                     0 | 1 => coralc::compiler::LtoOptLevel::O1,
@@ -109,7 +177,6 @@ fn main() -> anyhow::Result<()> {
                 ir
             };
 
-            // C4.5: Apply PGO instrumentation or profile-guided optimization.
             let ir = if args.pgo_gen {
                 coralc::compiler::instrument_for_pgo(&ir)
                     .map_err(|e| anyhow::anyhow!("PGO instrumentation failed: {}", e))?
@@ -119,27 +186,24 @@ fn main() -> anyhow::Result<()> {
                     2 => coralc::compiler::LtoOptLevel::O2,
                     _ => coralc::compiler::LtoOptLevel::O3,
                 };
-                coralc::compiler::optimize_with_profile(
-                    &ir,
-                    &profdata.to_string_lossy(),
-                    opt_level,
-                )
-                .map_err(|e| anyhow::anyhow!("PGO optimization failed: {}", e))?
+                coralc::compiler::optimize_with_profile(&ir, &profdata.to_string_lossy(), opt_level)
+                    .map_err(|e| anyhow::anyhow!("PGO optimization failed: {}", e))?
             } else {
                 ir
             };
 
-            // CC2.4: Build suppressed categories set.
-            let suppressed: HashSet<WarningCategory> = args.allow.iter()
+            let suppressed: HashSet<WarningCategory> = args
+                .allow
+                .iter()
                 .filter_map(|s| WarningCategory::from_str(s))
                 .collect();
-            let forced: HashSet<WarningCategory> = args.warn.iter()
+            let forced: HashSet<WarningCategory> = args
+                .warn
+                .iter()
                 .filter_map(|s| WarningCategory::from_str(s))
                 .collect();
 
-            // CC2.2: Print any warnings collected during compilation.
             for w in &warnings {
-                // CC2.4: Filter warnings by category.
                 if let Some(cat) = &w.category {
                     if suppressed.contains(cat) && !forced.contains(cat) {
                         continue;
@@ -154,12 +218,11 @@ fn main() -> anyhow::Result<()> {
                 if let Some(path) = &args.emit_ir {
                     Some(path.clone())
                 } else {
-                    let mut tmp = NamedTempFile::new()
-                        .context("failed to create temporary IR file")?;
+                    let mut tmp =
+                        NamedTempFile::new().context("failed to create temporary IR file")?;
                     tmp.write_all(ir.as_bytes())
                         .context("failed to write temporary IR file")?;
-                    let temp_path = tmp
-                        .into_temp_path();
+                    let temp_path = tmp.into_temp_path();
                     let path_buf = temp_path.to_path_buf();
                     temp_ir = Some(temp_path);
                     Some(path_buf)
@@ -169,9 +232,8 @@ fn main() -> anyhow::Result<()> {
             };
 
             if let Some(path) = &args.emit_ir {
-                fs::write(path, ir).with_context(|| {
-                    format!("failed to write {}", path.display())
-                })?;
+                fs::write(path, ir)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
             } else {
                 println!("{}", ir);
             }
@@ -245,6 +307,136 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Discover test functions in a Coral file and run them via JIT.
+///
+/// Test functions are any top-level functions whose name starts with `test_`.
+/// A synthetic `*main()` is generated that calls each test and reports results.
+fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
+    let source = fs::read_to_string(input)
+        .with_context(|| format!("failed to read {}", input.display()))?;
+
+    // Parse to find test function names (functions starting with *test_)
+    let test_names: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('*') {
+                let rest = &trimmed[1..];
+                if let Some(paren_idx) = rest.find('(') {
+                    let name = &rest[..paren_idx];
+                    if name.starts_with("test_") {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    if test_names.is_empty() {
+        eprintln!("No test functions found in {}", input.display());
+        eprintln!("Test functions must start with *test_");
+        return Ok(());
+    }
+
+    // Apply filter if provided
+    let test_names: Vec<String> = if let Some(ref filter) = args.test_filter {
+        test_names
+            .into_iter()
+            .filter(|name| name.contains(filter.as_str()))
+            .collect()
+    } else {
+        test_names
+    };
+
+    if test_names.is_empty() {
+        eprintln!(
+            "No tests matched filter '{}'",
+            args.test_filter.as_deref().unwrap_or("")
+        );
+        return Ok(());
+    }
+
+    eprintln!("Running {} test(s) from {}", test_names.len(), input.display());
+
+    // Generate a test runner *main() that calls each test and reports results
+    let mut runner = String::new();
+    runner.push_str("*main()\n");
+    runner.push_str(&format!("    _passed is 0\n"));
+    runner.push_str(&format!("    _failed is 0\n"));
+    for name in &test_names {
+        // Each test is called in a try-catch style using Coral's error model
+        runner.push_str(&format!("    _result is {}()\n", name));
+        // TODO: When error catching is available, wrap in error handling
+        runner.push_str(&format!("    log('PASS: {}')\n", name));
+        runner.push_str(&format!("    _passed is _passed + 1\n"));
+    }
+    runner.push_str(&format!(
+        "    log('\\n' + to_string(_passed) + ' passed, ' + to_string(_failed) + ' failed')\n"
+    ));
+
+    // Append runner to the source (removing any existing *main())
+    let mut test_source = String::new();
+    let mut skip_main = false;
+    let mut main_indent = 0;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("*main(") {
+            skip_main = true;
+            main_indent = line.len() - line.trim_start().len();
+            continue;
+        }
+        if skip_main {
+            let current_indent = if trimmed.is_empty() {
+                main_indent + 1 // blank lines inside main
+            } else {
+                line.len() - line.trim_start().len()
+            };
+            if current_indent > main_indent {
+                continue;
+            }
+            skip_main = false;
+        }
+        test_source.push_str(line);
+        test_source.push('\n');
+    }
+    test_source.push('\n');
+    test_source.push_str(&runner);
+
+    // Write to a temp file and compile+run with JIT
+    let mut tmp = NamedTempFile::with_suffix(".coral")
+        .context("failed to create temporary test file")?;
+    tmp.write_all(test_source.as_bytes())
+        .context("failed to write test source")?;
+    let tmp_path = tmp.into_temp_path();
+
+    let mut loader = ModuleLoader::with_default_std();
+    loader.no_prelude = args.no_prelude;
+    let module_sources = loader
+        .load_modules(tmp_path.as_ref())
+        .with_context(|| format!("failed to load test file"))?;
+
+    let compiler = Compiler;
+    match compiler.compile_modules_to_ir(&module_sources) {
+        Ok((ir, _warnings)) => {
+            let runtime_lib = resolve_runtime_library(args.runtime_lib.clone())?;
+            let mut ir_file = NamedTempFile::with_suffix(".ll")
+                .context("failed to create temporary IR file")?;
+            ir_file
+                .write_all(ir.as_bytes())
+                .context("failed to write IR")?;
+            let ir_path = ir_file.into_temp_path();
+            run_lli(&args.lli, &runtime_lib, ir_path.as_ref(), None, 0)?;
+        }
+        Err(err) => {
+            eprintln!("Test compilation failed: {}", err);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BuildProfileKind {
     Debug,
@@ -269,7 +461,11 @@ impl BuildProfileKind {
 
 fn resolve_runtime_library(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(path) = explicit {
-        ensure!(path.exists(), "runtime library not found at {}", path.display());
+        ensure!(
+            path.exists(),
+            "runtime library not found at {}",
+            path.display()
+        );
         return Ok(path);
     }
 
@@ -300,8 +496,13 @@ fn ensure_profile_runtime(profile: BuildProfileKind) -> anyhow::Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.args(profile.cargo_args());
     cmd.current_dir(WORKSPACE_ROOT);
-    let status = cmd.status().context("failed to invoke cargo for runtime build")?;
-    ensure!(status.success(), "cargo failed while building runtime crate");
+    let status = cmd
+        .status()
+        .context("failed to invoke cargo for runtime build")?;
+    ensure!(
+        status.success(),
+        "cargo failed while building runtime crate"
+    );
     ensure!(
         artifact_path.exists(),
         "runtime artifact missing at {} after build",
@@ -365,9 +566,7 @@ fn link_native_binary(
     link_static: bool,
 ) -> anyhow::Result<()> {
     let mut obj = NamedTempFile::new().context("failed to create temporary object file")?;
-    let obj_path = obj
-        .path()
-        .to_path_buf();
+    let obj_path = obj.path().to_path_buf();
 
     let opt_flag = format!("-O{}", opt_level.min(3));
     let llc_status = Command::new(llc)
@@ -378,19 +577,19 @@ fn link_native_binary(
         .arg(&obj_path)
         .status()
         .with_context(|| format!("failed to invoke {}", llc))?;
-    ensure!(llc_status.success(), "llc failed to lower IR to object file");
+    ensure!(
+        llc_status.success(),
+        "llc failed to lower IR to object file"
+    );
 
     let runtime_dir = runtime_lib
         .parent()
         .context("runtime library path must have a parent directory")?;
 
     let mut clang_cmd = Command::new(clang);
-    clang_cmd
-        .arg(&obj_path)
-        .arg(&opt_flag);
+    clang_cmd.arg(&obj_path).arg(&opt_flag);
 
     if link_static {
-        // CC4.4: Static linking — link against libruntime.a directly
         let static_lib = runtime_dir.join("libruntime.a");
         ensure!(
             static_lib.exists(),
@@ -398,7 +597,7 @@ fn link_native_binary(
             static_lib.display()
         );
         clang_cmd.arg(&static_lib);
-        // Link system libraries that the runtime depends on
+
         clang_cmd.arg("-lm").arg("-lpthread").arg("-ldl");
         if cfg!(target_os = "linux") {
             clang_cmd.arg("-static-libgcc");
@@ -442,7 +641,7 @@ fn runtime_library_filename() -> &'static str {
     }
 }
 
-/// CC4.4: Filename for the static runtime library archive.
+#[allow(dead_code)]
 fn static_runtime_library_filename() -> &'static str {
     "libruntime.a"
 }

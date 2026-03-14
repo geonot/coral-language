@@ -1,0 +1,29 @@
+# Benchmark: Map operations
+# Tests: map creation, insertion, lookup, iteration
+
+*main()
+    start is time_now()
+
+    # Build a map with many entries
+    m is map()
+    i is 0
+    while i < 10000
+        m is m.set(to_string(i), i * i)
+        i is i + 1
+
+    # Lookup every key
+    sum is 0
+    j is 0
+    while j < 10000
+        val is m.get(to_string(j))
+        sum is sum + val
+        j is j + 1
+
+    # Get keys and iterate
+    ks is m.keys()
+
+    elapsed is time_now() - start
+    log("map_size = " + to_string(m.size))
+    log("lookup_sum = " + to_string(sum))
+    log("keys_count = " + to_string(ks.length))
+    log("elapsed_ms: " + to_string(elapsed))

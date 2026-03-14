@@ -1,19 +1,6 @@
 use coralc::ast::{
-    Binding,
-    Block,
-    Expression,
-    Field,
-    Function,
-    FunctionKind,
-    Item,
-    Parameter,
-    Program,
-    Statement,
-    StoreDefinition,
-    TypeAnnotation,
-    TypeDefinition,
-    TypeVariant,
-    VariantField,
+    Binding, Block, Expression, Field, Function, FunctionKind, Item, Parameter, Program, Statement,
+    StoreDefinition, TypeAnnotation, TypeDefinition, TypeVariant, VariantField,
 };
 use coralc::semantic;
 use coralc::span::Span;
@@ -85,7 +72,11 @@ fn allows_rebinding_in_function_scope() {
     };
     let program = Program::new(vec![Item::Function(function)], span());
     let result = semantic::analyze(program);
-    assert!(result.is_ok(), "rebinding should be allowed, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "rebinding should be allowed, got: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -239,7 +230,10 @@ fn assigns_any_to_message_data_and_actor_primitive() {
         with_traits: vec![],
         span: span(),
     };
-    let program = Program::new(vec![Item::Type(message_type), Item::Store(actor_store)], span());
+    let program = Program::new(
+        vec![Item::Type(message_type), Item::Store(actor_store)],
+        span(),
+    );
 
     let model = semantic::analyze(program).expect("semantic analysis should succeed");
 
@@ -360,7 +354,9 @@ fn rejects_undefined_name_in_function_body() {
     let program = Program::new(vec![Item::Function(function)], span());
     let error = semantic::analyze(program).expect_err("expected undefined name error");
     assert!(
-        error.message.contains("undefined name `undefined_variable`"),
+        error
+            .message
+            .contains("undefined name `undefined_variable`"),
         "error should mention undefined name: {}",
         error.message
     );
@@ -492,7 +488,7 @@ fn accepts_enum_constructor_call() {
         with_traits: vec![],
         span: span(),
     };
-    
+
     // Call the constructor: Some(42)
     let function = Function {
         name: "main".into(),
@@ -544,7 +540,7 @@ fn accepts_nullary_enum_constructor() {
         with_traits: vec![],
         span: span(),
     };
-    
+
     // Reference the nullary constructor: None
     let function = Function {
         name: "main".into(),
@@ -644,8 +640,11 @@ fn rejects_ternary_condition_not_boolean() {
     // 42 ? 1 : 2 should fail - condition is Int not Bool
     let program = single_fn_program(ternary(int_literal(42), int_literal(1), int_literal(2)));
     let error = semantic::analyze(program).expect_err("expected type error for non-bool condition");
-    assert!(error.message.contains("type") || error.message.contains("Bool"), 
-        "error should mention type or Bool: {}", error.message);
+    assert!(
+        error.message.contains("type") || error.message.contains("Bool"),
+        "error should mention type or Bool: {}",
+        error.message
+    );
 }
 
 #[test]
@@ -653,13 +652,17 @@ fn rejects_ternary_branches_with_different_primitives() {
     // Coral now uses strict type checking.
     // true ? 1 : "string" - should fail because Int != String
     let program = single_fn_program(ternary(
-        bool_literal(true), 
-        int_literal(1), 
-        str_literal("hello")
+        bool_literal(true),
+        int_literal(1),
+        str_literal("hello"),
     ));
-    let error = semantic::analyze(program).expect_err("ternary with different primitive branches should fail");
-    assert!(error.message.contains("type mismatch") || error.message.contains("type"),
-        "error should mention type mismatch: {}", error.message);
+    let error = semantic::analyze(program)
+        .expect_err("ternary with different primitive branches should fail");
+    assert!(
+        error.message.contains("type mismatch") || error.message.contains("type"),
+        "error should mention type mismatch: {}",
+        error.message
+    );
 }
 
 #[test]
@@ -674,9 +677,13 @@ fn accepts_binary_op_with_string_and_other() {
 fn rejects_logical_op_non_boolean() {
     // 1 and 2 should fail - logical ops need booleans
     let program = single_fn_program(binary(int_literal(1), "and", int_literal(2)));
-    let error = semantic::analyze(program).expect_err("expected type error for non-bool logical op");
-    assert!(error.message.contains("Bool") || error.message.contains("type"),
-        "error should mention Bool or type: {}", error.message);
+    let error =
+        semantic::analyze(program).expect_err("expected type error for non-bool logical op");
+    assert!(
+        error.message.contains("Bool") || error.message.contains("type"),
+        "error should mention Bool or type: {}",
+        error.message
+    );
 }
 
 #[test]
@@ -729,11 +736,7 @@ fn accepts_function_with_fewer_args_than_params() {
 #[test]
 fn accepts_correctly_typed_ternary_expression() {
     // true ? 1 : 2 - both branches return Int
-    let program = single_fn_program(ternary(
-        bool_literal(true),
-        int_literal(1),
-        int_literal(2)
-    ));
+    let program = single_fn_program(ternary(bool_literal(true), int_literal(1), int_literal(2)));
     semantic::analyze(program).expect("correctly typed ternary should be accepted");
 }
 
@@ -741,9 +744,9 @@ fn accepts_correctly_typed_ternary_expression() {
 fn accepts_correctly_typed_arithmetic() {
     // 1 + 2 * 3 - all integers
     let program = single_fn_program(binary(
-        int_literal(1), 
-        "+", 
-        binary(int_literal(2), "*", int_literal(3))
+        int_literal(1),
+        "+",
+        binary(int_literal(2), "*", int_literal(3)),
     ));
     semantic::analyze(program).expect("integer arithmetic should be accepted");
 }
@@ -769,11 +772,14 @@ fn rejects_comparison_result_in_arithmetic() {
     let program = single_fn_program(binary(
         binary(int_literal(1), "<", int_literal(2)),
         "+",
-        int_literal(3)
+        int_literal(3),
     ));
     let error = semantic::analyze(program).expect_err("bool + int should be rejected");
-    assert!(error.message.contains("type mismatch") || error.message.contains("Bool"),
-        "error should mention type mismatch: {}", error.message);
+    assert!(
+        error.message.contains("type mismatch") || error.message.contains("Bool"),
+        "error should mention type mismatch: {}",
+        error.message
+    );
 }
 
 #[test]
@@ -786,8 +792,11 @@ fn rejects_calling_non_callable() {
         span: span(),
     });
     let error = semantic::analyze(program).expect_err("expected error for calling non-callable");
-    assert!(error.message.contains("callable") || error.message.contains("type"),
-        "error should mention callable: {}", error.message);
+    assert!(
+        error.message.contains("callable") || error.message.contains("type"),
+        "error should mention callable: {}",
+        error.message
+    );
 }
 
 #[test]

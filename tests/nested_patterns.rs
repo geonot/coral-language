@@ -30,7 +30,10 @@ result is unwrap_nested(nested)
 "#;
     let ir = compile_ok(source);
     // Should generate nested tag checks
-    assert!(ir.contains("coral_tagged_is_tag"), "Should check tags for nested patterns");
+    assert!(
+        ir.contains("coral_tagged_is_tag"),
+        "Should check tags for nested patterns"
+    );
 }
 
 #[test]

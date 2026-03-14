@@ -1,10 +1,4 @@
-//! Encoding FFI functions for the Coral runtime: base64 and hex.
-
 use crate::*;
-
-// ============================================================================
-// Base64
-// ============================================================================
 
 const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -26,10 +20,7 @@ pub extern "C" fn coral_base64_decode(value: ValueHandle) -> ValueHandle {
     }
     let input = value_to_rust_string(unsafe { &*value });
     match base64_decode_bytes(input.as_bytes()) {
-        Some(decoded) => {
-            // Return as Bytes value
-            coral_bytes_from_vec(decoded)
-        }
+        Some(decoded) => coral_bytes_from_vec(decoded),
         None => coral_make_absent(),
     }
 }
@@ -38,7 +29,7 @@ fn base64_encode_bytes(data: &[u8]) -> String {
     let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 2 < data.len() {
-        let n = ((data[i] as u32) << 16) | ((data[i+1] as u32) << 8) | (data[i+2] as u32);
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
         result.push(BASE64_CHARS[((n >> 18) & 0x3F) as usize] as char);
         result.push(BASE64_CHARS[((n >> 12) & 0x3F) as usize] as char);
         result.push(BASE64_CHARS[((n >> 6) & 0x3F) as usize] as char);
@@ -47,7 +38,7 @@ fn base64_encode_bytes(data: &[u8]) -> String {
     }
     let remaining = data.len() - i;
     if remaining == 2 {
-        let n = ((data[i] as u32) << 16) | ((data[i+1] as u32) << 8);
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
         result.push(BASE64_CHARS[((n >> 18) & 0x3F) as usize] as char);
         result.push(BASE64_CHARS[((n >> 12) & 0x3F) as usize] as char);
         result.push(BASE64_CHARS[((n >> 6) & 0x3F) as usize] as char);
@@ -74,8 +65,11 @@ fn base64_decode_byte(c: u8) -> Option<u8> {
 }
 
 fn base64_decode_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    // Filter whitespace
-    let filtered: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+    let filtered: Vec<u8> = data
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
     if filtered.len() % 4 != 0 {
         return None;
     }
@@ -83,13 +77,13 @@ fn base64_decode_bytes(data: &[u8]) -> Option<Vec<u8>> {
     let mut i = 0;
     while i < filtered.len() {
         let a = base64_decode_byte(filtered[i])?;
-        let b = base64_decode_byte(filtered[i+1])?;
+        let b = base64_decode_byte(filtered[i + 1])?;
         result.push((a << 2) | (b >> 4));
-        if filtered[i+2] != b'=' {
-            let c = base64_decode_byte(filtered[i+2])?;
+        if filtered[i + 2] != b'=' {
+            let c = base64_decode_byte(filtered[i + 2])?;
             result.push(((b & 0x0F) << 4) | (c >> 2));
-            if filtered[i+3] != b'=' {
-                let d = base64_decode_byte(filtered[i+3])?;
+            if filtered[i + 3] != b'=' {
+                let d = base64_decode_byte(filtered[i + 3])?;
                 result.push(((c & 0x03) << 6) | d);
             }
         }
@@ -97,10 +91,6 @@ fn base64_decode_bytes(data: &[u8]) -> Option<Vec<u8>> {
     }
     Some(result)
 }
-
-// ============================================================================
-// Hex
-// ============================================================================
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_hex_encode(value: ValueHandle) -> ValueHandle {
@@ -135,7 +125,7 @@ fn hex_decode_bytes(data: &[u8]) -> Option<Vec<u8>> {
     let mut i = 0;
     while i < data.len() {
         let hi = hex_digit(data[i])?;
-        let lo = hex_digit(data[i+1])?;
+        let lo = hex_digit(data[i + 1])?;
         result.push((hi << 4) | lo);
         i += 2;
     }
@@ -151,19 +141,19 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
-// ============================================================================
-// URL percent-encoding (L3.2)
-// ============================================================================
-
 fn is_url_unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~'
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_url_encode(value: ValueHandle) -> ValueHandle {
-    if value.is_null() { return coral_make_string_from_rust(""); }
+    if value.is_null() {
+        return coral_make_string_from_rust("");
+    }
     let val = unsafe { &*value };
-    if val.tag != ValueTag::String as u8 { return coral_make_string_from_rust(""); }
+    if val.tag != ValueTag::String as u8 {
+        return coral_make_string_from_rust("");
+    }
     let input = value_to_rust_string(val);
     let mut encoded = String::with_capacity(input.len() * 3);
     for &b in input.as_bytes() {
@@ -182,9 +172,13 @@ const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_url_decode(value: ValueHandle) -> ValueHandle {
-    if value.is_null() { return coral_make_string_from_rust(""); }
+    if value.is_null() {
+        return coral_make_string_from_rust("");
+    }
     let val = unsafe { &*value };
-    if val.tag != ValueTag::String as u8 { return coral_make_string_from_rust(""); }
+    if val.tag != ValueTag::String as u8 {
+        return coral_make_string_from_rust("");
+    }
     let input = value_to_rust_string(val);
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -198,7 +192,7 @@ pub extern "C" fn coral_url_decode(value: ValueHandle) -> ValueHandle {
             }
         }
         if bytes[i] == b'+' {
-            decoded.push(b' '); // form-encoded space
+            decoded.push(b' ');
         } else {
             decoded.push(bytes[i]);
         }

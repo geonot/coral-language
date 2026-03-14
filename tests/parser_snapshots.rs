@@ -2,7 +2,7 @@ use coralc::ast::*;
 use coralc::lexer::lex;
 use coralc::parser::Parser;
 use pretty_assertions::assert_eq;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,11 +25,9 @@ fn parser_valid_snapshots_match() {
         }
         let expected = read_snapshot(&snapshot_path);
         assert_eq!(
-            actual,
-            expected,
+            actual, expected,
             "AST snapshot mismatch for {:?}. update {:?}",
-            fixture,
-            snapshot_path
+            fixture, snapshot_path
         );
     }
 }
@@ -55,8 +53,8 @@ fn snapshot_path(fixture: &Path) -> PathBuf {
 }
 
 fn read_snapshot(path: &Path) -> Value {
-    let contents = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("failed to read snapshot {:?}", path));
+    let contents =
+        fs::read_to_string(path).unwrap_or_else(|_| panic!("failed to read snapshot {:?}", path));
     serde_json::from_str(&contents)
         .unwrap_or_else(|_| panic!("snapshot {:?} contains invalid JSON", path))
 }
@@ -136,7 +134,13 @@ fn statement_snapshot(statement: &Statement) -> Value {
         Statement::Binding(binding) => json!({ "binding": binding_snapshot(binding) }),
         Statement::Expression(expr) => json!({ "expression": expression_snapshot(expr) }),
         Statement::Return(expr, _) => json!({ "return": expression_snapshot(expr) }),
-        Statement::If { condition, body, elif_branches, else_body, .. } => {
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
             let mut obj = json!({
                 "if": {
                     "condition": expression_snapshot(condition),
@@ -144,30 +148,49 @@ fn statement_snapshot(statement: &Statement) -> Value {
                 }
             });
             if !elif_branches.is_empty() {
-                obj["elif"] = json!(elif_branches.iter().map(|(c, b)| json!({
-                    "condition": expression_snapshot(c),
-                    "body": block_snapshot(b),
-                })).collect::<Vec<_>>());
+                obj["elif"] = json!(
+                    elif_branches
+                        .iter()
+                        .map(|(c, b)| json!({
+                            "condition": expression_snapshot(c),
+                            "body": block_snapshot(b),
+                        }))
+                        .collect::<Vec<_>>()
+                );
             }
             if let Some(else_block) = else_body {
                 obj["else"] = block_snapshot(else_block);
             }
             obj
         }
-        Statement::While { condition, body, .. } => json!({
+        Statement::While {
+            condition, body, ..
+        } => json!({
             "while": {
                 "condition": expression_snapshot(condition),
                 "body": block_snapshot(body),
             }
         }),
-        Statement::For { variable, iterable, body, .. } => json!({
+        Statement::For {
+            variable,
+            iterable,
+            body,
+            ..
+        } => json!({
             "for": {
                 "variable": variable,
                 "iterable": expression_snapshot(iterable),
                 "body": block_snapshot(body),
             }
         }),
-        Statement::ForRange { variable, start, end, step, body, .. } => {
+        Statement::ForRange {
+            variable,
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
             let mut obj = json!({
                 "for_range": {
                     "variable": variable,
@@ -180,8 +203,14 @@ fn statement_snapshot(statement: &Statement) -> Value {
                 obj["for_range"]["step"] = expression_snapshot(s);
             }
             obj
-        },
-        Statement::ForKV { key_var, value_var, iterable, body, .. } => json!({
+        }
+        Statement::ForKV {
+            key_var,
+            value_var,
+            iterable,
+            body,
+            ..
+        } => json!({
             "for_kv": {
                 "key_var": key_var,
                 "value_var": value_var,
@@ -191,7 +220,12 @@ fn statement_snapshot(statement: &Statement) -> Value {
         }),
         Statement::Break(_) => json!({ "break": true }),
         Statement::Continue(_) => json!({ "continue": true }),
-        Statement::FieldAssign { target, field, value, .. } => json!({
+        Statement::FieldAssign {
+            target,
+            field,
+            value,
+            ..
+        } => json!({
             "field_assign": {
                 "target": expression_snapshot(target),
                 "field": field,
@@ -213,12 +247,12 @@ fn type_snapshot(ty: &TypeDefinition) -> Value {
         "fields": ty.fields.iter().map(field_snapshot).collect::<Vec<_>>(),
         "methods": ty.methods.iter().map(function_snapshot).collect::<Vec<_>>()
     });
-    
+
     // Include variants if this is an enum/ADT
     if !ty.variants.is_empty() {
         obj["variants"] = json!(ty.variants.iter().map(variant_snapshot).collect::<Vec<_>>());
     }
-    
+
     obj
 }
 
@@ -244,7 +278,13 @@ fn error_def_snapshot(err_def: &coralc::ast::ErrorDefinition) -> Value {
         obj["message"] = json!(message);
     }
     if !err_def.children.is_empty() {
-        obj["children"] = json!(err_def.children.iter().map(error_def_snapshot).collect::<Vec<_>>());
+        obj["children"] = json!(
+            err_def
+                .children
+                .iter()
+                .map(error_def_snapshot)
+                .collect::<Vec<_>>()
+        );
     }
     obj
 }
@@ -263,7 +303,12 @@ fn trait_method_snapshot(method: &coralc::ast::TraitMethod) -> Value {
         "params": method.params.iter().map(parameter_snapshot).collect::<Vec<_>>(),
     });
     if let Some(ref body) = method.body {
-        obj["body"] = json!(body.statements.iter().map(statement_snapshot).collect::<Vec<_>>());
+        obj["body"] = json!(
+            body.statements
+                .iter()
+                .map(statement_snapshot)
+                .collect::<Vec<_>>()
+        );
     }
     obj
 }
@@ -302,7 +347,7 @@ fn expression_snapshot(expr: &Expression) -> Value {
         Expression::Float(value, _) => json!({ "float": value }),
         Expression::Bool(value, _) => json!({ "bool": value }),
         Expression::String(value, _) => json!({ "string": value }),
-    Expression::Bytes(bytes, _) => json!({ "bytes": bytes }),
+        Expression::Bytes(bytes, _) => json!({ "bytes": bytes }),
         Expression::Placeholder(index, _) => json!({ "placeholder": index }),
         Expression::TaxonomyPath { segments, .. } => json!({ "taxonomy_path": segments }),
         Expression::Throw { value, .. } => json!({ "throw": expression_snapshot(value) }),
@@ -324,7 +369,9 @@ fn expression_snapshot(expr: &Expression) -> Value {
                 }))
                 .collect::<Vec<_>>()
         }),
-        Expression::Binary { op, left, right, .. } => json!({
+        Expression::Binary {
+            op, left, right, ..
+        } => json!({
             "binary": {
                 "op": binary_op_name(*op),
                 "left": expression_snapshot(left),
@@ -343,13 +390,20 @@ fn expression_snapshot(expr: &Expression) -> Value {
                 "args": args.iter().map(expression_snapshot).collect::<Vec<_>>()
             }
         }),
-        Expression::Member { target, property, .. } => json!({
+        Expression::Member {
+            target, property, ..
+        } => json!({
             "member": {
                 "target": expression_snapshot(target),
                 "property": property
             }
         }),
-        Expression::Ternary { condition, then_branch, else_branch, .. } => json!({
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => json!({
             "ternary": {
                 "condition": expression_snapshot(condition),
                 "then": expression_snapshot(then_branch),
@@ -373,7 +427,9 @@ fn expression_snapshot(expr: &Expression) -> Value {
                     .map(|block| block_snapshot(block))
             }
         }),
-        Expression::InlineAsm { template, inputs, .. } => json!({
+        Expression::InlineAsm {
+            template, inputs, ..
+        } => json!({
             "asm": {
                 "template": template,
                 "inputs": inputs.iter().map(|(constraint, expr)| json!({
@@ -409,14 +465,22 @@ fn expression_snapshot(expr: &Expression) -> Value {
                 "index": expression_snapshot(index)
             }
         }),
-        Expression::Slice { target, start, end, .. } => json!({
+        Expression::Slice {
+            target, start, end, ..
+        } => json!({
             "slice": {
                 "target": expression_snapshot(target),
                 "start": expression_snapshot(start),
                 "end": expression_snapshot(end)
             }
         }),
-        Expression::ListComprehension { body, var, iterable, condition, .. } => json!({
+        Expression::ListComprehension {
+            body,
+            var,
+            iterable,
+            condition,
+            ..
+        } => json!({
             "list_comprehension": {
                 "body": expression_snapshot(body),
                 "var": var,
@@ -424,7 +488,14 @@ fn expression_snapshot(expr: &Expression) -> Value {
                 "condition": condition.as_ref().map(|c| expression_snapshot(c))
             }
         }),
-        Expression::MapComprehension { key, value, var, iterable, condition, .. } => json!({
+        Expression::MapComprehension {
+            key,
+            value,
+            var,
+            iterable,
+            condition,
+            ..
+        } => json!({
             "map_comprehension": {
                 "key": expression_snapshot(key),
                 "value": expression_snapshot(value),
@@ -458,7 +529,9 @@ fn pattern_snapshot(pattern: &MatchPattern) -> Value {
         MatchPattern::Range { start, end, .. } => json!({
             "range": { "start": start, "end": end }
         }),
-        MatchPattern::RangeBinding { name, start, end, .. } => json!({
+        MatchPattern::RangeBinding {
+            name, start, end, ..
+        } => json!({
             "range_binding": { "name": name, "start": start, "end": end }
         }),
         MatchPattern::Rest(name, _) => json!({ "rest": name }),

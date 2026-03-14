@@ -1,130 +1,66 @@
-//! NaN-boxed value representation for Coral.
-//!
-//! Every Coral value is a single `u64`. IEEE 754 doubles pass through directly.
-//! Pointers and small immediates (Bool, Unit, None) are encoded in the
-//! quiet-NaN payload space, so no heap allocation is needed for primitives.
-//!
-//! # Encoding Scheme                               xxx
-//!
-//! ```text
-//! IEEE 754 double:  all 64 bits are the f64 value
-//!                   (valid whenever bits 63..51 ≠ 0x7FF8)
-//!
-//! Quiet NaN space:
-//!   Bits 63..51 = 0x7FF8       (quiet NaN signal, 13 bits)
-//!   Bits 50..48 = tag           (3-bit immediate type tag)
-//!   Bits 47..0  = payload       (48-bit payload)
-//!
-//! Tag values (bits 50..48):
-//!   0b000 (0) = Heap pointer   (payload = 48-bit address of Value struct)
-//!   0b001 (1) = Bool           (payload bit 0 = true/false)
-//!   0b010 (2) = Unit           (payload unused)
-//!   0b011 (3) = None/Absent    (payload unused)
-//!   0b100 (4) = Error ref      (payload = 48-bit pointer to ErrorMetadata)
-//!   0b101 (5) = reserved
-//!   0b110 (6) = reserved
-//!   0b111 (7) = reserved — used as canonical NaN
-//! ```
-//!
-//! # Design Notes
-//!
-//! - Actual NaN (from 0.0/0.0) is normalized to the canonical NaN: `0x7FF8_7000_0000_0000`
-//!   (tag=7, which is "reserved"). This ensures no real f64 operation can produce
-//!   a bit pattern that collides with our tagged values.
-//! - Heap pointers use the bottom 48 bits, which is the current virtual address
-//!   space limit on x86_64 and ARM64. Bit 47 is sign-extended for kernel-space
-//!   addresses but Coral only uses user-space pointers.
-//! - The `Value` struct (40 bytes, heap-allocated) still exists for containers
-//!   (String, List, Map, Store, Actor, Closure, Tagged, Bytes).
-
 use std::fmt;
 
-/// A NaN-boxed Coral value. 64 bits, passed by value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NanBoxedValue(u64);
 
-// ── Bit-level constants ──────────────────────────────────────────────
-
-/// The quiet-NaN prefix: bits 63..51 = 0x7FF8
 const QNAN_PREFIX: u64 = 0x7FF8_0000_0000_0000;
 
-/// Mask to test if a u64 is in the quiet-NaN space (bits 63..51 == 0x7FF8)
-/// We compare (val & QNAN_MASK) == QNAN_PREFIX
 const QNAN_MASK: u64 = 0xFFF8_0000_0000_0000;
 
-/// Tag field: bits 50..48 (3 bits)
 const TAG_SHIFT: u32 = 48;
-const TAG_MASK: u64 = 0x0007_0000_0000_0000; // bits 50..48
+const TAG_MASK: u64 = 0x0007_0000_0000_0000;
 
-/// Payload field: bits 47..0 (48 bits)
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-/// Tag values (in bits 50..48)
-const TAG_HEAP: u64 = 0;    // 0b000
-const TAG_BOOL: u64 = 1;    // 0b001
-const TAG_UNIT: u64 = 2;    // 0b010
-const TAG_NONE: u64 = 3;    // 0b011
-const TAG_ERROR: u64 = 4;   // 0b100
-const TAG_CANONICAL_NAN: u64 = 7; // 0b111
+const TAG_HEAP: u64 = 0;
+const TAG_BOOL: u64 = 1;
+const TAG_UNIT: u64 = 2;
+const TAG_NONE: u64 = 3;
+const TAG_ERROR: u64 = 4;
+const TAG_CANONICAL_NAN: u64 = 7;
 
-// ── Pre-computed constants ───────────────────────────────────────────
-
-/// `true` as NanBoxedValue
 const TRUE_BITS: u64 = QNAN_PREFIX | (TAG_BOOL << TAG_SHIFT) | 1;
 
-/// `false` as NanBoxedValue
 const FALSE_BITS: u64 = QNAN_PREFIX | (TAG_BOOL << TAG_SHIFT);
 
-/// `unit` as NanBoxedValue
 const UNIT_BITS: u64 = QNAN_PREFIX | (TAG_UNIT << TAG_SHIFT);
 
-/// `none`/absent as NanBoxedValue
 const NONE_BITS: u64 = QNAN_PREFIX | (TAG_NONE << TAG_SHIFT);
 
-/// Canonical NaN (used when f64 operations produce NaN)
 const CANONICAL_NAN_BITS: u64 = QNAN_PREFIX | (TAG_CANONICAL_NAN << TAG_SHIFT);
 
 impl NanBoxedValue {
-    // ── Constructors ─────────────────────────────────────────────────
-
-    /// Wrap an f64 number. NaN values are normalized to canonical NaN.
     #[inline(always)]
     pub fn from_number(n: f64) -> Self {
         let bits = n.to_bits();
-        // Check if this f64 falls in our quiet-NaN tagged space
+
         if (bits & QNAN_MASK) == QNAN_PREFIX {
-            // It's a NaN — normalize to canonical NaN to avoid collisions
             NanBoxedValue(CANONICAL_NAN_BITS)
         } else {
             NanBoxedValue(bits)
         }
     }
 
-    /// Wrap a boolean.
     #[inline(always)]
     pub fn from_bool(b: bool) -> Self {
         NanBoxedValue(if b { TRUE_BITS } else { FALSE_BITS })
     }
 
-    /// Create the `unit` value.
     #[inline(always)]
     pub fn unit() -> Self {
         NanBoxedValue(UNIT_BITS)
     }
 
-    /// Create the `none`/absent value.
     #[inline(always)]
     pub fn none() -> Self {
         NanBoxedValue(NONE_BITS)
     }
 
-    /// Wrap a heap pointer (to a `Value` struct for containers).
-    /// The pointer must be non-null and fit in 48 bits.
     #[inline(always)]
     pub fn from_heap_ptr(ptr: *mut super::Value) -> Self {
         let addr = ptr as u64;
-        debug_assert!(
+        assert!(
             addr & !PAYLOAD_MASK == 0,
             "Heap pointer exceeds 48-bit address space: {:#x}",
             addr
@@ -132,7 +68,6 @@ impl NanBoxedValue {
         NanBoxedValue(QNAN_PREFIX | (TAG_HEAP << TAG_SHIFT) | (addr & PAYLOAD_MASK))
     }
 
-    /// Wrap an error metadata pointer.
     #[inline(always)]
     pub fn from_error_ptr(ptr: *mut super::ErrorMetadata) -> Self {
         let addr = ptr as u64;
@@ -144,62 +79,46 @@ impl NanBoxedValue {
         NanBoxedValue(QNAN_PREFIX | (TAG_ERROR << TAG_SHIFT) | (addr & PAYLOAD_MASK))
     }
 
-    /// Create directly from raw u64 bits (used by FFI boundary).
     #[inline(always)]
     pub fn from_bits(bits: u64) -> Self {
         NanBoxedValue(bits)
     }
 
-    // ── Type queries ─────────────────────────────────────────────────
-
-    /// Is this a plain f64 number (not a NaN-tagged value)?
     #[inline(always)]
     pub fn is_number(&self) -> bool {
-        // Not in the quiet-NaN space, OR is canonical NaN (still a "number" — f64 NaN)
         (self.0 & QNAN_MASK) != QNAN_PREFIX || self.0 == CANONICAL_NAN_BITS
     }
 
-    /// Is this a heap pointer to a container Value?
     #[inline(always)]
     pub fn is_heap_ptr(&self) -> bool {
-        (self.0 & QNAN_MASK) == QNAN_PREFIX
-            && self.tag_bits() == TAG_HEAP
-            && self.0 != QNAN_PREFIX // null pointer encoding (should not happen)
+        (self.0 & QNAN_MASK) == QNAN_PREFIX && self.tag_bits() == TAG_HEAP && self.0 != QNAN_PREFIX
     }
 
-    /// Is this a boolean?
     #[inline(always)]
     pub fn is_bool(&self) -> bool {
         (self.0 & QNAN_MASK) == QNAN_PREFIX && self.tag_bits() == TAG_BOOL
     }
 
-    /// Is this the unit value?
     #[inline(always)]
     pub fn is_unit(&self) -> bool {
         self.0 == UNIT_BITS
     }
 
-    /// Is this none/absent?
     #[inline(always)]
     pub fn is_none(&self) -> bool {
         self.0 == NONE_BITS
     }
 
-    /// Is this an error reference?
     #[inline(always)]
     pub fn is_error(&self) -> bool {
         (self.0 & QNAN_MASK) == QNAN_PREFIX && self.tag_bits() == TAG_ERROR
     }
 
-    /// Is this an immediate (non-heap) value? Numbers, bools, unit, none.
     #[inline(always)]
     pub fn is_immediate(&self) -> bool {
         !self.is_heap_ptr() && !self.is_error()
     }
 
-    // ── Extraction ───────────────────────────────────────────────────
-
-    /// Extract as f64. Returns NaN for non-number values.
     #[inline(always)]
     pub fn as_number(&self) -> f64 {
         if self.0 == CANONICAL_NAN_BITS {
@@ -207,23 +126,20 @@ impl NanBoxedValue {
         } else if (self.0 & QNAN_MASK) != QNAN_PREFIX {
             f64::from_bits(self.0)
         } else {
-            0.0 // Non-number value coerces to 0.0
+            0.0
         }
     }
 
-    /// Extract as f64, returning the raw bits (for LLVM `bitcast` style conversion).
     #[inline(always)]
     pub fn as_f64_unchecked(&self) -> f64 {
         f64::from_bits(self.0)
     }
 
-    /// Extract as bool. Returns false for non-bool values.
     #[inline(always)]
     pub fn as_bool(&self) -> bool {
         self.0 == TRUE_BITS
     }
 
-    /// Truthiness: false, 0.0, none, unit, error → false. Everything else → true.
     #[inline(always)]
     pub fn is_truthy(&self) -> bool {
         if self.0 == FALSE_BITS || self.0 == NONE_BITS || self.0 == UNIT_BITS {
@@ -235,10 +151,9 @@ impl NanBoxedValue {
         if self.is_number() {
             return self.as_number() != 0.0;
         }
-        true // heap pointers (strings, lists, maps etc.) and true are truthy
+        true
     }
 
-    /// Extract heap pointer. Returns null for non-heap values.
     #[inline(always)]
     pub fn as_heap_ptr(&self) -> *mut super::Value {
         if self.is_heap_ptr() {
@@ -248,13 +163,11 @@ impl NanBoxedValue {
         }
     }
 
-    /// Extract heap pointer unchecked (caller guarantees this is a heap value).
     #[inline(always)]
     pub unsafe fn as_heap_ptr_unchecked(&self) -> *mut super::Value {
         (self.0 & PAYLOAD_MASK) as *mut super::Value
     }
 
-    /// Extract error metadata pointer. Returns null for non-error values.
     #[inline(always)]
     pub fn as_error_ptr(&self) -> *mut super::ErrorMetadata {
         if self.is_error() {
@@ -264,25 +177,20 @@ impl NanBoxedValue {
         }
     }
 
-    /// Get the raw u64 bits.
     #[inline(always)]
     pub fn to_bits(&self) -> u64 {
         self.0
     }
 
-    // ── Arithmetic fast paths ────────────────────────────────────────
-
-    /// Add two values. Fast path for number + number.
     #[inline(always)]
     pub fn fast_add(self, other: Self) -> Option<Self> {
         if self.is_number() && other.is_number() {
             Some(Self::from_number(self.as_number() + other.as_number()))
         } else {
-            None // Caller falls through to runtime for string concat etc.
+            None
         }
     }
 
-    /// Subtract two values. Fast path for number - number.
     #[inline(always)]
     pub fn fast_sub(self, other: Self) -> Option<Self> {
         if self.is_number() && other.is_number() {
@@ -292,7 +200,6 @@ impl NanBoxedValue {
         }
     }
 
-    /// Multiply two values. Fast path for number * number.
     #[inline(always)]
     pub fn fast_mul(self, other: Self) -> Option<Self> {
         if self.is_number() && other.is_number() {
@@ -302,7 +209,6 @@ impl NanBoxedValue {
         }
     }
 
-    /// Divide two values. Fast path for number / number.
     #[inline(always)]
     pub fn fast_div(self, other: Self) -> Option<Self> {
         if self.is_number() && other.is_number() {
@@ -312,7 +218,6 @@ impl NanBoxedValue {
         }
     }
 
-    /// Remainder. Fast path for number % number.
     #[inline(always)]
     pub fn fast_rem(self, other: Self) -> Option<Self> {
         if self.is_number() && other.is_number() {
@@ -322,22 +227,19 @@ impl NanBoxedValue {
         }
     }
 
-    /// Equality. Fast path for immediate values.
     #[inline(always)]
     pub fn fast_equals(self, other: Self) -> Option<bool> {
-        // Two immediates: bit-identical means equal (except NaN ≠ NaN)
         if self.is_number() && other.is_number() {
             let a = self.as_number();
             let b = other.as_number();
-            return Some(a == b); // NaN != NaN per IEEE 754
+            return Some(a == b);
         }
         if self.is_immediate() && other.is_immediate() {
             return Some(self.0 == other.0);
         }
-        None // Heap values need deep comparison via runtime
+        None
     }
 
-    /// Less-than. Fast path for number < number.
     #[inline(always)]
     pub fn fast_less_than(self, other: Self) -> Option<bool> {
         if self.is_number() && other.is_number() {
@@ -347,7 +249,6 @@ impl NanBoxedValue {
         }
     }
 
-    /// Greater-than. Fast path for number > number.
     #[inline(always)]
     pub fn fast_greater_than(self, other: Self) -> Option<bool> {
         if self.is_number() && other.is_number() {
@@ -357,9 +258,6 @@ impl NanBoxedValue {
         }
     }
 
-    // ── Internal helpers ─────────────────────────────────────────────
-
-    /// Extract the 3-bit tag from bits 50..48
     #[inline(always)]
     fn tag_bits(&self) -> u64 {
         (self.0 & TAG_MASK) >> TAG_SHIFT
@@ -393,24 +291,16 @@ impl Default for NanBoxedValue {
     }
 }
 
-// ── FFI boundary helpers ─────────────────────────────────────────────
-
-/// Convert a `NanBoxedValue` to the raw `u64` used at the FFI boundary.
-/// This is the new `ValueHandle` type.
 #[inline(always)]
 pub fn nanbox_to_u64(v: NanBoxedValue) -> u64 {
     v.0
 }
 
-/// Convert a raw FFI `u64` back to a `NanBoxedValue`.
 #[inline(always)]
 pub fn u64_to_nanbox(bits: u64) -> NanBoxedValue {
     NanBoxedValue(bits)
 }
 
-// ── Public constants for FFI / codegen ───────────────────────────────
-
-/// Expose encoding constants for use in codegen (LLVM IR emission).
 pub mod encoding {
     use super::*;
 
@@ -430,13 +320,9 @@ pub mod encoding {
     pub const QNAN_MASK_U64: u64 = QNAN_MASK;
 }
 
-// ── Tests ────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Number encoding ──
 
     #[test]
     fn number_zero() {
@@ -487,7 +373,7 @@ mod tests {
 
     #[test]
     fn number_subnormal() {
-        let tiny = 5e-324_f64; // smallest positive subnormal
+        let tiny = 5e-324_f64;
         let v = NanBoxedValue::from_number(tiny);
         assert!(v.is_number());
         assert_eq!(v.as_number(), tiny);
@@ -511,13 +397,11 @@ mod tests {
     fn number_negative_zero() {
         let v = NanBoxedValue::from_number(-0.0_f64);
         assert!(v.is_number());
-        // -0.0 and +0.0 compare equal in f64
+
         assert_eq!(v.as_number(), 0.0);
-        // But the bits should be distinct
+
         assert_ne!(v.to_bits(), NanBoxedValue::from_number(0.0).to_bits());
     }
-
-    // ── Bool encoding ──
 
     #[test]
     fn bool_true() {
@@ -537,8 +421,6 @@ mod tests {
         assert!(!v.is_truthy());
     }
 
-    // ── Unit encoding ──
-
     #[test]
     fn unit_value() {
         let v = NanBoxedValue::unit();
@@ -549,8 +431,6 @@ mod tests {
         assert!(!v.is_truthy());
     }
 
-    // ── None encoding ──
-
     #[test]
     fn none_value() {
         let v = NanBoxedValue::none();
@@ -560,11 +440,8 @@ mod tests {
         assert!(!v.is_truthy());
     }
 
-    // ── Heap pointer encoding ──
-
     #[test]
     fn heap_pointer_roundtrip() {
-        // Simulate a heap pointer (any 48-bit aligned address)
         let fake_addr: u64 = 0x0000_7FFF_ABCD_0010;
         let fake_ptr = fake_addr as *mut super::super::Value;
         let v = NanBoxedValue::from_heap_ptr(fake_ptr);
@@ -584,8 +461,6 @@ mod tests {
         assert_eq!(v.as_heap_ptr() as u64, addr);
     }
 
-    // ── Truthiness ──
-
     #[test]
     fn truthiness_numbers() {
         assert!(NanBoxedValue::from_number(1.0).is_truthy());
@@ -600,8 +475,6 @@ mod tests {
         let ptr = addr as *mut super::super::Value;
         assert!(NanBoxedValue::from_heap_ptr(ptr).is_truthy());
     }
-
-    // ── Arithmetic fast paths ──
 
     #[test]
     fn fast_add_numbers() {
@@ -650,8 +523,6 @@ mod tests {
         assert!(n.fast_add(b).is_none());
     }
 
-    // ── Comparison fast paths ──
-
     #[test]
     fn fast_equals_numbers() {
         let a = NanBoxedValue::from_number(42.0);
@@ -670,7 +541,7 @@ mod tests {
     fn fast_equals_nan_is_not_equal() {
         let a = NanBoxedValue::from_number(f64::NAN);
         let b = NanBoxedValue::from_number(f64::NAN);
-        assert_eq!(a.fast_equals(b), Some(false)); // NaN != NaN per IEEE 754
+        assert_eq!(a.fast_equals(b), Some(false));
     }
 
     #[test]
@@ -727,8 +598,6 @@ mod tests {
         assert_eq!(b.fast_greater_than(a), Some(false));
     }
 
-    // ── Non-collision tests ──
-
     #[test]
     fn no_type_confusion() {
         let number = NanBoxedValue::from_number(42.0);
@@ -737,7 +606,6 @@ mod tests {
         let unit = NanBoxedValue::unit();
         let none = NanBoxedValue::none();
 
-        // All have distinct bit patterns
         let bits = [number.0, bool_t.0, bool_f.0, unit.0, none.0];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -745,13 +613,16 @@ mod tests {
             }
         }
 
-        // Type predicates are mutually exclusive for immediates
         for v in &[number, bool_t, bool_f, unit, none] {
             let type_count = [v.is_number(), v.is_bool(), v.is_unit(), v.is_none()]
                 .iter()
                 .filter(|&&x| x)
                 .count();
-            assert_eq!(type_count, 1, "Value {:?} matches multiple type predicates", v);
+            assert_eq!(
+                type_count, 1,
+                "Value {:?} matches multiple type predicates",
+                v
+            );
         }
     }
 
@@ -761,27 +632,22 @@ mod tests {
         assert!(v.is_unit());
     }
 
-    // ── Edge case: all-ones NaN variants ──
-
     #[test]
     fn various_nan_patterns_normalize() {
-        // Different NaN bit patterns that fall in our tagged space
         let patterns = [
-            0x7FF8_0000_0000_0001u64, // signaling NaN variant
-            0x7FFF_FFFF_FFFF_FFFFu64, // all-ones NaN
-            0xFFF8_0000_0000_0000u64, // negative quiet NaN
+            0x7FF8_0000_0000_0001u64,
+            0x7FFF_FFFF_FFFF_FFFFu64,
+            0xFFF8_0000_0000_0000u64,
         ];
         for bits in &patterns {
             let f = f64::from_bits(*bits);
             if f.is_nan() {
                 let v = NanBoxedValue::from_number(f);
-                // Should normalize to canonical NaN, not be misinterpreted
+
                 assert!(v.is_number(), "NaN variant {:#x} was misidentified", bits);
             }
         }
     }
-
-    // ── FFI boundary ──
 
     #[test]
     fn u64_roundtrip() {
@@ -790,8 +656,6 @@ mod tests {
         let recovered = u64_to_nanbox(bits);
         assert_eq!(original, recovered);
     }
-
-    // ── Encoding constants consistency ──
 
     #[test]
     fn encoding_constants_match() {

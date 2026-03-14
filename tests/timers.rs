@@ -25,12 +25,24 @@ fn timer_runtime_functions_declared() {
     log('test')
 "#;
     let ir = compile_ok(source);
-    
+
     // Check that the timer functions are declared
-    assert!(ir.contains("coral_timer_send_after"), "Should declare timer_send_after");
-    assert!(ir.contains("coral_timer_schedule_repeat"), "Should declare timer_schedule_repeat");
-    assert!(ir.contains("coral_timer_cancel"), "Should declare timer_cancel");
-    assert!(ir.contains("coral_timer_pending_count"), "Should declare timer_pending_count");
+    assert!(
+        ir.contains("coral_timer_send_after"),
+        "Should declare timer_send_after"
+    );
+    assert!(
+        ir.contains("coral_timer_schedule_repeat"),
+        "Should declare timer_schedule_repeat"
+    );
+    assert!(
+        ir.contains("coral_timer_cancel"),
+        "Should declare timer_cancel"
+    );
+    assert!(
+        ir.contains("coral_timer_pending_count"),
+        "Should declare timer_pending_count"
+    );
 }
 
 #[test]
@@ -43,7 +55,10 @@ extern fn coral_timer_send_after(delay: usize, actor: usize, msg: usize) : usize
 "#;
     let ir = compile_ok(source);
     // Should declare the function (it will be in the IR)
-    assert!(ir.contains("coral_timer_send_after"), "Should compile timer extern");
+    assert!(
+        ir.contains("coral_timer_send_after"),
+        "Should compile timer extern"
+    );
 }
 
 #[test]
@@ -55,7 +70,10 @@ extern fn coral_timer_schedule_repeat(interval: usize, actor: usize, msg: usize)
     'schedule_repeat declared'
 "#;
     let ir = compile_ok(source);
-    assert!(ir.contains("coral_timer_schedule_repeat"), "Should compile schedule_repeat extern");
+    assert!(
+        ir.contains("coral_timer_schedule_repeat"),
+        "Should compile schedule_repeat extern"
+    );
 }
 
 #[test]
@@ -67,7 +85,10 @@ extern fn coral_timer_cancel(timer_id: usize) : usize
     'cancel declared'
 "#;
     let ir = compile_ok(source);
-    assert!(ir.contains("coral_timer_cancel"), "Should compile timer_cancel extern");
+    assert!(
+        ir.contains("coral_timer_cancel"),
+        "Should compile timer_cancel extern"
+    );
 }
 
 #[test]
@@ -79,7 +100,10 @@ extern fn coral_timer_pending_count() : usize
     'pending_count declared'
 "#;
     let ir = compile_ok(source);
-    assert!(ir.contains("coral_timer_pending_count"), "Should compile pending_count extern");
+    assert!(
+        ir.contains("coral_timer_pending_count"),
+        "Should compile pending_count extern"
+    );
 }
 
 // ============================================================================
@@ -91,13 +115,25 @@ fn compiles_program_using_timer_module() {
     let mut loader = ModuleLoader::with_default_std();
     let path = PathBuf::from("tests/fixtures/programs/uses_timers.coral");
     let source = loader.load(&path).expect("load timer program");
-    
+
     let compiler = Compiler;
     let ir = compiler.compile_to_ir(&source).expect("Should compile");
-    
+
     // The timer functions should be declared in the IR
-    assert!(ir.contains("coral_timer_send_after"), "Should have timer_send_after in IR");
-    assert!(ir.contains("coral_timer_schedule_repeat"), "Should have timer_schedule_repeat in IR");
-    assert!(ir.contains("coral_timer_cancel"), "Should have timer_cancel in IR");
-    assert!(ir.contains("coral_timer_pending_count"), "Should have timer_pending_count in IR");
+    assert!(
+        ir.contains("coral_timer_send_after"),
+        "Should have timer_send_after in IR"
+    );
+    assert!(
+        ir.contains("coral_timer_schedule_repeat"),
+        "Should have timer_schedule_repeat in IR"
+    );
+    assert!(
+        ir.contains("coral_timer_cancel"),
+        "Should have timer_cancel in IR"
+    );
+    assert!(
+        ir.contains("coral_timer_pending_count"),
+        "Should have timer_pending_count in IR"
+    );
 }

@@ -567,6 +567,15 @@
 # ─── Type Definitions ──────────────────────────────────────────────
 
 *emit_type_def(b, td)
+	kind is td.get("kind")
+	if kind is "extension"
+		# Extension: emit its methods as standalone functions
+		target_type is td.get("target_type")
+		methods is td.get("methods")
+		if methods isnt none
+			for method in methods
+				emit_method(b, target_type, method)
+		return none
 	name is td.get("name")
 	# Emit variant constructors
 	variants is td.get("variants")
@@ -920,6 +929,8 @@
 		return none
 	if kind is "guard"
 		return emit_guard_stmt(b, stmt)
+	if kind is "pattern_binding"
+		return emit_pattern_binding_stmt(b, stmt)
 	return none
 
 *get_current_loop(b)
@@ -1213,6 +1224,171 @@
 		idx is idx + 1
 	b.set("loop_stack", new_stack)
 
+*emit_pattern_binding_stmt(b, stmt)
+	val is emit_expression(b, stmt.get("value"))
+	emit_pattern_bind(b, stmt.get("pattern"), val)
+	return none
+
+*emit_list_comprehension(b, expr)
+	# Create empty list: coral_make_list(null, 0)
+	null_ptr is fresh_reg(b)
+	emit_indent(b, '{null_ptr} = inttoptr i64 0 to %CoralValue**')
+	list_reg is fresh_reg(b)
+	emit_indent(b, '{list_reg} = call %CoralValue* @coral_make_list(%CoralValue** {null_ptr}, i64 0)')
+	# Store list in alloca so it survives loop iterations
+	list_ptr is emit_deferred_alloca(b)
+	emit_indent(b, 'store %CoralValue* {list_reg}, %CoralValue** {list_ptr}')
+	# Emit iterable and get iterator
+	iter_val is emit_expression(b, expr.get("iterable"))
+	iter_reg is fresh_reg(b)
+	emit_indent(b, '{iter_reg} = call %CoralValue* @coral_value_iter(%CoralValue* {iter_val})')
+	iter_ptr is emit_deferred_alloca(b)
+	emit_indent(b, 'store %CoralValue* {iter_reg}, %CoralValue** {iter_ptr}')
+	# Loop header
+	header_bb is fresh_bb(b, "comp_header")
+	body_bb is fresh_bb(b, "comp_body")
+	done_bb is fresh_bb(b, "comp_done")
+	emit_br(b, header_bb)
+	begin_bb(b, header_bb)
+	# Get next element
+	cur_iter is fresh_reg(b)
+	emit_indent(b, '{cur_iter} = load %CoralValue*, %CoralValue** {iter_ptr}')
+	elem is fresh_reg(b)
+	emit_indent(b, '{elem} = call %CoralValue* @coral_value_iter_next(%CoralValue* {cur_iter})')
+	# Check if iterator is done (tag byte == 7 means Unit → end)
+	tag_ptr is fresh_reg(b)
+	emit_indent(b, '{tag_ptr} = bitcast %CoralValue* {elem} to i8*')
+	tag_val is fresh_reg(b)
+	emit_indent(b, '{tag_val} = load i8, i8* {tag_ptr}')
+	done_cond is fresh_reg(b)
+	emit_indent(b, '{done_cond} = icmp eq i8 {tag_val}, 7')
+	emit_br_cond(b, done_cond, done_bb, body_bb)
+	begin_bb(b, body_bb)
+	# Bind loop variable
+	var_name is expr.get("variable")
+	existing is b.get("variables").get(var_name)
+	if existing isnt none
+		emit_indent(b, 'store %CoralValue* {elem}, %CoralValue** {existing}')
+	else
+		var_ptr is emit_deferred_alloca(b)
+		emit_indent(b, 'store %CoralValue* {elem}, %CoralValue** {var_ptr}')
+		b.get("variables").set(var_name, var_ptr)
+	# Optional condition
+	has_cond is expr.get("condition") isnt none
+	if has_cond
+		cond_val is emit_expression(b, expr.get("condition"))
+		cond_bool is value_to_bool(b, cond_val)
+		push_bb is fresh_bb(b, "comp_push")
+		next_bb is fresh_bb(b, "comp_next")
+		emit_br_cond(b, cond_bool, push_bb, next_bb)
+		begin_bb(b, push_bb)
+		body_val is emit_expression(b, expr.get("body"))
+		cur_list is fresh_reg(b)
+		emit_indent(b, '{cur_list} = load %CoralValue*, %CoralValue** {list_ptr}')
+		push_discard is fresh_reg(b)
+		emit_indent(b, '{push_discard} = call %CoralValue* @coral_list_push(%CoralValue* {cur_list}, %CoralValue* {body_val})')
+		emit_br(b, header_bb)
+		begin_bb(b, next_bb)
+		emit_br(b, header_bb)
+	else
+		body_val is emit_expression(b, expr.get("body"))
+		cur_list is fresh_reg(b)
+		emit_indent(b, '{cur_list} = load %CoralValue*, %CoralValue** {list_ptr}')
+		push_discard is fresh_reg(b)
+		emit_indent(b, '{push_discard} = call %CoralValue* @coral_list_push(%CoralValue* {cur_list}, %CoralValue* {body_val})')
+		emit_br(b, header_bb)
+	begin_bb(b, done_bb)
+	final_list is fresh_reg(b)
+	emit_indent(b, '{final_list} = load %CoralValue*, %CoralValue** {list_ptr}')
+	return final_list
+
+*emit_map_comprehension(b, expr)
+	# Create empty map: coral_make_map(null, 0)
+	null_ptr is fresh_reg(b)
+	emit_indent(b, '{null_ptr} = inttoptr i64 0 to %MapEntry*')
+	map_reg is fresh_reg(b)
+	emit_indent(b, '{map_reg} = call %CoralValue* @coral_make_map(%MapEntry* {null_ptr}, i64 0)')
+	map_ptr is emit_deferred_alloca(b)
+	emit_indent(b, 'store %CoralValue* {map_reg}, %CoralValue** {map_ptr}')
+	# Emit iterable and get iterator
+	iter_val is emit_expression(b, expr.get("iterable"))
+	iter_reg is fresh_reg(b)
+	emit_indent(b, '{iter_reg} = call %CoralValue* @coral_value_iter(%CoralValue* {iter_val})')
+	iter_ptr is emit_deferred_alloca(b)
+	emit_indent(b, 'store %CoralValue* {iter_reg}, %CoralValue** {iter_ptr}')
+	header_bb is fresh_bb(b, "mcomp_header")
+	body_bb is fresh_bb(b, "mcomp_body")
+	done_bb is fresh_bb(b, "mcomp_done")
+	emit_br(b, header_bb)
+	begin_bb(b, header_bb)
+	cur_iter is fresh_reg(b)
+	emit_indent(b, '{cur_iter} = load %CoralValue*, %CoralValue** {iter_ptr}')
+	elem is fresh_reg(b)
+	emit_indent(b, '{elem} = call %CoralValue* @coral_value_iter_next(%CoralValue* {cur_iter})')
+	tag_ptr is fresh_reg(b)
+	emit_indent(b, '{tag_ptr} = bitcast %CoralValue* {elem} to i8*')
+	tag_val is fresh_reg(b)
+	emit_indent(b, '{tag_val} = load i8, i8* {tag_ptr}')
+	done_cond is fresh_reg(b)
+	emit_indent(b, '{done_cond} = icmp eq i8 {tag_val}, 7')
+	emit_br_cond(b, done_cond, done_bb, body_bb)
+	begin_bb(b, body_bb)
+	var_name is expr.get("variable")
+	existing is b.get("variables").get(var_name)
+	if existing isnt none
+		emit_indent(b, 'store %CoralValue* {elem}, %CoralValue** {existing}')
+	else
+		var_ptr is emit_deferred_alloca(b)
+		emit_indent(b, 'store %CoralValue* {elem}, %CoralValue** {var_ptr}')
+		b.get("variables").set(var_name, var_ptr)
+	has_cond is expr.get("condition") isnt none
+	if has_cond
+		cond_val is emit_expression(b, expr.get("condition"))
+		cond_bool is value_to_bool(b, cond_val)
+		set_bb is fresh_bb(b, "mcomp_set")
+		next_bb is fresh_bb(b, "mcomp_next")
+		emit_br_cond(b, cond_bool, set_bb, next_bb)
+		begin_bb(b, set_bb)
+		key_val is emit_expression(b, expr.get("key"))
+		val_val is emit_expression(b, expr.get("value"))
+		cur_map is fresh_reg(b)
+		emit_indent(b, '{cur_map} = load %CoralValue*, %CoralValue** {map_ptr}')
+		set_discard is fresh_reg(b)
+		emit_indent(b, '{set_discard} = call %CoralValue* @coral_map_set(%CoralValue* {cur_map}, %CoralValue* {key_val}, %CoralValue* {val_val})')
+		emit_br(b, header_bb)
+		begin_bb(b, next_bb)
+		emit_br(b, header_bb)
+	else
+		key_val is emit_expression(b, expr.get("key"))
+		val_val is emit_expression(b, expr.get("value"))
+		cur_map is fresh_reg(b)
+		emit_indent(b, '{cur_map} = load %CoralValue*, %CoralValue** {map_ptr}')
+		set_discard is fresh_reg(b)
+		emit_indent(b, '{set_discard} = call %CoralValue* @coral_map_set(%CoralValue* {cur_map}, %CoralValue* {key_val}, %CoralValue* {val_val})')
+		emit_br(b, header_bb)
+	begin_bb(b, done_bb)
+	final_map is fresh_reg(b)
+	emit_indent(b, '{final_map} = load %CoralValue*, %CoralValue** {map_ptr}')
+	return final_map
+
+*emit_slice(b, expr)
+	target is emit_expression(b, expr.get("target"))
+	start_val is none
+	if expr.get("start") isnt none
+		start_val is emit_expression(b, expr.get("start"))
+	else
+		start_val is fresh_reg(b)
+		emit_indent(b, '{start_val} = call %CoralValue* @coral_make_number(double 0.0)')
+	end_val is none
+	if expr.get("end") isnt none
+		end_val is emit_expression(b, expr.get("end"))
+	else
+		end_val is fresh_reg(b)
+		emit_indent(b, '{end_val} = call %CoralValue* @coral_make_number(double -1.0)')
+	r is fresh_reg(b)
+	emit_indent(b, '{r} = call %CoralValue* @coral_list_slice(%CoralValue* {target}, %CoralValue* {start_val}, %CoralValue* {end_val})')
+	return r
+
 # ─── Expression Emission ──────────────────────────────────────────
 
 *emit_expression(b, expr)
@@ -1279,6 +1455,25 @@
 		return emit_error_propagate(b, expr)
 	if kind is "error_value"
 		return emit_error_value(b, expr)
+	if kind is "list_comprehension"
+		return emit_list_comprehension(b, expr)
+	if kind is "map_comprehension"
+		return emit_map_comprehension(b, expr)
+	if kind is "spread"
+		return emit_expression(b, expr.get("expr"))
+	if kind is "slice"
+		return emit_slice(b, expr)
+	if kind is "unsafe"
+		return emit_block(b, expr.get("block"))
+	if kind is "inline_asm"
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')
+		return r
+	if kind is "ptr_load"
+		addr is emit_expression(b, expr.get("address"))
+		r is fresh_reg(b)
+		emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')
+		return r
 	# Fallback
 	r is fresh_reg(b)
 	emit_indent(b, '{r} = call %CoralValue* @coral_make_unit()')

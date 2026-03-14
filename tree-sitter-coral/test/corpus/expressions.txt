@@ -1,0 +1,280 @@
+================================================================================
+Match Expression With Variants
+================================================================================
+
+*main()
+    x is 5
+    match x
+        1 ? 'one'
+        2 ? 'two'
+        _ ? 'other'
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (integer))
+      (expression_statement
+        (match_expression
+          value: (identifier)
+          arms: (match_block
+            (match_arm
+              pattern: (pattern
+                (integer))
+              body: (template_string
+                (template_content)))
+            (match_arm
+              pattern: (pattern
+                (integer))
+              body: (template_string
+                (template_content)))
+            (match_arm
+              body: (template_string
+                (template_content)))))))))
+
+================================================================================
+For Loop
+================================================================================
+
+*main()
+    items is [1, 2, 3]
+    for item in items
+        log(item)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (list_literal
+          (integer)
+          (integer)
+          (integer)))
+      (for_statement
+        variable: (identifier)
+        iterable: (identifier)
+        body: (block
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (identifier)))))))))
+
+================================================================================
+Map Literal
+================================================================================
+
+*main()
+    m is map('x' is 1, 'y' is 2)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (map_literal
+          (map_entry
+            key: (template_string
+              (template_content))
+            value: (integer))
+          (map_entry
+            key: (template_string
+              (template_content))
+            value: (integer)))))))
+
+================================================================================
+Pipeline Expression
+================================================================================
+
+*main()
+    result is [1, 2, 3] ~ length()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (pipeline_expression
+          left: (list_literal
+            (integer)
+            (integer)
+            (integer))
+          right: (call_expression
+            function: (identifier)))))))
+
+================================================================================
+Member Access
+================================================================================
+
+*main()
+    p is Point(1, 2)
+    x is p.x
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (integer)
+            (integer))))
+      (binding
+        name: (identifier)
+        value: (member_expression
+          object: (identifier)
+          property: (identifier))))))
+
+================================================================================
+Index Expression
+================================================================================
+
+*main()
+    items is [10, 20, 30]
+    first is items[0]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (list_literal
+          (integer)
+          (integer)
+          (integer)))
+      (binding
+        name: (identifier)
+        value: (index_expression
+          object: (identifier)
+          index: (integer))))))
+
+================================================================================
+Use Statement
+================================================================================
+
+use std.io
+
+*main()
+    log('hello')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (use_statement
+    (dotted_name
+      (identifier)
+      (identifier)))
+  (function_definition
+    name: (identifier)
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content))))))))
+
+================================================================================
+Comment
+================================================================================
+
+# This is a comment
+*main()
+    # Another comment
+    log('hi')
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (function_definition
+    name: (identifier)
+    body: (block
+      (comment)
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (template_string
+              (template_content))))))))
+
+================================================================================
+Break And Continue
+================================================================================
+
+*main()
+    i is 0
+    loop
+        if i > 10
+            break
+        if i % 2 is 0
+            i is i + 1
+            continue
+        log(i)
+        i is i + 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    body: (block
+      (binding
+        name: (identifier)
+        value: (integer))
+      (loop_statement
+        body: (block
+          (if_statement
+            condition: (binary_expression
+              left: (identifier)
+              operator: (operator)
+              right: (integer))
+            body: (block
+              (break_statement)))
+          (if_statement
+            condition: (binary_expression
+              left: (binary_expression
+                left: (identifier)
+                operator: (operator)
+                right: (integer))
+              operator: (operator)
+              right: (integer))
+            body: (block
+              (binding
+                name: (identifier)
+                value: (binary_expression
+                  left: (identifier)
+                  operator: (operator)
+                  right: (integer)))
+              (continue_statement)))
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (identifier))))
+          (binding
+            name: (identifier)
+            value: (binary_expression
+              left: (identifier)
+              operator: (operator)
+              right: (integer))))))))

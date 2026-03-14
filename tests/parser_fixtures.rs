@@ -10,7 +10,10 @@ fn parser_valid_fixtures() {
         let tokens = lex(&source).expect("lexing failed");
         let parser = Parser::new(tokens, source.len());
         parser.parse().unwrap_or_else(|err| {
-            panic!("expected fixture {:?} to parse successfully, but got: {}", fixture, err.message);
+            panic!(
+                "expected fixture {:?} to parse successfully, but got: {}",
+                fixture, err.message
+            );
         });
     }
 }

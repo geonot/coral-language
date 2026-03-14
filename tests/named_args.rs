@@ -1,7 +1,7 @@
+use coralc::ast::{Expression, Function, Item};
 use coralc::compiler::Compiler;
-use coralc::parser::Parser;
 use coralc::lexer;
-use coralc::ast::{Expression, Item, Function};
+use coralc::parser::Parser;
 
 fn parse_source(src: &str) -> coralc::ast::Program {
     let tokens = lexer::lex(src).expect("lexing failed");
@@ -10,9 +10,18 @@ fn parse_source(src: &str) -> coralc::ast::Program {
 }
 
 fn find_function<'a>(program: &'a coralc::ast::Program, name: &str) -> &'a Function {
-    program.items.iter().filter_map(|item| {
-        if let Item::Function(f) = item { Some(f) } else { None }
-    }).find(|f| f.name == name).expect(&format!("function `{}` not found", name))
+    program
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Function(f) = item {
+                Some(f)
+            } else {
+                None
+            }
+        })
+        .find(|f| f.name == name)
+        .expect(&format!("function `{}` not found", name))
 }
 
 // ── Parser tests ──────────────────────────────────────────────
@@ -34,7 +43,9 @@ fn parse_named_args_basic() {
         panic!("expected a call in main body");
     };
     match call_expr {
-        Expression::Call { arg_names, args, .. } => {
+        Expression::Call {
+            arg_names, args, ..
+        } => {
             assert_eq!(arg_names.len(), 2);
             assert_eq!(arg_names[0], Some("b".to_string()));
             assert_eq!(arg_names[1], Some("a".to_string()));
@@ -70,7 +81,10 @@ fn parse_all_positional_has_empty_names() {
     if let Some(stmt) = main_fn.body.statements.first() {
         match stmt {
             coralc::ast::Statement::Expression(Expression::Call { arg_names, .. }) => {
-                assert!(arg_names.is_empty(), "all-positional calls should have empty arg_names");
+                assert!(
+                    arg_names.is_empty(),
+                    "all-positional calls should have empty arg_names"
+                );
             }
             _ => panic!("expected a Call expression"),
         }
@@ -97,9 +111,12 @@ fn run_coral(source: &str) -> String {
     let mut ir_file = tempfile::NamedTempFile::new().expect("create temp file");
     std::io::Write::write_all(&mut ir_file, ir.as_bytes()).expect("write IR");
     std::io::Write::flush(&mut ir_file).expect("flush");
-    let runtime = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/debug/libruntime.so");
-    assert!(runtime.exists(), "Runtime library not found. Run `cargo build -p runtime` first.");
+    let runtime =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/libruntime.so");
+    assert!(
+        runtime.exists(),
+        "Runtime library not found. Run `cargo build -p runtime` first."
+    );
     let output = std::process::Command::new("lli")
         .arg("-load")
         .arg(&runtime)
@@ -109,7 +126,10 @@ fn run_coral(source: &str) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
-        panic!("lli failed: {}\nstdout: {}\nstderr: {}", output.status, stdout, stderr);
+        panic!(
+            "lli failed: {}\nstdout: {}\nstderr: {}",
+            output.status, stdout, stderr
+        );
     }
     stdout.trim().to_string()
 }

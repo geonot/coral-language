@@ -6,9 +6,10 @@ pub enum Severity {
     Error,
     Warning,
     Info,
+    Hint,
+    Suggestion,
 }
 
-/// CC2.4: Warning categories for filtering via --allow/--warn CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WarningCategory {
     UnusedVariable,
@@ -21,7 +22,6 @@ pub enum WarningCategory {
 }
 
 impl WarningCategory {
-    /// Parse a category name from a CLI string (e.g., "dead_code").
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "unused_variable" | "unused" => Some(Self::UnusedVariable),
@@ -35,7 +35,6 @@ impl WarningCategory {
         }
     }
 
-    /// Return the canonical name of this category.
     pub fn name(&self) -> &'static str {
         match self {
             Self::UnusedVariable => "unused_variable",
@@ -61,9 +60,9 @@ pub struct Diagnostic {
     pub span: Span,
     pub help: Option<String>,
     pub severity: Severity,
-    /// CC2.4: Optional warning category for filtering.
+
     pub category: Option<WarningCategory>,
-    /// T4.1: Related diagnostics (additional type errors from the same compilation).
+
     pub related: Vec<Diagnostic>,
 }
 
@@ -90,8 +89,11 @@ impl Diagnostic {
         }
     }
 
-    /// CC2.4: Create a categorized warning.
-    pub fn categorized_warning(message: impl Into<String>, span: Span, category: WarningCategory) -> Self {
+    pub fn categorized_warning(
+        message: impl Into<String>,
+        span: Span,
+        category: WarningCategory,
+    ) -> Self {
         Self {
             message: message.into(),
             span,
@@ -112,12 +114,12 @@ impl Diagnostic {
         self
     }
 
-    /// Create a type mismatch error with helpful suggestions.
     pub fn type_mismatch(expected: &str, found: &str, span: Span) -> Self {
         Self::new(
             format!("type mismatch: expected `{}`, found `{}`", expected, found),
             span,
-        ).with_help(format!(
+        )
+        .with_help(format!(
             "consider converting the value or checking if the types should match\n\
              expected: {}\n\
              found:    {}",
@@ -125,23 +127,19 @@ impl Diagnostic {
         ))
     }
 
-    /// Create an undefined variable error with suggestions.
     pub fn undefined_variable(name: &str, span: Span, suggestions: Vec<String>) -> Self {
-        let mut diag = Self::new(
-            format!("undefined variable `{}`", name),
-            span,
-        );
-        
+        let mut diag = Self::new(format!("undefined variable `{}`", name), span);
+
         if !suggestions.is_empty() {
             let suggestion_list = suggestions
                 .iter()
-                .take(3)  // Show max 3 suggestions
+                .take(3)
                 .map(|s| format!("`{}`", s))
                 .collect::<Vec<_>>()
                 .join(", ");
             diag = diag.with_help(format!("did you mean: {}", suggestion_list));
         }
-        
+
         diag
     }
 }
@@ -158,16 +156,19 @@ pub enum Stage {
 pub struct CompileError {
     pub stage: Stage,
     pub diagnostic: Diagnostic,
-    /// Optional source text for pretty-printing (CC2.1).
+
     source: Option<String>,
 }
 
 impl CompileError {
     pub fn new(stage: Stage, diagnostic: Diagnostic) -> Self {
-        Self { stage, diagnostic, source: None }
+        Self {
+            stage,
+            diagnostic,
+            source: None,
+        }
     }
 
-    /// Create an error that carries the original source for pretty-printing (CC2.1).
     pub fn with_source(stage: Stage, diagnostic: Diagnostic, source: &str) -> Self {
         Self {
             stage,
@@ -176,19 +177,25 @@ impl CompileError {
         }
     }
 
-    /// Create a more descriptive error based on the stage and diagnostic.
     pub fn with_context(stage: Stage, diagnostic: Diagnostic, source: &str) -> Self {
         let enhanced = Self::add_source_context(diagnostic, source);
-        Self { stage, diagnostic: enhanced, source: Some(source.to_owned()) }
+        Self {
+            stage,
+            diagnostic: enhanced,
+            source: Some(source.to_owned()),
+        }
     }
 
-    /// Add source code context to a diagnostic for better error messages.
     fn add_source_context(mut diagnostic: Diagnostic, source: &str) -> Diagnostic {
         let idx = LineIndex::new(source);
         let span = diagnostic.span;
         let (line_num, col_num) = idx.line_col(span.start);
         let line_content = idx.line_text(source, span.start);
-        let underline_len = if span.end > span.start { span.end - span.start } else { 1 };
+        let underline_len = if span.end > span.start {
+            span.end - span.start
+        } else {
+            1
+        };
 
         let context_help = format!(
             "at line {}, column {}\n{}\n{}{}",
@@ -196,7 +203,14 @@ impl CompileError {
             col_num,
             line_content,
             " ".repeat(col_num.saturating_sub(1)),
-            "^".repeat(underline_len.min(line_content.len().saturating_sub(col_num.saturating_sub(1)).max(1)))
+            "^".repeat(
+                underline_len.min(
+                    line_content
+                        .len()
+                        .saturating_sub(col_num.saturating_sub(1))
+                        .max(1)
+                )
+            )
         );
 
         let existing_help = diagnostic.help.unwrap_or_default();
@@ -219,7 +233,6 @@ impl fmt::Display for CompileError {
             Stage::Codegen => "Codegen",
         };
 
-        // CC2.1: If we have source, show line:col instead of raw byte offsets.
         if let Some(src) = &self.source {
             let idx = LineIndex::new(src);
             write!(
@@ -233,15 +246,13 @@ impl fmt::Display for CompileError {
             write!(
                 f,
                 "{} error at {}: {}",
-                stage_name,
-                self.diagnostic.span,
-                self.diagnostic.message
+                stage_name, self.diagnostic.span, self.diagnostic.message
             )?;
         }
         if let Some(help) = &self.diagnostic.help {
             write!(f, "\nhelp: {}", help)?;
         }
-        // T4.1: Display related diagnostics (additional type errors).
+
         for related in &self.diagnostic.related {
             if let Some(src) = &self.source {
                 let idx = LineIndex::new(src);
@@ -256,9 +267,7 @@ impl fmt::Display for CompileError {
                 write!(
                     f,
                     "\n{} error at {}: {}",
-                    stage_name,
-                    related.span,
-                    related.message
+                    stage_name, related.span, related.message
                 )?;
             }
             if let Some(help) = &related.help {

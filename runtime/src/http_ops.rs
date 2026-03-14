@@ -1,14 +1,5 @@
-//! HTTP client operations for the Coral runtime (L3.1).
-//!
-//! Provides `coral_http_get`, `coral_http_post`, and `coral_http_request` FFI
-//! functions using the `ureq` crate for synchronous HTTP/1.1 requests.
-//!
-//! Success returns a map: `{"status": <int>, "body": <string>, "headers": <map>}`
-//! Failure returns an error value: `err Http:Connection` or `err Http:Timeout` etc.
-
 use crate::*;
 
-/// Helper: extract a Rust `String` from a `ValueHandle` that should be a string.
 fn string_from_handle(h: ValueHandle) -> Option<String> {
     if h.is_null() {
         return None;
@@ -20,9 +11,7 @@ fn string_from_handle(h: ValueHandle) -> Option<String> {
     Some(value_to_rust_string(val))
 }
 
-/// Helper: build a response map `{"status": N, "body": "...", "headers": {...}}`
 fn build_response_map(status: u16, body: &str, header_pairs: &[(String, String)]) -> ValueHandle {
-    // Build headers sub-map
     let header_entries: Vec<MapEntry> = header_pairs
         .iter()
         .map(|(k, v)| MapEntry {
@@ -39,21 +28,30 @@ fn build_response_map(status: u16, body: &str, header_pairs: &[(String, String)]
     let headers_key = coral_make_string_from_rust("headers");
 
     let entries = [
-        MapEntry { key: status_key, value: status_val },
-        MapEntry { key: body_key, value: body_val },
-        MapEntry { key: headers_key, value: headers_map },
+        MapEntry {
+            key: status_key,
+            value: status_val,
+        },
+        MapEntry {
+            key: body_key,
+            value: body_val,
+        },
+        MapEntry {
+            key: headers_key,
+            value: headers_map,
+        },
     ];
     coral_make_map(entries.as_ptr(), entries.len())
 }
 
-/// Helper: create an HTTP error value.
 fn make_http_error(kind: &str) -> ValueHandle {
     let name = format!("Http:{}", kind);
     coral_make_error(0, name.as_ptr(), name.len())
 }
 
-/// Helper: execute a ureq request and return (status, body, headers) or error.
-fn execute_request(request: ureq::Request) -> Result<(u16, String, Vec<(String, String)>), ValueHandle> {
+fn execute_request(
+    request: ureq::Request,
+) -> Result<(u16, String, Vec<(String, String)>), ValueHandle> {
     match request.call() {
         Ok(response) => {
             let status = response.status();
@@ -67,7 +65,6 @@ fn execute_request(request: ureq::Request) -> Result<(u16, String, Vec<(String, 
             Ok((status, body, headers))
         }
         Err(ureq::Error::Status(code, response)) => {
-            // HTTP error status (4xx, 5xx) — still return a response map
             let mut headers = Vec::new();
             for name in response.headers_names() {
                 if let Some(val) = response.header(&name) {
@@ -91,13 +88,6 @@ fn execute_request(request: ureq::Request) -> Result<(u16, String, Vec<(String, 
     }
 }
 
-// ========== FFI Functions ==========
-
-/// `coral_http_get(url) -> map | error`
-///
-/// Performs an HTTP GET request to the given URL string.
-/// Returns a map `{"status": N, "body": "...", "headers": {...}}` on success,
-/// or an error value on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_http_get(url_handle: ValueHandle) -> ValueHandle {
     let url = match string_from_handle(url_handle) {
@@ -111,11 +101,11 @@ pub extern "C" fn coral_http_get(url_handle: ValueHandle) -> ValueHandle {
     }
 }
 
-/// `coral_http_post(url, body) -> map | error`
-///
-/// Performs an HTTP POST request with the given body string.
 #[unsafe(no_mangle)]
-pub extern "C" fn coral_http_post(url_handle: ValueHandle, body_handle: ValueHandle) -> ValueHandle {
+pub extern "C" fn coral_http_post(
+    url_handle: ValueHandle,
+    body_handle: ValueHandle,
+) -> ValueHandle {
     let url = match string_from_handle(url_handle) {
         Some(u) => u,
         None => return make_http_error("InvalidUrl"),
@@ -159,10 +149,6 @@ pub extern "C" fn coral_http_post(url_handle: ValueHandle, body_handle: ValueHan
     }
 }
 
-/// `coral_http_request(method, url, headers_map, body) -> map | error`
-///
-/// Generic HTTP request: method (string), url (string), headers (map or unit),
-/// body (string or unit).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_http_request(
     method_handle: ValueHandle,
@@ -181,11 +167,9 @@ pub extern "C" fn coral_http_request(
 
     let mut request = ureq::request(&method.to_uppercase(), &url);
 
-    // Apply custom headers from a map value
     if !headers_handle.is_null() {
         let hval = unsafe { &*headers_handle };
         if hval.tag == ValueTag::Map as u8 {
-            // Iterate map entries by calling coral_map_keys and reading
             let keys_handle = coral_map_keys(headers_handle);
             if !keys_handle.is_null() {
                 let keys_val = unsafe { &*keys_handle };
@@ -205,7 +189,6 @@ pub extern "C" fn coral_http_request(
         }
     }
 
-    // Send with or without body
     let has_body = !body_handle.is_null() && {
         let bval = unsafe { &*body_handle };
         bval.tag == ValueTag::String as u8
@@ -252,24 +235,22 @@ pub extern "C" fn coral_http_request(
     }
 }
 
-// ========== Tests ==========
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // FLAG_ERR = 0b0001_0000 = 0x10
     const FLAG_ERR_TEST: u8 = 0x10;
 
     fn is_error(h: ValueHandle) -> bool {
-        if h.is_null() { return false; }
+        if h.is_null() {
+            return false;
+        }
         let val = unsafe { &*h };
         val.tag == ValueTag::Unit as u8 && (val.flags & FLAG_ERR_TEST) != 0
     }
 
     #[test]
     fn l31_http_get_invalid_url_returns_error() {
-        // Passing a non-string (number) should return an InvalidUrl error
         let num = coral_make_number(42.0);
         let result = coral_http_get(num);
         assert!(is_error(result), "expected error for non-string URL");
@@ -277,7 +258,6 @@ mod tests {
 
     #[test]
     fn l31_http_get_bad_host_returns_error() {
-        // A well-formed URL but unresolvable host
         let url = coral_make_string_from_rust("http://this-host-does-not-exist-12345.invalid/foo");
         let result = coral_http_get(url);
         assert!(is_error(result), "expected error for bad host");

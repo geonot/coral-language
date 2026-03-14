@@ -60,7 +60,10 @@ fn assert_output_contains(source: &str, substring: &str) {
     assert!(
         stdout.contains(substring),
         "Expected stdout to contain {:?} but got:\n--- STDOUT ---\n{}\n--- STDERR ---\n{}\n--- EXIT CODE: {} ---\n",
-        substring, stdout, stderr, code
+        substring,
+        stdout,
+        stderr,
+        code
     );
 }
 

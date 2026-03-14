@@ -1,5 +1,3 @@
-//! RC/allocator stress harness: churns lists/maps/strings to catch leaks under ASAN/Miri.
-
 use runtime::*;
 use std::time::Instant;
 
@@ -11,7 +9,7 @@ fn churn_lists(iter: usize, inner: usize) {
             handles.push(num);
         }
         let list = coral_make_list(handles.as_ptr(), handles.len());
-        // Pop a few entries.
+
         for _ in 0..3.min(inner) {
             let popped = coral_list_pop(list);
             unsafe { coral_value_release(popped) };
@@ -34,7 +32,7 @@ fn churn_maps(iter: usize, inner: usize) {
             entries.push(runtime::MapEntry { key, value: val });
         }
         let map = coral_make_map(entries.as_ptr(), entries.len());
-        // Overwrite a key to exercise replace path.
+
         if inner > 0 {
             let key0 = entries[0].key;
             let new_val = coral_make_number((i * inner) as f64);
@@ -60,7 +58,6 @@ fn churn_strings(iter: usize, len: usize) {
 }
 
 fn main() {
-    // Initialize deferred release queue to exercise batching.
     runtime::coral_runtime_release_queue_init(4096);
     let start = Instant::now();
     churn_lists(500, 200);

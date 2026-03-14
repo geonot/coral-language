@@ -1,8 +1,3 @@
-//! UDP networking operations for the Coral runtime (L3.3).
-//!
-//! Provides `coral_udp_bind`, `coral_udp_send`, and `coral_udp_recv` FFI
-//! functions using standard library UDP sockets.
-
 use crate::*;
 use std::collections::HashMap;
 use std::net::UdpSocket;
@@ -12,11 +7,11 @@ static UDP_SOCKETS: std::sync::LazyLock<Mutex<HashMap<u64, UdpSocket>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static UDP_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// `coral_udp_bind(host, port) -> handle_number | -1`
-///
-/// Bind a UDP socket to host:port. Returns a handle number on success, -1 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn coral_udp_bind(host_handle: ValueHandle, port_handle: ValueHandle) -> ValueHandle {
+pub extern "C" fn coral_udp_bind(
+    host_handle: ValueHandle,
+    port_handle: ValueHandle,
+) -> ValueHandle {
     let host = match safe_string(host_handle) {
         Some(s) => s,
         None => return coral_make_number(-1.0),
@@ -33,9 +28,6 @@ pub extern "C" fn coral_udp_bind(host_handle: ValueHandle, port_handle: ValueHan
     }
 }
 
-/// `coral_udp_send(handle, data, dest_host, dest_port) -> bytes_sent | -1`
-///
-/// Send data to a destination address via a bound UDP socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_udp_send(
     handle: ValueHandle,
@@ -65,21 +57,20 @@ pub extern "C" fn coral_udp_send(
     }
 }
 
-/// `coral_udp_recv(handle, max_bytes) -> map {"data": str, "addr": str} | -1`
-///
-/// Receive data from a bound UDP socket. Blocks until data arrives.
-/// Returns a map with "data" and "addr" keys on success, -1 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn coral_udp_recv(handle: ValueHandle, max_bytes_handle: ValueHandle) -> ValueHandle {
+pub extern "C" fn coral_udp_recv(
+    handle: ValueHandle,
+    max_bytes_handle: ValueHandle,
+) -> ValueHandle {
     let id = safe_number(handle) as u64;
     let max_bytes = safe_number(max_bytes_handle) as usize;
-    let max_bytes = max_bytes.min(65536); // cap at 64KB
+    let max_bytes = max_bytes.min(65536);
 
     let sockets = UDP_SOCKETS.lock().unwrap();
     match sockets.get(&id) {
         Some(sock) => {
             let mut buf = vec![0u8; max_bytes];
-            // Drop the lock before blocking recv
+
             let sock_clone = match sock.try_clone() {
                 Ok(s) => s,
                 Err(_) => return coral_make_number(-1.0),
@@ -108,9 +99,6 @@ pub extern "C" fn coral_udp_recv(handle: ValueHandle, max_bytes_handle: ValueHan
     }
 }
 
-/// `coral_udp_close(handle) -> 0`
-///
-/// Close a UDP socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_udp_close(handle: ValueHandle) -> ValueHandle {
     let id = safe_number(handle) as u64;
@@ -147,7 +135,7 @@ mod tests {
     #[test]
     fn udp_bind_and_close() {
         let host = coral_make_string_from_rust("127.0.0.1");
-        let port = coral_make_number(0.0); // OS-assigned port
+        let port = coral_make_number(0.0);
         let handle = coral_udp_bind(host, port);
         let id = unsafe { (&*handle).payload.number };
         assert!(id > 0.0, "bind should return positive handle");
@@ -159,7 +147,6 @@ mod tests {
 
     #[test]
     fn udp_send_recv_loopback() {
-        // Bind two sockets on loopback
         let host = coral_make_string_from_rust("127.0.0.1");
         let port_zero = coral_make_number(0.0);
 
@@ -172,13 +159,16 @@ mod tests {
         let s2_id = unsafe { (*s2).payload.number };
         assert!(s2_id > 0.0);
 
-        // Get s2's actual port from the socket
         let s2_port = {
             let sockets = UDP_SOCKETS.lock().unwrap();
-            sockets.get(&(s2_id as u64)).unwrap().local_addr().unwrap().port()
+            sockets
+                .get(&(s2_id as u64))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
         };
 
-        // Send from s1 to s2
         let data = coral_make_string_from_rust("hello");
         let dest_host = coral_make_string_from_rust("127.0.0.1");
         let dest_port = coral_make_number(s2_port as f64);
@@ -186,7 +176,6 @@ mod tests {
         let sent_n = unsafe { (&*sent).payload.number };
         assert_eq!(sent_n, 5.0);
 
-        // Recv on s2
         let max = coral_make_number(1024.0);
         let result = coral_udp_recv(s2, max);
         let result_ref = unsafe { &*result };

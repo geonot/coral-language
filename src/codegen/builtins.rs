@@ -1,8 +1,3 @@
-//! Builtin function dispatch for Coral runtime.
-//!
-//! Contains emit_builtin_call (the largest function in codegen),
-//! plus member expression/call dispatch and IO calls.
-
 use super::*;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -11,7 +6,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         name_value: IntValue<'ctx>,
         payload_value: IntValue<'ctx>,
     ) -> IntValue<'ctx> {
-        let entry_ptr_type = self.runtime.map_entry_type.ptr_type(AddressSpace::default());
+        let entry_ptr_type = self
+            .runtime
+            .map_entry_type
+            .ptr_type(AddressSpace::default());
         let array_type = self.runtime.map_entry_type.array_type(2);
         let mut temp_array = array_type.get_undef();
 
@@ -57,7 +55,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap()
             .into_array_value();
 
-        let alloca = self.builder.build_alloca(array_type, "message_literal").unwrap();
+        let alloca = self
+            .builder
+            .build_alloca(array_type, "message_literal")
+            .unwrap();
         self.builder.build_store(alloca, temp_array).unwrap();
         let ptr = self
             .builder
@@ -68,7 +69,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.call_map_with_hint(args, None)
     }
 
-
     pub(super) fn emit_member_expression(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -76,49 +76,62 @@ impl<'ctx> CodeGenerator<'ctx> {
         property: &str,
         _span: Span,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
-        // For 'self' target (store instance), always use map lookup for field access
         if let Expression::Identifier(name, _) = target {
             if name == "self" {
                 let target_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_string_literal(property);
-                return Ok(self.call_bridged(self.runtime.map_get, &[target_value, key_value], "map_get_property"));
+                return Ok(self.call_bridged(
+                    self.runtime.map_get,
+                    &[target_value, key_value],
+                    "map_get_property",
+                ));
             }
         }
         let target_value = self.emit_expression(ctx, target)?;
         match property {
-            "length" | "count" if !self.store_field_names.contains(property) => Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length")),
+            "length" | "count" if !self.store_field_names.contains(property) => {
+                Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length"))
+            }
             "length" | "count" => {
-                // If any store defines a field with this name, use field_or_length
-                // to dispatch at runtime: maps/stores → field lookup, else → length.
                 let key_value = self.emit_string_literal(property);
-                Ok(self.call_bridged(self.runtime.field_or_length, &[target_value, key_value], "field_or_length"))
+                Ok(self.call_bridged(
+                    self.runtime.field_or_length,
+                    &[target_value, key_value],
+                    "field_or_length",
+                ))
             }
             "size" => Ok(self.call_bridged(self.runtime.map_length, &[target_value], "map_length")),
             "err" => {
-                // x.err - returns true if x is an error value
                 let target_ptr = self.nb_to_ptr(target_value);
-                let is_err = self.builder
+                let is_err = self
+                    .builder
                     .build_call(self.runtime.is_err, &[target_ptr.into()], "is_err_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
                     .unwrap()
                     .into_int_value();
-                let is_err_bool = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    is_err,
-                    self.context.i8_type().const_zero(),
-                    "is_err_bool",
-                ).unwrap();
+                let is_err_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_err,
+                        self.context.i8_type().const_zero(),
+                        "is_err_bool",
+                    )
+                    .unwrap();
                 Ok(self.wrap_bool(is_err_bool))
             }
             _ => {
                 let key_value = self.emit_string_literal(property);
-                Ok(self.call_bridged(self.runtime.map_get, &[target_value, key_value], "map_get_property"))
+                Ok(self.call_bridged(
+                    self.runtime.map_get,
+                    &[target_value, key_value],
+                    "map_get_property",
+                ))
             }
         }
     }
-
 
     pub(super) fn emit_member_call(
         &mut self,
@@ -132,10 +145,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             if namespace == "io" {
                 return self.emit_io_call(ctx, property, args, span);
             }
-            // CC3.2: Resolve module-qualified function calls (e.g., math.sin())
+
             if let Some(exports) = self.module_exports.get(namespace.as_str()).cloned() {
                 if exports.contains(&property.to_string()) {
-                    // The function is exported by this module — call it by its unqualified name
                     if let Some(&function) = self.functions.get(property) {
                         let mut arg_values = Vec::new();
                         for arg in args {
@@ -146,10 +158,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             arg_values.push(value);
                         }
                         let call_args: Vec<_> = arg_values.iter().map(|v| (*v).into()).collect();
-                        let result = self.builder.build_call(function, &call_args, "modcall").unwrap();
+                        let result = self
+                            .builder
+                            .build_call(function, &call_args, "modcall")
+                            .unwrap();
                         return Ok(result.try_as_basic_value().left().unwrap().into_int_value());
                     }
-                    // Might be a builtin function — emit as a regular call
+
                     let call_expr = Expression::Call {
                         callee: Box::new(Expression::Identifier(property.to_string(), span)),
                         args: args.to_vec(),
@@ -160,11 +175,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        // KI-1: Type-aware method dispatch — if the target has a known store type
-        // and that store defines this method, dispatch to the store method BEFORE
-        // checking built-in names.  This prevents store/extension methods whose
-        // names collide with built-in methods (e.g. `get`, `set`, `push`, `map`,
-        // `length`, `filter`, `reduce`, etc.) from being unreachable.
+
         if let Expression::Identifier(target_name, _) = target {
             if let Some(crate::types::core::TypeId::Store(store_name)) =
                 self.resolved_types.get(target_name.as_str())
@@ -172,13 +183,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let store_name = store_name.clone();
                 let mangled = format!("{}_{}", store_name, property);
                 if self.functions.contains_key(&mangled) {
-                    // Verify argument count from store_methods (or infer from fn sig)
-                    let expected_params = self.functions[&mangled].count_params() as usize - 1; // minus self
+                    let expected_params = self.functions[&mangled].count_params() as usize - 1;
                     if args.len() != expected_params {
                         return Err(Diagnostic::new(
                             format!(
                                 "method `{}` on `{}` expects {} argument(s), but {} were provided",
-                                property, store_name, expected_params, args.len()
+                                property,
+                                store_name,
+                                expected_params,
+                                args.len()
                             ),
                             span,
                         ));
@@ -206,25 +219,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         match property {
-            // x.equals(y) - value equality comparison
             "equals" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("equals expects exactly one argument", span));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.value_equals, &[target_value, arg_value], "value_equals"))
+                Ok(self.call_bridged(
+                    self.runtime.value_equals,
+                    &[target_value, arg_value],
+                    "value_equals",
+                ))
             }
-            // x.not_equals(y) - value inequality comparison
+
             "not_equals" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("not_equals expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "not_equals expects exactly one argument",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.value_not_equals, &[target_value, arg_value], "value_not_equals"))
+                Ok(self.call_bridged(
+                    self.runtime.value_not_equals,
+                    &[target_value, arg_value],
+                    "value_not_equals",
+                ))
             }
-            // x.not() - boolean negation
+
             "not" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("not does not take arguments", span));
@@ -252,9 +275,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list.map expects a single function", span));
                 }
-                // C3.2: Inline lambda body directly into a map loop when the
-                // argument is a lambda expression, avoiding closure allocation
-                // and indirect calls through the runtime.
+
                 if let Expression::Lambda { params, body, .. } = &args[0] {
                     if params.len() == 1 {
                         return self.emit_inline_map(ctx, target, &params[0].name, body, span);
@@ -268,7 +289,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list.filter expects a predicate", span));
                 }
-                // C3.2: Inline lambda body for filter as well
+
                 if let Expression::Lambda { params, body, .. } = &args[0] {
                     if params.len() == 1 {
                         return self.emit_inline_filter(ctx, target, &params[0].name, body, span);
@@ -276,7 +297,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let func_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.list_filter, &[list_value, func_value], "list_filter"))
+                Ok(self.call_bridged(
+                    self.runtime.list_filter,
+                    &[list_value, func_value],
+                    "list_filter",
+                ))
             }
             "reduce" => {
                 if args.is_empty() || args.len() > 2 {
@@ -285,12 +310,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                         span,
                     ));
                 }
-                // C3.2: Inline lambda body for reduce when no seed
+
                 if args.len() == 1 {
                     if let Expression::Lambda { params, body, .. } = &args[0] {
                         if params.len() == 2 {
                             return self.emit_inline_reduce(
-                                ctx, target, &params[0].name, &params[1].name, body, span,
+                                ctx,
+                                target,
+                                &params[0].name,
+                                &params[1].name,
+                                body,
+                                span,
                             );
                         }
                     }
@@ -299,7 +329,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let (seed_arg, func_value) = if args.len() == 1 {
                     (self.wrap_none(), self.emit_expression(ctx, &args[0])?)
                 } else {
-                    (self.emit_expression(ctx, &args[0])?, self.emit_expression(ctx, &args[1])?)
+                    (
+                        self.emit_expression(ctx, &args[0])?,
+                        self.emit_expression(ctx, &args[1])?,
+                    )
                 };
                 Ok(self.call_bridged(
                     self.runtime.list_reduce,
@@ -309,9 +342,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             "find" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("list.find expects a single predicate", span));
+                    return Err(Diagnostic::new(
+                        "list.find expects a single predicate",
+                        span,
+                    ));
                 }
-                // C3.2: Inline lambda body for find
+
                 if let Expression::Lambda { params, body, .. } = &args[0] {
                     if params.len() == 1 {
                         return self.emit_inline_find(ctx, target, &params[0].name, body, span);
@@ -319,13 +355,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let func_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.list_find, &[list_value, func_value], "list_find"))
+                Ok(self.call_bridged(
+                    self.runtime.list_find,
+                    &[list_value, func_value],
+                    "list_find",
+                ))
             }
             "any" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list.any expects a single predicate", span));
                 }
-                // C3.2: Inline lambda body for any
+
                 if let Expression::Lambda { params, body, .. } = &args[0] {
                     if params.len() == 1 {
                         return self.emit_inline_any(ctx, target, &params[0].name, body, span);
@@ -339,7 +379,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list.all expects a single predicate", span));
                 }
-                // C3.2: Inline lambda body for all
+
                 if let Expression::Lambda { params, body, .. } = &args[0] {
                     if params.len() == 1 {
                         return self.emit_inline_all(ctx, target, &params[0].name, body, span);
@@ -358,28 +398,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.list_push, &[list_value, arg_value], "list_push"))
+                Ok(self.call_bridged(
+                    self.runtime.list_push,
+                    &[list_value, arg_value],
+                    "list_push",
+                ))
             }
             "pop" => {
                 if !args.is_empty() {
-                    return Err(Diagnostic::new(
-                        "list.pop does not take arguments",
-                        span,
-                    ));
+                    return Err(Diagnostic::new("list.pop does not take arguments", span));
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 Ok(self.call_bridged(self.runtime.list_pop, &[list_value], "list_pop"))
             }
             "get" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(
-                        ".get() expects exactly one argument",
-                        span,
-                    ));
+                    return Err(Diagnostic::new(".get() expects exactly one argument", span));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.value_get, &[target_value, key_value], "value_get_method"))
+                Ok(self.call_bridged(
+                    self.runtime.value_get,
+                    &[target_value, key_value],
+                    "value_get_method",
+                ))
             }
             "set" => {
                 if args.len() != 2 {
@@ -391,42 +433,49 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let map_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_expression(ctx, &args[0])?;
                 let new_value = self.emit_expression(ctx, &args[1])?;
-                
-                // For self.field = value on stores with reference fields, handle retain/release
+
                 if let Expression::Identifier(name, _) = target {
                     if name == "self" {
-                        // Extract field name from key if it's a string literal
                         if let Expression::String(field_name, _) = &args[0] {
-                            // Check all stores to see if any have this as a reference field
-                            // Since we don't track the current store context, check if field is a reference in ANY store
                             let is_ref = self.reference_fields.iter().any(|(_, f)| f == field_name);
-                            
+
                             if is_ref {
-                                // Get old value before setting
                                 let old_value = self.call_bridged(
                                     self.runtime.map_get,
                                     &[map_value, key_value],
                                     "get_old_ref",
                                 );
-                                // Retain new value
+
                                 let new_ptr = self.nb_to_ptr(new_value);
-                                self.call_runtime_void(self.runtime.value_retain, &[new_ptr.into()], "retain_new_ref");
-                                // Set the field
+                                self.call_runtime_void(
+                                    self.runtime.value_retain,
+                                    &[new_ptr.into()],
+                                    "retain_new_ref",
+                                );
+
                                 let result = self.call_bridged(
                                     self.runtime.map_set,
                                     &[map_value, key_value, new_value],
                                     "map_set_method",
                                 );
-                                // Release old value
+
                                 let old_ptr = self.nb_to_ptr(old_value);
-                                self.call_runtime_void(self.runtime.value_release, &[old_ptr.into()], "release_old_ref");
+                                self.call_runtime_void(
+                                    self.runtime.value_release,
+                                    &[old_ptr.into()],
+                                    "release_old_ref",
+                                );
                                 return Ok(result);
                             }
                         }
                     }
                 }
-                
-                Ok(self.call_bridged(self.runtime.map_set, &[map_value, key_value, new_value], "map_set_method"))
+
+                Ok(self.call_bridged(
+                    self.runtime.map_set,
+                    &[map_value, key_value, new_value],
+                    "map_set_method",
+                ))
             }
             "at" => {
                 if args.len() != 1 {
@@ -437,7 +486,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let index_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.list_get, &[list_value, index_value], "list_get"))
+                Ok(self.call_bridged(
+                    self.runtime.list_get,
+                    &[list_value, index_value],
+                    "list_get",
+                ))
             }
             "length" => {
                 if !args.is_empty() {
@@ -446,71 +499,129 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let target_value = self.emit_expression(ctx, target)?;
                 Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length"))
             }
-            // S4.4: String methods dispatched as member calls for chaining support
+
             "split" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(".split() expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        ".split() expects exactly one argument",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.string_split, &[target_value, arg_value], "string_split_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_split,
+                    &[target_value, arg_value],
+                    "string_split_method",
+                ))
             }
             "trim" => {
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_bridged(self.runtime.string_trim, &[target_value], "string_trim_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_trim,
+                    &[target_value],
+                    "string_trim_method",
+                ))
             }
             "lower" => {
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_bridged(self.runtime.string_to_lower, &[target_value], "string_lower_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_to_lower,
+                    &[target_value],
+                    "string_lower_method",
+                ))
             }
             "upper" => {
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_bridged(self.runtime.string_to_upper, &[target_value], "string_upper_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_to_upper,
+                    &[target_value],
+                    "string_upper_method",
+                ))
             }
             "replace" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new(".replace() expects two arguments (old, new)", span));
+                    return Err(Diagnostic::new(
+                        ".replace() expects two arguments (old, new)",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let old_value = self.emit_expression(ctx, &args[0])?;
                 let new_value = self.emit_expression(ctx, &args[1])?;
-                Ok(self.call_bridged(self.runtime.string_replace, &[target_value, old_value, new_value], "string_replace_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_replace,
+                    &[target_value, old_value, new_value],
+                    "string_replace_method",
+                ))
             }
             "contains" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(".contains() expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        ".contains() expects exactly one argument",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.string_contains, &[target_value, arg_value], "string_contains_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_contains,
+                    &[target_value, arg_value],
+                    "string_contains_method",
+                ))
             }
             "starts_with" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(".starts_with() expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        ".starts_with() expects exactly one argument",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.string_starts_with, &[target_value, arg_value], "string_starts_with_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_starts_with,
+                    &[target_value, arg_value],
+                    "string_starts_with_method",
+                ))
             }
             "ends_with" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(".ends_with() expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        ".ends_with() expects exactly one argument",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.string_ends_with, &[target_value, arg_value], "string_ends_with_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_ends_with,
+                    &[target_value, arg_value],
+                    "string_ends_with_method",
+                ))
             }
             "reverse" => {
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_bridged(self.runtime.string_reverse, &[target_value], "string_reverse_method"))
+                Ok(self.call_bridged(
+                    self.runtime.string_reverse,
+                    &[target_value],
+                    "string_reverse_method",
+                ))
             }
             "join" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(".join() expects exactly one argument (separator)", span));
+                    return Err(Diagnostic::new(
+                        ".join() expects exactly one argument (separator)",
+                        span,
+                    ));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(self.runtime.list_join, &[target_value, arg_value], "list_join_method"))
+                Ok(self.call_bridged(
+                    self.runtime.list_join,
+                    &[target_value, arg_value],
+                    "list_join_method",
+                ))
             }
             "sort" => {
                 let target_value = self.emit_expression(ctx, target)?;
@@ -518,37 +629,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             "to_string" => {
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_bridged(self.runtime.value_to_string, &[target_value], "value_to_string_method"))
+                Ok(self.call_bridged(
+                    self.runtime.value_to_string,
+                    &[target_value],
+                    "value_to_string_method",
+                ))
             }
             _ => {
-                // Check if this is a store method call
                 if let Some((store_name, param_count)) = self.store_methods.get(property).cloned() {
-                    // Verify argument count
                     if args.len() != param_count {
                         return Err(Diagnostic::new(
-                            format!("method `{}` expects {} argument(s), but {} were provided", 
-                                    property, param_count, args.len()),
+                            format!(
+                                "method `{}` expects {} argument(s), but {} were provided",
+                                property,
+                                param_count,
+                                args.len()
+                            ),
                             span,
                         ));
                     }
-                    // Emit target (the store instance)
+
                     let target_value = self.emit_expression(ctx, target)?;
-                    // Build arguments: self (target) + user args as CoralValue* pointers
+
                     let mut call_args: Vec<BasicMetadataValueEnum> = vec![target_value.into()];
                     for arg in args {
                         let arg_val = self.emit_expression(ctx, arg)?;
-                        // Pass as pointer (CoralValue*), not as number
+
                         call_args.push(arg_val.into());
                     }
-                    // Build the mangled function name and look up function
+
                     let mangled = format!("{}_{}", store_name, property);
-                    let store_method = *self.functions.get(&mangled)
-                        .ok_or_else(|| Diagnostic::new(
+                    let store_method = *self.functions.get(&mangled).ok_or_else(|| {
+                        Diagnostic::new(
                             format!("internal error: store method {} not found", mangled),
                             span,
-                        ))?;
-                    // Call the store method (returns i64 NaN-boxed value)
-                    let result = self.builder.build_call(store_method, &call_args, "store_method_call")
+                        )
+                    })?;
+
+                    let result = self
+                        .builder
+                        .build_call(store_method, &call_args, "store_method_call")
                         .unwrap()
                         .try_as_basic_value()
                         .left()
@@ -612,13 +732,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         match name {
             "log" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(
-                        "log expects exactly one argument",
-                        span,
-                    ));
+                    return Err(Diagnostic::new("log expects exactly one argument", span));
                 }
                 let value = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.log, &[value], "log_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.log,
+                    &[value],
+                    "log_call",
+                )))
             }
             "concat" => {
                 if args.len() != 2 {
@@ -629,7 +750,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.value_add, &[a, b], "concat_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.value_add,
+                    &[a, b],
+                    "concat_call",
+                )))
             }
             "fs_read" => {
                 if args.len() != 1 {
@@ -639,18 +764,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_read, &[path], "fs_read_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_read,
+                    &[path],
+                    "fs_read_call",
+                )))
             }
             "fs_write" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new(
-                        "fs_write expects path and data",
-                        span,
-                    ));
+                    return Err(Diagnostic::new("fs_write expects path and data", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
                 let data = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_write, &[path, data], "fs_write_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_write,
+                    &[path, data],
+                    "fs_write_call",
+                )))
             }
             "fs_exists" => {
                 if args.len() != 1 {
@@ -660,7 +790,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_exists, &[path], "fs_exists_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_exists,
+                    &[path],
+                    "fs_exists_call",
+                )))
             }
             "bit_and" | "bit_or" | "bit_xor" | "bit_shl" | "bit_shr" => {
                 if args.len() != 2 {
@@ -682,17 +816,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             "bit_not" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new(
-                        "bit_not expects one argument",
-                        span,
-                    ));
+                    return Err(Diagnostic::new("bit_not expects one argument", span));
                 }
                 let value = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.value_bitnot, &[value], "bit_not_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.value_bitnot,
+                    &[value],
+                    "bit_not_call",
+                )))
             }
             "actor_send" => {
                 if args.len() != 2 && args.len() != 3 {
-                    return Err(Diagnostic::new("actor_send expects actor, name, optional payload", span));
+                    return Err(Diagnostic::new(
+                        "actor_send expects actor, name, optional payload",
+                        span,
+                    ));
                 }
                 let actor = self.emit_expression(ctx, &args[0])?;
                 let name = self.emit_expression(ctx, &args[1])?;
@@ -702,279 +840,473 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.wrap_unit()
                 };
                 let message = self.build_message_value(name, payload);
-                Ok(Some(self.call_bridged(self.runtime.actor_send, &[actor, message], "actor_send_builtin")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.actor_send,
+                    &[actor, message],
+                    "actor_send_builtin",
+                )))
             }
             "actor_self" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("actor_self expects no arguments", span));
                 }
-                Ok(Some(self.call_bridged(self.runtime.actor_self, &[], "actor_self_builtin")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.actor_self,
+                    &[],
+                    "actor_self_builtin",
+                )))
             }
-            // String operations
+
             "string_slice" | "slice" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("string_slice expects string, start, end", span));
+                    return Err(Diagnostic::new(
+                        "string_slice expects string, start, end",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let start = self.emit_expression(ctx, &args[1])?;
                 let end = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.string_slice, &[s, start, end], "string_slice_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_slice,
+                    &[s, start, end],
+                    "string_slice_call",
+                )))
             }
             "string_char_at" | "char_at" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_char_at expects string, index", span));
+                    return Err(Diagnostic::new(
+                        "string_char_at expects string, index",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let idx = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_char_at, &[s, idx], "string_char_at_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_char_at,
+                    &[s, idx],
+                    "string_char_at_call",
+                )))
             }
             "string_index_of" | "index_of" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_index_of expects haystack, needle", span));
+                    return Err(Diagnostic::new(
+                        "string_index_of expects haystack, needle",
+                        span,
+                    ));
                 }
                 let haystack = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_index_of, &[haystack, needle], "string_index_of_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_index_of,
+                    &[haystack, needle],
+                    "string_index_of_call",
+                )))
             }
             "string_split" | "split" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_split expects string, delimiter", span));
+                    return Err(Diagnostic::new(
+                        "string_split expects string, delimiter",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let delim = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_split, &[s, delim], "string_split_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_split,
+                    &[s, delim],
+                    "string_split_call",
+                )))
             }
             "string_to_chars" | "chars" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("string_to_chars expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "string_to_chars expects one argument",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_to_chars, &[s], "string_to_chars_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_to_chars,
+                    &[s],
+                    "string_to_chars_call",
+                )))
             }
             "string_starts_with" | "starts_with" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_starts_with expects string, prefix", span));
+                    return Err(Diagnostic::new(
+                        "string_starts_with expects string, prefix",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let prefix = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_starts_with, &[s, prefix], "string_starts_with_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_starts_with,
+                    &[s, prefix],
+                    "string_starts_with_call",
+                )))
             }
             "string_ends_with" | "ends_with" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_ends_with expects string, suffix", span));
+                    return Err(Diagnostic::new(
+                        "string_ends_with expects string, suffix",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let suffix = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_ends_with, &[s, suffix], "string_ends_with_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_ends_with,
+                    &[s, suffix],
+                    "string_ends_with_call",
+                )))
             }
             "string_trim" | "trim" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_trim expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_trim, &[s], "string_trim_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_trim,
+                    &[s],
+                    "string_trim_call",
+                )))
             }
             "string_to_upper" | "to_upper" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("string_to_upper expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "string_to_upper expects one argument",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_to_upper, &[s], "string_to_upper_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_to_upper,
+                    &[s],
+                    "string_to_upper_call",
+                )))
             }
             "string_to_lower" | "to_lower" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("string_to_lower expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "string_to_lower expects one argument",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_to_lower, &[s], "string_to_lower_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_to_lower,
+                    &[s],
+                    "string_to_lower_call",
+                )))
             }
             "string_replace" | "replace" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("string_replace expects string, old, new", span));
+                    return Err(Diagnostic::new(
+                        "string_replace expects string, old, new",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let old = self.emit_expression(ctx, &args[1])?;
                 let new = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.string_replace, &[s, old, new], "string_replace_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_replace,
+                    &[s, old, new],
+                    "string_replace_call",
+                )))
             }
             "string_contains" | "contains" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_contains expects haystack, needle", span));
+                    return Err(Diagnostic::new(
+                        "string_contains expects haystack, needle",
+                        span,
+                    ));
                 }
                 let haystack = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_contains, &[haystack, needle], "string_contains_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_contains,
+                    &[haystack, needle],
+                    "string_contains_call",
+                )))
             }
             "string_parse_number" | "parse_number" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("string_parse_number expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "string_parse_number expects one argument",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_parse_number, &[s], "string_parse_number_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_parse_number,
+                    &[s],
+                    "string_parse_number_call",
+                )))
             }
             "string_length" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_length expects one argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.value_length, &[s], "string_length_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.value_length,
+                    &[s],
+                    "string_length_call",
+                )))
             }
             "number_to_string" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("number_to_string expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "number_to_string expects one argument",
+                        span,
+                    ));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.number_to_string, &[n], "number_to_string_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.number_to_string,
+                    &[n],
+                    "number_to_string_call",
+                )))
             }
             "to_string" | "value_to_string" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("to_string expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.value_to_string, &[v], "value_to_string_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.value_to_string,
+                    &[v],
+                    "value_to_string_call",
+                )))
             }
-            // Math functions - unary
+
             "abs" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("abs expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_abs, &[n], "math_abs_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_abs,
+                    &[n],
+                    "math_abs_call",
+                )))
             }
             "sqrt" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sqrt expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_sqrt, &[n], "math_sqrt_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_sqrt,
+                    &[n],
+                    "math_sqrt_call",
+                )))
             }
             "floor" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("floor expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_floor, &[n], "math_floor_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_floor,
+                    &[n],
+                    "math_floor_call",
+                )))
             }
             "ceil" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ceil expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_ceil, &[n], "math_ceil_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_ceil,
+                    &[n],
+                    "math_ceil_call",
+                )))
             }
             "round" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("round expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_round, &[n], "math_round_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_round,
+                    &[n],
+                    "math_round_call",
+                )))
             }
             "sin" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sin expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_sin, &[n], "math_sin_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_sin,
+                    &[n],
+                    "math_sin_call",
+                )))
             }
             "cos" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("cos expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_cos, &[n], "math_cos_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_cos,
+                    &[n],
+                    "math_cos_call",
+                )))
             }
             "tan" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tan expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_tan, &[n], "math_tan_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_tan,
+                    &[n],
+                    "math_tan_call",
+                )))
             }
             "ln" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ln expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_ln, &[n], "math_ln_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_ln,
+                    &[n],
+                    "math_ln_call",
+                )))
             }
             "log10" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("log10 expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_log10, &[n], "math_log10_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_log10,
+                    &[n],
+                    "math_log10_call",
+                )))
             }
             "exp" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("exp expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_exp, &[n], "math_exp_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_exp,
+                    &[n],
+                    "math_exp_call",
+                )))
             }
             "asin" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("asin expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_asin, &[n], "math_asin_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_asin,
+                    &[n],
+                    "math_asin_call",
+                )))
             }
             "acos" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("acos expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_acos, &[n], "math_acos_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_acos,
+                    &[n],
+                    "math_acos_call",
+                )))
             }
             "atan" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("atan expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_atan, &[n], "math_atan_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_atan,
+                    &[n],
+                    "math_atan_call",
+                )))
             }
             "sinh" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sinh expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_sinh, &[n], "math_sinh_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_sinh,
+                    &[n],
+                    "math_sinh_call",
+                )))
             }
             "cosh" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("cosh expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_cosh, &[n], "math_cosh_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_cosh,
+                    &[n],
+                    "math_cosh_call",
+                )))
             }
             "tanh" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tanh expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_tanh, &[n], "math_tanh_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_tanh,
+                    &[n],
+                    "math_tanh_call",
+                )))
             }
             "trunc" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("trunc expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_trunc, &[n], "math_trunc_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_trunc,
+                    &[n],
+                    "math_trunc_call",
+                )))
             }
             "sign" | "signum" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sign expects one argument", span));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.math_sign, &[n], "math_sign_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_sign,
+                    &[n],
+                    "math_sign_call",
+                )))
             }
-            // Math functions - binary
+
             "pow" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("pow expects two arguments (base, exponent)", span));
+                    return Err(Diagnostic::new(
+                        "pow expects two arguments (base, exponent)",
+                        span,
+                    ));
                 }
                 let base = self.emit_expression(ctx, &args[0])?;
                 let exp = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.math_pow, &[base, exp], "math_pow_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_pow,
+                    &[base, exp],
+                    "math_pow_call",
+                )))
             }
             "min" => {
                 if args.len() != 2 {
@@ -982,7 +1314,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.math_min, &[a, b], "math_min_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_min,
+                    &[a, b],
+                    "math_min_call",
+                )))
             }
             "max" => {
                 if args.len() != 2 {
@@ -990,7 +1326,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.math_max, &[a, b], "math_max_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_max,
+                    &[a, b],
+                    "math_max_call",
+                )))
             }
             "atan2" => {
                 if args.len() != 2 {
@@ -998,199 +1338,355 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let y = self.emit_expression(ctx, &args[0])?;
                 let x = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.math_atan2, &[y, x], "math_atan2_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.math_atan2,
+                    &[y, x],
+                    "math_atan2_call",
+                )))
             }
-            // Process/environment
-            "process_args" | "args" => {
-                Ok(Some(self.call_bridged(self.runtime.process_args, &[], "process_args_call")))
-            }
+
+            "process_args" | "args" => Ok(Some(self.call_bridged(
+                self.runtime.process_args,
+                &[],
+                "process_args_call",
+            ))),
             "process_exit" | "exit" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("exit expects one argument (exit code)", span));
+                    return Err(Diagnostic::new(
+                        "exit expects one argument (exit code)",
+                        span,
+                    ));
                 }
                 let code = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.process_exit, &[code], "process_exit_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.process_exit,
+                    &[code],
+                    "process_exit_call",
+                )))
             }
             "env_get" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("env_get expects one argument", span));
                 }
                 let name_val = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.env_get, &[name_val], "env_get_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.env_get,
+                    &[name_val],
+                    "env_get_call",
+                )))
             }
             "env_set" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("env_set expects two arguments (name, value)", span));
+                    return Err(Diagnostic::new(
+                        "env_set expects two arguments (name, value)",
+                        span,
+                    ));
                 }
                 let name_val = self.emit_expression(ctx, &args[0])?;
                 let val = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.env_set, &[name_val, val], "env_set_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.env_set,
+                    &[name_val, val],
+                    "env_set_call",
+                )))
             }
-            // File I/O extensions
+
             "fs_append" => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new("fs_append expects path and data", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
                 let data = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_append, &[path, data], "fs_append_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_append,
+                    &[path, data],
+                    "fs_append_call",
+                )))
             }
             "fs_read_dir" | "read_dir" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_read_dir expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_read_dir, &[path], "fs_read_dir_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_read_dir,
+                    &[path],
+                    "fs_read_dir_call",
+                )))
             }
             "fs_mkdir" | "mkdir" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_mkdir expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_mkdir, &[path], "fs_mkdir_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_mkdir,
+                    &[path],
+                    "fs_mkdir_call",
+                )))
             }
             "fs_delete" | "delete" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_delete expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_delete, &[path], "fs_delete_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_delete,
+                    &[path],
+                    "fs_delete_call",
+                )))
             }
             "fs_is_dir" | "is_dir" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("fs_is_dir expects one argument", span));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_is_dir, &[path], "fs_is_dir_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_is_dir,
+                    &[path],
+                    "fs_is_dir_call",
+                )))
             }
-            "stdin_read_line" | "read_line" => {
-                Ok(Some(self.call_bridged(self.runtime.stdin_read_line, &[], "stdin_read_line_call")))
-            }
-            // L2.4: std.io enhancements
+            "stdin_read_line" | "read_line" => Ok(Some(self.call_bridged(
+                self.runtime.stdin_read_line,
+                &[],
+                "stdin_read_line_call",
+            ))),
+
             "stderr_write" | "eprint" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("stderr_write expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "stderr_write expects exactly one argument",
+                        span,
+                    ));
                 }
                 let msg = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.stderr_write, &[msg], "stderr_write_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.stderr_write,
+                    &[msg],
+                    "stderr_write_call",
+                )))
             }
             "fs_size" | "file_size" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("fs_size expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "fs_size expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_size, &[path], "fs_size_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_size,
+                    &[path],
+                    "fs_size_call",
+                )))
             }
             "fs_rename" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("fs_rename expects two arguments (old, new)", span));
+                    return Err(Diagnostic::new(
+                        "fs_rename expects two arguments (old, new)",
+                        span,
+                    ));
                 }
                 let old = self.emit_expression(ctx, &args[0])?;
                 let new = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_rename, &[old, new], "fs_rename_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_rename,
+                    &[old, new],
+                    "fs_rename_call",
+                )))
             }
             "fs_copy" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("fs_copy expects two arguments (src, dst)", span));
+                    return Err(Diagnostic::new(
+                        "fs_copy expects two arguments (src, dst)",
+                        span,
+                    ));
                 }
                 let src = self.emit_expression(ctx, &args[0])?;
                 let dst = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_copy, &[src, dst], "fs_copy_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_copy,
+                    &[src, dst],
+                    "fs_copy_call",
+                )))
             }
             "fs_mkdirs" | "make_dirs" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("fs_mkdirs expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "fs_mkdirs expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.fs_mkdirs, &[path], "fs_mkdirs_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.fs_mkdirs,
+                    &[path],
+                    "fs_mkdirs_call",
+                )))
             }
-            "fs_temp_dir" | "temp_dir" => {
-                Ok(Some(self.call_bridged(self.runtime.fs_temp_dir, &[], "fs_temp_dir_call")))
-            }
-            // L2.5: std.process enhancements
+            "fs_temp_dir" | "temp_dir" => Ok(Some(self.call_bridged(
+                self.runtime.fs_temp_dir,
+                &[],
+                "fs_temp_dir_call",
+            ))),
+
             "process_exec" | "exec" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("process_exec expects two arguments (cmd, args_list)", span));
+                    return Err(Diagnostic::new(
+                        "process_exec expects two arguments (cmd, args_list)",
+                        span,
+                    ));
                 }
                 let cmd = self.emit_expression(ctx, &args[0])?;
                 let args_val = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.process_exec, &[cmd, args_val], "process_exec_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.process_exec,
+                    &[cmd, args_val],
+                    "process_exec_call",
+                )))
             }
-            "process_cwd" | "cwd" => {
-                Ok(Some(self.call_bridged(self.runtime.process_cwd, &[], "process_cwd_call")))
-            }
+            "process_cwd" | "cwd" => Ok(Some(self.call_bridged(
+                self.runtime.process_cwd,
+                &[],
+                "process_cwd_call",
+            ))),
             "process_chdir" | "chdir" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("process_chdir expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "process_chdir expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.process_chdir, &[path], "process_chdir_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.process_chdir,
+                    &[path],
+                    "process_chdir_call",
+                )))
             }
-            "process_pid" => {
-                Ok(Some(self.call_bridged(self.runtime.process_pid, &[], "process_pid_call")))
-            }
-            "process_hostname" | "hostname" => {
-                Ok(Some(self.call_bridged(self.runtime.process_hostname, &[], "process_hostname_call")))
-            }
-            // L4.2: std.path operations
+            "process_pid" => Ok(Some(self.call_bridged(
+                self.runtime.process_pid,
+                &[],
+                "process_pid_call",
+            ))),
+            "process_hostname" | "hostname" => Ok(Some(self.call_bridged(
+                self.runtime.process_hostname,
+                &[],
+                "process_hostname_call",
+            ))),
+
             "path_normalize" | "normalize" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("path_normalize expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "path_normalize expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.path_normalize, &[path], "path_normalize_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.path_normalize,
+                    &[path],
+                    "path_normalize_call",
+                )))
             }
             "path_resolve" | "resolve" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("path_resolve expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "path_resolve expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.path_resolve, &[path], "path_resolve_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.path_resolve,
+                    &[path],
+                    "path_resolve_call",
+                )))
             }
             "path_is_absolute" | "is_absolute" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("path_is_absolute expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "path_is_absolute expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.path_is_absolute, &[path], "path_is_absolute_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.path_is_absolute,
+                    &[path],
+                    "path_is_absolute_call",
+                )))
             }
             "path_parent" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("path_parent expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "path_parent expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.path_parent, &[path], "path_parent_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.path_parent,
+                    &[path],
+                    "path_parent_call",
+                )))
             }
             "path_stem" | "stem" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("path_stem expects exactly one argument", span));
+                    return Err(Diagnostic::new(
+                        "path_stem expects exactly one argument",
+                        span,
+                    ));
                 }
                 let path = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.path_stem, &[path], "path_stem_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.path_stem,
+                    &[path],
+                    "path_stem_call",
+                )))
             }
-            // List extensions
+
             "list_contains" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("list_contains expects list and value", span));
+                    return Err(Diagnostic::new(
+                        "list_contains expects list and value",
+                        span,
+                    ));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.list_contains, &[list, needle], "list_contains_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_contains,
+                    &[list, needle],
+                    "list_contains_call",
+                )))
             }
             "list_index_of" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("list_index_of expects list and value", span));
+                    return Err(Diagnostic::new(
+                        "list_index_of expects list and value",
+                        span,
+                    ));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let needle = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.list_index_of, &[list, needle], "list_index_of_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_index_of,
+                    &[list, needle],
+                    "list_index_of_call",
+                )))
             }
             "list_reverse" | "reverse" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list_reverse expects one argument", span));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.list_reverse, &[list], "list_reverse_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_reverse,
+                    &[list],
+                    "list_reverse_call",
+                )))
             }
             "list_slice" => {
                 if args.len() != 3 {
@@ -1199,22 +1695,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let list = self.emit_expression(ctx, &args[0])?;
                 let start = self.emit_expression(ctx, &args[1])?;
                 let end = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.list_slice, &[list, start, end], "list_slice_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_slice,
+                    &[list, start, end],
+                    "list_slice_call",
+                )))
             }
             "list_sort" | "sort" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("list_sort expects one argument", span));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.list_sort, &[list], "list_sort_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_sort,
+                    &[list],
+                    "list_sort_call",
+                )))
             }
             "list_join" | "join" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("list_join expects list and separator", span));
+                    return Err(Diagnostic::new(
+                        "list_join expects list and separator",
+                        span,
+                    ));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let sep = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.list_join, &[list, sep], "list_join_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_join,
+                    &[list, sep],
+                    "list_join_call",
+                )))
             }
             "list_concat" => {
                 if args.len() != 2 {
@@ -1222,15 +1733,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.list_concat, &[a, b], "list_concat_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_concat,
+                    &[a, b],
+                    "list_concat_call",
+                )))
             }
-            // Map extensions
+
             "map_keys" | "keys" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("map_keys expects one argument", span));
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.map_keys, &[map], "map_keys_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.map_keys,
+                    &[map],
+                    "map_keys_call",
+                )))
             }
             "map_remove" => {
                 if args.len() != 2 {
@@ -1238,21 +1757,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
                 let key = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.map_remove, &[map, key], "map_remove_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.map_remove,
+                    &[map, key],
+                    "map_remove_call",
+                )))
             }
             "map_values" | "values" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("map_values expects one argument", span));
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.map_values, &[map], "map_values_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.map_values,
+                    &[map],
+                    "map_values_call",
+                )))
             }
             "map_entries" | "entries" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("map_entries expects one argument", span));
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.map_entries, &[map], "map_entries_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.map_entries,
+                    &[map],
+                    "map_entries_call",
+                )))
             }
             "map_has_key" | "has_key" => {
                 if args.len() != 2 {
@@ -1260,7 +1791,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let map = self.emit_expression(ctx, &args[0])?;
                 let key = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.map_has_key, &[map, key], "map_has_key_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.map_has_key,
+                    &[map, key],
+                    "map_has_key_call",
+                )))
             }
             "map_merge" | "merge" => {
                 if args.len() != 2 {
@@ -1268,110 +1803,162 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.map_merge, &[a, b], "map_merge_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.map_merge,
+                    &[a, b],
+                    "map_merge_call",
+                )))
             }
-            // Bytes extensions
+
             "bytes_get" => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new("bytes_get expects bytes and index", span));
                 }
                 let b = self.emit_expression(ctx, &args[0])?;
                 let idx = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_get, &[b, idx], "bytes_get_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_get,
+                    &[b, idx],
+                    "bytes_get_call",
+                )))
             }
             "bytes_from_string" | "to_bytes" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("bytes_from_string expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "bytes_from_string expects one argument",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_from_string, &[s], "bytes_from_string_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_from_string,
+                    &[s],
+                    "bytes_from_string_call",
+                )))
             }
             "bytes_to_string" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("bytes_to_string expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "bytes_to_string expects one argument",
+                        span,
+                    ));
                 }
                 let b = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_to_string, &[b], "bytes_to_string_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_to_string,
+                    &[b],
+                    "bytes_to_string_call",
+                )))
             }
             "bytes_slice" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("bytes_slice expects bytes, start, end", span));
+                    return Err(Diagnostic::new(
+                        "bytes_slice expects bytes, start, end",
+                        span,
+                    ));
                 }
                 let b = self.emit_expression(ctx, &args[0])?;
                 let start = self.emit_expression(ctx, &args[1])?;
                 let end = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_slice_val, &[b, start, end], "bytes_slice_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_slice_val,
+                    &[b, start, end],
+                    "bytes_slice_call",
+                )))
             }
-            // Type reflection
+
             "type_of" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("type_of expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.type_of, &[v], "type_of_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.type_of,
+                    &[v],
+                    "type_of_call",
+                )))
             }
-            // Debug introspection (L4.1)
+
             "inspect" | "debug_inspect" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("inspect expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.debug_inspect, &[v], "inspect_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.debug_inspect,
+                    &[v],
+                    "inspect_call",
+                )))
             }
             "time_ns" | "debug_time_ns" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("time_ns takes no arguments", span));
                 }
-                let result = self.call_runtime_ptr(
-                    self.runtime.debug_time_ns,
-                    &[],
-                    "time_ns_call",
-                );
+                let result = self.call_runtime_ptr(self.runtime.debug_time_ns, &[], "time_ns_call");
                 Ok(Some(self.ptr_to_nb(result)))
             }
-            // Character operations
+
             "ord" | "string_ord" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ord expects one string argument", span));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_ord, &[s], "ord_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_ord,
+                    &[s],
+                    "ord_call",
+                )))
             }
             "chr" | "string_chr" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("chr expects one number argument", span));
                 }
                 let code = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_chr, &[code], "chr_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_chr,
+                    &[code],
+                    "chr_call",
+                )))
             }
             "string_compare" | "strcmp" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_compare expects two string arguments", span));
+                    return Err(Diagnostic::new(
+                        "string_compare expects two string arguments",
+                        span,
+                    ));
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_compare, &[a, b], "strcmp_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_compare,
+                    &[a, b],
+                    "strcmp_call",
+                )))
             }
-            // Error checking builtins
+
             "is_err" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("is_err expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
                 let v_ptr = self.nb_to_ptr(v);
-                let is_err = self.builder
+                let is_err = self
+                    .builder
                     .build_call(self.runtime.is_err, &[v_ptr.into()], "is_err_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
                     .unwrap()
                     .into_int_value();
-                let is_err_bool = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    is_err,
-                    self.context.i8_type().const_zero(),
-                    "is_err_bool",
-                ).unwrap();
+                let is_err_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_err,
+                        self.context.i8_type().const_zero(),
+                        "is_err_bool",
+                    )
+                    .unwrap();
                 Ok(Some(self.wrap_bool(is_err_bool)))
             }
             "is_ok" => {
@@ -1380,19 +1967,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
                 let v_ptr = self.nb_to_ptr(v);
-                let is_ok = self.builder
+                let is_ok = self
+                    .builder
                     .build_call(self.runtime.is_ok, &[v_ptr.into()], "is_ok_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
                     .unwrap()
                     .into_int_value();
-                let is_ok_bool = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    is_ok,
-                    self.context.i8_type().const_zero(),
-                    "is_ok_bool",
-                ).unwrap();
+                let is_ok_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_ok,
+                        self.context.i8_type().const_zero(),
+                        "is_ok_bool",
+                    )
+                    .unwrap();
                 Ok(Some(self.wrap_bool(is_ok_bool)))
             }
             "is_absent" => {
@@ -1401,19 +1992,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
                 let v_ptr = self.nb_to_ptr(v);
-                let is_absent = self.builder
+                let is_absent = self
+                    .builder
                     .build_call(self.runtime.is_absent, &[v_ptr.into()], "is_absent_check")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
                     .unwrap()
                     .into_int_value();
-                let is_absent_bool = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    is_absent,
-                    self.context.i8_type().const_zero(),
-                    "is_absent_bool",
-                ).unwrap();
+                let is_absent_bool = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        is_absent,
+                        self.context.i8_type().const_zero(),
+                        "is_absent_bool",
+                    )
+                    .unwrap();
                 Ok(Some(self.wrap_bool(is_absent_bool)))
             }
             "error_name" => {
@@ -1421,7 +2016,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("error_name expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.error_name, &[v], "error_name_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.error_name,
+                    &[v],
+                    "error_name_call",
+                )))
             }
             "error_code" => {
                 if args.len() != 1 {
@@ -1429,157 +2028,246 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
                 let v_ptr = self.nb_to_ptr(v);
-                let code_i32 = self.builder
+                let code_i32 = self
+                    .builder
                     .build_call(self.runtime.error_code, &[v_ptr.into()], "error_code_call")
                     .unwrap()
                     .try_as_basic_value()
                     .left()
                     .unwrap()
                     .into_int_value();
-                // Convert i32 to f64 for wrap_number
-                let code_f64 = self.builder.build_signed_int_to_float(
-                    code_i32,
-                    self.context.f64_type(),
-                    "code_f64",
-                ).unwrap();
+
+                let code_f64 = self
+                    .builder
+                    .build_signed_int_to_float(code_i32, self.context.f64_type(), "code_f64")
+                    .unwrap();
                 Ok(Some(self.wrap_number(code_f64)))
             }
-            // JSON operations (SL-8)
+
             "json_parse" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("json_parse expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.json_parse, &[v], "json_parse_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.json_parse,
+                    &[v],
+                    "json_parse_call",
+                )))
             }
             "json_serialize" | "json_stringify" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("json_serialize expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.json_serialize, &[v], "json_serialize_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.json_serialize,
+                    &[v],
+                    "json_serialize_call",
+                )))
             }
             "json_serialize_pretty" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("json_serialize_pretty expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "json_serialize_pretty expects one argument",
+                        span,
+                    ));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.json_serialize_pretty, &[v], "json_pretty_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.json_serialize_pretty,
+                    &[v],
+                    "json_pretty_call",
+                )))
             }
-            // Random operations (L2.1)
-            "random" => {
-                Ok(Some(self.call_bridged(self.runtime.random, &[], "random_call")))
-            }
+
+            "random" => Ok(Some(self.call_bridged(
+                self.runtime.random,
+                &[],
+                "random_call",
+            ))),
             "random_int" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("random_int expects two arguments (min, max)", span));
+                    return Err(Diagnostic::new(
+                        "random_int expects two arguments (min, max)",
+                        span,
+                    ));
                 }
                 let min_v = self.emit_expression(ctx, &args[0])?;
                 let max_v = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.random_int, &[min_v, max_v], "random_int_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.random_int,
+                    &[min_v, max_v],
+                    "random_int_call",
+                )))
             }
             "random_seed" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("random_seed expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.random_seed, &[v], "random_seed_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.random_seed,
+                    &[v],
+                    "random_seed_call",
+                )))
             }
-            // Sleep (L2.3)
+
             "time_sleep" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("time_sleep expects one argument (milliseconds)", span));
+                    return Err(Diagnostic::new(
+                        "time_sleep expects one argument (milliseconds)",
+                        span,
+                    ));
                 }
                 let ms = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.sleep, &[ms], "sleep_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.sleep,
+                    &[ms],
+                    "sleep_call",
+                )))
             }
-            // Time operations (SL-9)
-            "time_now" => {
-                Ok(Some(self.call_bridged(self.runtime.time_now, &[], "time_now_call")))
-            }
-            "time_timestamp" => {
-                Ok(Some(self.call_bridged(self.runtime.time_timestamp, &[], "time_ts_call")))
-            }
+
+            "time_now" => Ok(Some(self.call_bridged(
+                self.runtime.time_now,
+                &[],
+                "time_now_call",
+            ))),
+            "time_timestamp" => Ok(Some(self.call_bridged(
+                self.runtime.time_timestamp,
+                &[],
+                "time_ts_call",
+            ))),
             "time_format_iso" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("time_format_iso expects one argument", span));
+                    return Err(Diagnostic::new(
+                        "time_format_iso expects one argument",
+                        span,
+                    ));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_format_iso, &[v], "time_fmt_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_format_iso,
+                    &[v],
+                    "time_fmt_call",
+                )))
             }
             "time_year" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_year expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_year, &[v], "time_year_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_year,
+                    &[v],
+                    "time_year_call",
+                )))
             }
             "time_month" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_month expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_month, &[v], "time_month_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_month,
+                    &[v],
+                    "time_month_call",
+                )))
             }
             "time_day" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_day expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_day, &[v], "time_day_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_day,
+                    &[v],
+                    "time_day_call",
+                )))
             }
             "time_hour" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_hour expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_hour, &[v], "time_hour_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_hour,
+                    &[v],
+                    "time_hour_call",
+                )))
             }
             "time_minute" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_minute expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_minute, &[v], "time_min_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_minute,
+                    &[v],
+                    "time_min_call",
+                )))
             }
             "time_second" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("time_second expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.time_second, &[v], "time_sec_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.time_second,
+                    &[v],
+                    "time_sec_call",
+                )))
             }
-            // String lines
+
             "string_lines" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("string_lines expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_lines, &[v], "str_lines_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_lines,
+                    &[v],
+                    "str_lines_call",
+                )))
             }
-            // Sort
+
             "sort_natural" | "list_sort_natural" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sort_natural expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.list_sort_natural, &[v], "sort_nat_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.list_sort_natural,
+                    &[v],
+                    "sort_nat_call",
+                )))
             }
-            // Bytes extensions
+
             "bytes_from_hex" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("bytes_from_hex expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_from_hex, &[v], "bytes_hex_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_from_hex,
+                    &[v],
+                    "bytes_hex_call",
+                )))
             }
             "bytes_contains" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("bytes_contains expects two arguments", span));
+                    return Err(Diagnostic::new(
+                        "bytes_contains expects two arguments",
+                        span,
+                    ));
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_contains, &[a, b], "bytes_contains_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_contains,
+                    &[a, b],
+                    "bytes_contains_call",
+                )))
             }
             "bytes_find" => {
                 if args.len() != 2 {
@@ -1587,307 +2275,517 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.bytes_find, &[a, b], "bytes_find_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.bytes_find,
+                    &[a, b],
+                    "bytes_find_call",
+                )))
             }
-            // Encoding
+
             "base64_encode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("base64_encode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.base64_encode, &[v], "b64_enc_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.base64_encode,
+                    &[v],
+                    "b64_enc_call",
+                )))
             }
             "base64_decode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("base64_decode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.base64_decode, &[v], "b64_dec_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.base64_decode,
+                    &[v],
+                    "b64_dec_call",
+                )))
             }
             "hex_encode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("hex_encode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.hex_encode, &[v], "hex_enc_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.hex_encode,
+                    &[v],
+                    "hex_enc_call",
+                )))
             }
             "hex_decode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("hex_decode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.hex_decode, &[v], "hex_dec_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.hex_decode,
+                    &[v],
+                    "hex_dec_call",
+                )))
             }
-            // URL encoding (L3.2)
+
             "url_encode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("url_encode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.url_encode, &[v], "url_enc_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.url_encode,
+                    &[v],
+                    "url_enc_call",
+                )))
             }
             "url_decode" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("url_decode expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.url_decode, &[v], "url_dec_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.url_decode,
+                    &[v],
+                    "url_dec_call",
+                )))
             }
-            // TCP networking
+
             "tcp_listen" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("tcp_listen expects two arguments (host, port)", span));
+                    return Err(Diagnostic::new(
+                        "tcp_listen expects two arguments (host, port)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let p = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.tcp_listen, &[h, p], "tcp_listen_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.tcp_listen,
+                    &[h, p],
+                    "tcp_listen_call",
+                )))
             }
             "tcp_accept" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tcp_accept expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.tcp_accept, &[v], "tcp_accept_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.tcp_accept,
+                    &[v],
+                    "tcp_accept_call",
+                )))
             }
             "tcp_connect" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("tcp_connect expects two arguments (host, port)", span));
+                    return Err(Diagnostic::new(
+                        "tcp_connect expects two arguments (host, port)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let p = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.tcp_connect, &[h, p], "tcp_connect_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.tcp_connect,
+                    &[h, p],
+                    "tcp_connect_call",
+                )))
             }
             "tcp_read" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("tcp_read expects two arguments (conn, n)", span));
+                    return Err(Diagnostic::new(
+                        "tcp_read expects two arguments (conn, n)",
+                        span,
+                    ));
                 }
                 let c = self.emit_expression(ctx, &args[0])?;
                 let n = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.tcp_read, &[c, n], "tcp_read_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.tcp_read,
+                    &[c, n],
+                    "tcp_read_call",
+                )))
             }
             "tcp_write" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("tcp_write expects two arguments (conn, data)", span));
+                    return Err(Diagnostic::new(
+                        "tcp_write expects two arguments (conn, data)",
+                        span,
+                    ));
                 }
                 let c = self.emit_expression(ctx, &args[0])?;
                 let d = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.tcp_write, &[c, d], "tcp_write_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.tcp_write,
+                    &[c, d],
+                    "tcp_write_call",
+                )))
             }
             "tcp_close" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("tcp_close expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.tcp_close, &[v], "tcp_close_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.tcp_close,
+                    &[v],
+                    "tcp_close_call",
+                )))
             }
-            // HTTP client (L3.1)
+
             "http_get" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("http_get expects one argument (url)", span));
                 }
                 let u = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.http_get, &[u], "http_get_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.http_get,
+                    &[u],
+                    "http_get_call",
+                )))
             }
             "http_post" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("http_post expects two arguments (url, body)", span));
+                    return Err(Diagnostic::new(
+                        "http_post expects two arguments (url, body)",
+                        span,
+                    ));
                 }
                 let u = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.http_post, &[u, b], "http_post_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.http_post,
+                    &[u, b],
+                    "http_post_call",
+                )))
             }
             "http_request" => {
                 if args.len() != 4 {
-                    return Err(Diagnostic::new("http_request expects four arguments (method, url, headers, body)", span));
+                    return Err(Diagnostic::new(
+                        "http_request expects four arguments (method, url, headers, body)",
+                        span,
+                    ));
                 }
                 let m = self.emit_expression(ctx, &args[0])?;
                 let u = self.emit_expression(ctx, &args[1])?;
                 let h = self.emit_expression(ctx, &args[2])?;
                 let b = self.emit_expression(ctx, &args[3])?;
-                Ok(Some(self.call_bridged(self.runtime.http_request, &[m, u, h, b], "http_request_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.http_request,
+                    &[m, u, h, b],
+                    "http_request_call",
+                )))
             }
-            // UDP networking (L3.3)
+
             "udp_bind" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("udp_bind expects two arguments (host, port)", span));
+                    return Err(Diagnostic::new(
+                        "udp_bind expects two arguments (host, port)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let p = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.udp_bind, &[h, p], "udp_bind_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.udp_bind,
+                    &[h, p],
+                    "udp_bind_call",
+                )))
             }
             "udp_send" => {
                 if args.len() != 4 {
-                    return Err(Diagnostic::new("udp_send expects four arguments (handle, data, dest_host, dest_port)", span));
+                    return Err(Diagnostic::new(
+                        "udp_send expects four arguments (handle, data, dest_host, dest_port)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let d = self.emit_expression(ctx, &args[1])?;
                 let dh = self.emit_expression(ctx, &args[2])?;
                 let dp = self.emit_expression(ctx, &args[3])?;
-                Ok(Some(self.call_bridged(self.runtime.udp_send, &[h, d, dh, dp], "udp_send_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.udp_send,
+                    &[h, d, dh, dp],
+                    "udp_send_call",
+                )))
             }
             "udp_recv" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("udp_recv expects two arguments (handle, max_bytes)", span));
+                    return Err(Diagnostic::new(
+                        "udp_recv expects two arguments (handle, max_bytes)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let n = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.udp_recv, &[h, n], "udp_recv_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.udp_recv,
+                    &[h, n],
+                    "udp_recv_call",
+                )))
             }
             "udp_close" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("udp_close expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.udp_close, &[v], "udp_close_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.udp_close,
+                    &[v],
+                    "udp_close_call",
+                )))
             }
-            // Cryptography (L3.4)
+
             "sha256" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sha256 expects one argument (data)", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.sha256, &[v], "sha256_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.sha256,
+                    &[v],
+                    "sha256_call",
+                )))
             }
             "hmac_sha256" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("hmac_sha256 expects two arguments (key, message)", span));
+                    return Err(Diagnostic::new(
+                        "hmac_sha256 expects two arguments (key, message)",
+                        span,
+                    ));
                 }
                 let k = self.emit_expression(ctx, &args[0])?;
                 let m = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.hmac_sha256, &[k, m], "hmac_sha256_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.hmac_sha256,
+                    &[k, m],
+                    "hmac_sha256_call",
+                )))
             }
             "aes256_encrypt" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("aes256_encrypt expects three arguments (plaintext, key_hex, iv_hex)", span));
+                    return Err(Diagnostic::new(
+                        "aes256_encrypt expects three arguments (plaintext, key_hex, iv_hex)",
+                        span,
+                    ));
                 }
                 let p = self.emit_expression(ctx, &args[0])?;
                 let k = self.emit_expression(ctx, &args[1])?;
                 let iv = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.aes256_encrypt, &[p, k, iv], "aes256_encrypt_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.aes256_encrypt,
+                    &[p, k, iv],
+                    "aes256_encrypt_call",
+                )))
             }
             "aes256_decrypt" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("aes256_decrypt expects three arguments (ciphertext_hex, key_hex, iv_hex)", span));
+                    return Err(Diagnostic::new(
+                        "aes256_decrypt expects three arguments (ciphertext_hex, key_hex, iv_hex)",
+                        span,
+                    ));
                 }
                 let c = self.emit_expression(ctx, &args[0])?;
                 let k = self.emit_expression(ctx, &args[1])?;
                 let iv = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.aes256_decrypt, &[c, k, iv], "aes256_decrypt_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.aes256_decrypt,
+                    &[c, k, iv],
+                    "aes256_decrypt_call",
+                )))
             }
             "random_bytes" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("random_bytes expects one argument (count)", span));
+                    return Err(Diagnostic::new(
+                        "random_bytes expects one argument (count)",
+                        span,
+                    ));
                 }
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.random_bytes, &[n], "random_bytes_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.random_bytes,
+                    &[n],
+                    "random_bytes_call",
+                )))
             }
-            // Actor monitoring (AC-2)
+
             "monitor" | "actor_monitor" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("monitor expects two arguments (watcher, watched)", span));
+                    return Err(Diagnostic::new(
+                        "monitor expects two arguments (watcher, watched)",
+                        span,
+                    ));
                 }
                 let w = self.emit_expression(ctx, &args[0])?;
                 let t = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.actor_monitor, &[w, t], "monitor_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.actor_monitor,
+                    &[w, t],
+                    "monitor_call",
+                )))
             }
             "demonitor" | "actor_demonitor" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("demonitor expects two arguments (watcher, watched)", span));
+                    return Err(Diagnostic::new(
+                        "demonitor expects two arguments (watcher, watched)",
+                        span,
+                    ));
                 }
                 let w = self.emit_expression(ctx, &args[0])?;
                 let t = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.actor_demonitor, &[w, t], "demonitor_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.actor_demonitor,
+                    &[w, t],
+                    "demonitor_call",
+                )))
             }
-            // Graceful stop (AC-4)
+
             "graceful_stop" | "actor_graceful_stop" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("graceful_stop expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.actor_graceful_stop, &[v], "graceful_stop_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.actor_graceful_stop,
+                    &[v],
+                    "graceful_stop_call",
+                )))
             }
-            // StringBuilder / optimized string ops (L1.1)
+
             "sb_new" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("sb_new expects no arguments", span));
                 }
-                Ok(Some(self.call_bridged(self.runtime.sb_new, &[], "sb_new_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.sb_new,
+                    &[],
+                    "sb_new_call",
+                )))
             }
             "sb_push" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("sb_push expects 2 arguments (builder, string)", span));
+                    return Err(Diagnostic::new(
+                        "sb_push expects 2 arguments (builder, string)",
+                        span,
+                    ));
                 }
                 let sb = self.emit_expression(ctx, &args[0])?;
                 let s = self.emit_expression(ctx, &args[1])?;
                 let sb_ptr = self.nb_to_ptr(sb);
                 let s_ptr = self.nb_to_ptr(s);
-                self.call_runtime_void(self.runtime.sb_push, &[sb_ptr.into(), s_ptr.into()], "sb_push_call");
-                // Return unit
+                self.call_runtime_void(
+                    self.runtime.sb_push,
+                    &[sb_ptr.into(), s_ptr.into()],
+                    "sb_push_call",
+                );
+
                 let unit = self.call_nb(self.runtime.nb_make_unit, &[], "sb_push_unit");
                 Ok(Some(unit))
             }
             "sb_finish" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("sb_finish expects 1 argument (builder)", span));
+                    return Err(Diagnostic::new(
+                        "sb_finish expects 1 argument (builder)",
+                        span,
+                    ));
                 }
                 let sb = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.sb_finish, &[sb], "sb_finish_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.sb_finish,
+                    &[sb],
+                    "sb_finish_call",
+                )))
             }
             "sb_len" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sb_len expects 1 argument (builder)", span));
                 }
                 let sb = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.sb_len, &[sb], "sb_len_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.sb_len,
+                    &[sb],
+                    "sb_len_call",
+                )))
             }
             "string_join_list" | "join_list" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_join_list expects 2 arguments (list, separator)", span));
+                    return Err(Diagnostic::new(
+                        "string_join_list expects 2 arguments (list, separator)",
+                        span,
+                    ));
                 }
                 let list = self.emit_expression(ctx, &args[0])?;
                 let sep = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_join_list, &[list, sep], "join_list_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_join_list,
+                    &[list, sep],
+                    "join_list_call",
+                )))
             }
             "string_repeat" | "repeat_string" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("string_repeat expects 2 arguments (string, count)", span));
+                    return Err(Diagnostic::new(
+                        "string_repeat expects 2 arguments (string, count)",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
                 let n = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.string_repeat, &[s, n], "string_repeat_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_repeat,
+                    &[s, n],
+                    "string_repeat_call",
+                )))
             }
             "string_reverse" | "reverse_string" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("string_reverse expects 1 argument (string)", span));
+                    return Err(Diagnostic::new(
+                        "string_reverse expects 1 argument (string)",
+                        span,
+                    ));
                 }
                 let s = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.string_reverse, &[s], "string_reverse_call")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.string_reverse,
+                    &[s],
+                    "string_reverse_call",
+                )))
             }
-            // Range helper (Phase D)
-            "range" => {
-                match args.len() {
-                    1 => {
-                        let zero_f64 = self.f64_type.const_float(0.0);
-                        let zero = self.wrap_number(zero_f64);
-                        let n = self.emit_expression(ctx, &args[0])?;
-                        Ok(Some(self.call_bridged(self.runtime.list_range, &[zero, n], "range_call")))
-                    }
-                    2 => {
-                        let start = self.emit_expression(ctx, &args[0])?;
-                        let end = self.emit_expression(ctx, &args[1])?;
-                        Ok(Some(self.call_bridged(self.runtime.list_range, &[start, end], "range_call")))
-                    }
-                    _ => Err(Diagnostic::new("range expects 1 or 2 arguments", span)),
+
+            "range" => match args.len() {
+                1 => {
+                    let zero_f64 = self.f64_type.const_float(0.0);
+                    let zero = self.wrap_number(zero_f64);
+                    let n = self.emit_expression(ctx, &args[0])?;
+                    Ok(Some(self.call_bridged(
+                        self.runtime.list_range,
+                        &[zero, n],
+                        "range_call",
+                    )))
                 }
-            }
-            // Regex operations (L2.2)
+                2 => {
+                    let start = self.emit_expression(ctx, &args[0])?;
+                    let end = self.emit_expression(ctx, &args[1])?;
+                    Ok(Some(self.call_bridged(
+                        self.runtime.list_range,
+                        &[start, end],
+                        "range_call",
+                    )))
+                }
+                _ => Err(Diagnostic::new("range expects 1 or 2 arguments", span)),
+            },
+
             "regex_match" => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new("regex_match expects (pattern, text)", span));
                 }
                 let pat = self.emit_expression(ctx, &args[0])?;
                 let txt = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.regex_match, &[pat, txt], "regex_match")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.regex_match,
+                    &[pat, txt],
+                    "regex_match",
+                )))
             }
             "regex_find" => {
                 if args.len() != 2 {
@@ -1895,24 +2793,42 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let pat = self.emit_expression(ctx, &args[0])?;
                 let txt = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.regex_find, &[pat, txt], "regex_find")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.regex_find,
+                    &[pat, txt],
+                    "regex_find",
+                )))
             }
             "regex_find_all" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("regex_find_all expects (pattern, text)", span));
+                    return Err(Diagnostic::new(
+                        "regex_find_all expects (pattern, text)",
+                        span,
+                    ));
                 }
                 let pat = self.emit_expression(ctx, &args[0])?;
                 let txt = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.regex_find_all, &[pat, txt], "regex_find_all")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.regex_find_all,
+                    &[pat, txt],
+                    "regex_find_all",
+                )))
             }
             "regex_replace" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("regex_replace expects (pattern, replacement, text)", span));
+                    return Err(Diagnostic::new(
+                        "regex_replace expects (pattern, replacement, text)",
+                        span,
+                    ));
                 }
                 let pat = self.emit_expression(ctx, &args[0])?;
                 let rep = self.emit_expression(ctx, &args[1])?;
                 let txt = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.regex_replace, &[pat, rep, txt], "regex_replace")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.regex_replace,
+                    &[pat, rep, txt],
+                    "regex_replace",
+                )))
             }
             "regex_split" => {
                 if args.len() != 2 {
@@ -1920,59 +2836,101 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let pat = self.emit_expression(ctx, &args[0])?;
                 let txt = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.regex_split, &[pat, txt], "regex_split")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.regex_split,
+                    &[pat, txt],
+                    "regex_split",
+                )))
             }
-            // Store secondary index operations (R3.7)
+
             "store_create_index" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("store_create_index expects (handle, field_name, kind)", span));
+                    return Err(Diagnostic::new(
+                        "store_create_index expects (handle, field_name, kind)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let f = self.emit_expression(ctx, &args[1])?;
                 let k = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.store_create_index, &[h, f, k], "store_create_index")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.store_create_index,
+                    &[h, f, k],
+                    "store_create_index",
+                )))
             }
             "store_drop_index" => {
                 if args.len() != 2 {
-                    return Err(Diagnostic::new("store_drop_index expects (handle, field_name)", span));
+                    return Err(Diagnostic::new(
+                        "store_drop_index expects (handle, field_name)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let f = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(self.runtime.store_drop_index, &[h, f], "store_drop_index")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.store_drop_index,
+                    &[h, f],
+                    "store_drop_index",
+                )))
             }
             "store_find_by_field" => {
                 if args.len() != 3 {
-                    return Err(Diagnostic::new("store_find_by_field expects (handle, field_name, value)", span));
+                    return Err(Diagnostic::new(
+                        "store_find_by_field expects (handle, field_name, value)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let f = self.emit_expression(ctx, &args[1])?;
                 let v = self.emit_expression(ctx, &args[2])?;
-                Ok(Some(self.call_bridged(self.runtime.store_find_by_field, &[h, f, v], "store_find_by_field")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.store_find_by_field,
+                    &[h, f, v],
+                    "store_find_by_field",
+                )))
             }
             "store_find_by_range" => {
                 if args.len() != 4 {
-                    return Err(Diagnostic::new("store_find_by_range expects (handle, field_name, min, max)", span));
+                    return Err(Diagnostic::new(
+                        "store_find_by_range expects (handle, field_name, min, max)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
                 let f = self.emit_expression(ctx, &args[1])?;
                 let mn = self.emit_expression(ctx, &args[2])?;
                 let mx = self.emit_expression(ctx, &args[3])?;
-                Ok(Some(self.call_bridged(self.runtime.store_find_by_range, &[h, f, mn, mx], "store_find_by_range")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.store_find_by_range,
+                    &[h, f, mn, mx],
+                    "store_find_by_range",
+                )))
             }
             "store_indexed_fields" => {
                 if args.len() != 1 {
-                    return Err(Diagnostic::new("store_indexed_fields expects (handle)", span));
+                    return Err(Diagnostic::new(
+                        "store_indexed_fields expects (handle)",
+                        span,
+                    ));
                 }
                 let h = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(self.runtime.store_indexed_fields, &[h], "store_indexed_fields")))
+                Ok(Some(self.call_bridged(
+                    self.runtime.store_indexed_fields,
+                    &[h],
+                    "store_indexed_fields",
+                )))
             }
             _ => {
-                // Check if it's a store/actor constructor (not arbitrary make_* functions)
                 if self.store_constructors.contains(name) {
                     let ctor_fn = self.functions[name];
                     let call = self.builder.build_call(ctor_fn, &[], "actor_ctor").unwrap();
-                    let handle = call.try_as_basic_value().left()
-                        .ok_or_else(|| Diagnostic::new("actor constructor produced no value", span))?
+                    let handle = call
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| {
+                            Diagnostic::new("actor constructor produced no value", span)
+                        })?
                         .into_int_value();
                     Ok(Some(handle))
                 } else {
@@ -1982,8 +2940,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// C3.2: Emit an inline map loop, directly embedding the lambda body
-    /// instead of creating a closure and calling the runtime `coral_list_map`.
     fn emit_inline_map(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -1995,12 +2951,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = ctx.function;
         let list_value = self.emit_expression(ctx, target)?;
 
-        // Get list length as f64
         let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "map_len");
         let len_f64 = self.value_to_number(len_nb);
 
-        // Create empty output list: coral_make_list(null, 0)
-        let null_ptr = self.runtime.value_ptr_type
+        let null_ptr = self
+            .runtime
+            .value_ptr_type
             .ptr_type(inkwell::AddressSpace::default())
             .const_null();
         let zero_usize = self.usize_type.const_int(0, false);
@@ -2011,30 +2967,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let out_list_nb = self.ptr_to_nb(out_list_ptr);
 
-        // Alloca for output list (mutated by push)
-        let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "map_out_alloca").unwrap();
+        let out_alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, "map_out_alloca")
+            .unwrap();
         self.builder.build_store(out_alloca, out_list_nb).unwrap();
 
-        // Counter alloca
-        let counter_alloca = self.builder.build_alloca(self.f64_type, "map_counter").unwrap();
-        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+        let counter_alloca = self
+            .builder
+            .build_alloca(self.f64_type, "map_counter")
+            .unwrap();
+        self.builder
+            .build_store(counter_alloca, self.f64_type.const_float(0.0))
+            .unwrap();
 
         let loop_header = self.context.append_basic_block(function, "map_cond");
         let loop_body = self.context.append_basic_block(function, "map_body");
         let loop_exit = self.context.append_basic_block(function, "map_exit");
 
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
-        // Header: check counter < length
         self.builder.position_at_end(loop_header);
-        let current = self.builder.build_load(self.f64_type, counter_alloca, "map_i")
-            .unwrap().into_float_value();
-        let is_done = self.builder.build_float_compare(
-            inkwell::FloatPredicate::OGE, current, len_f64, "map_done",
-        ).unwrap();
-        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+        let current = self
+            .builder
+            .build_load(self.f64_type, counter_alloca, "map_i")
+            .unwrap()
+            .into_float_value();
+        let is_done = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, current, len_f64, "map_done")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_done, loop_exit, loop_body)
+            .unwrap();
 
-        // Body: get element, emit lambda body, push result
         self.builder.position_at_end(loop_body);
         ctx.cse_cache.clear();
         let idx_nb = self.wrap_number(current);
@@ -2043,32 +3011,45 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let result = self.emit_block(ctx, body)?;
 
-        // Push result to output list
-        let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "cur_out")
-            .unwrap().into_int_value();
+        let cur_out = self
+            .builder
+            .build_load(self.runtime.value_i64_type, out_alloca, "cur_out")
+            .unwrap()
+            .into_int_value();
         let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, result], "map_push");
         self.builder.build_store(out_alloca, new_out).unwrap();
 
-        // Increment counter
-        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-            let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "map_cur_upd")
-                .unwrap().into_float_value();
-            let next = self.builder.build_float_add(
-                cur_f64, self.f64_type.const_float(1.0), "map_next",
-            ).unwrap();
+        if self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_terminator()
+            .is_none()
+        {
+            let cur_f64 = self
+                .builder
+                .build_load(self.f64_type, counter_alloca, "map_cur_upd")
+                .unwrap()
+                .into_float_value();
+            let next = self
+                .builder
+                .build_float_add(cur_f64, self.f64_type.const_float(1.0), "map_next")
+                .unwrap();
             self.builder.build_store(counter_alloca, next).unwrap();
-            self.builder.build_unconditional_branch(loop_header).unwrap();
+            self.builder
+                .build_unconditional_branch(loop_header)
+                .unwrap();
         }
 
-        // Return the output list
         self.builder.position_at_end(loop_exit);
-        let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "map_result")
-            .unwrap().into_int_value();
+        let final_out = self
+            .builder
+            .build_load(self.runtime.value_i64_type, out_alloca, "map_result")
+            .unwrap()
+            .into_int_value();
         Ok(final_out)
     }
 
-    /// C3.2: Emit an inline filter loop, directly embedding the predicate body
-    /// instead of creating a closure and calling the runtime `coral_list_filter`.
     fn emit_inline_filter(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -2080,12 +3061,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = ctx.function;
         let list_value = self.emit_expression(ctx, target)?;
 
-        // Get list length as f64
         let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "filter_len");
         let len_f64 = self.value_to_number(len_nb);
 
-        // Create empty output list
-        let null_ptr = self.runtime.value_ptr_type
+        let null_ptr = self
+            .runtime
+            .value_ptr_type
             .ptr_type(inkwell::AddressSpace::default())
             .const_null();
         let zero_usize = self.usize_type.const_int(0, false);
@@ -2096,14 +3077,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         );
         let out_list_nb = self.ptr_to_nb(out_list_ptr);
 
-        let out_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "filter_out_alloca").unwrap();
+        let out_alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, "filter_out_alloca")
+            .unwrap();
         self.builder.build_store(out_alloca, out_list_nb).unwrap();
 
-        let counter_alloca = self.builder.build_alloca(self.f64_type, "filter_counter").unwrap();
-        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+        let counter_alloca = self
+            .builder
+            .build_alloca(self.f64_type, "filter_counter")
+            .unwrap();
+        self.builder
+            .build_store(counter_alloca, self.f64_type.const_float(0.0))
+            .unwrap();
 
-        // Alloca to hold current element across block boundaries
-        let elem_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "filter_elem_alloca").unwrap();
+        let elem_alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, "filter_elem_alloca")
+            .unwrap();
 
         let loop_header = self.context.append_basic_block(function, "filter_cond");
         let loop_body = self.context.append_basic_block(function, "filter_body");
@@ -2111,63 +3102,95 @@ impl<'ctx> CodeGenerator<'ctx> {
         let loop_skip = self.context.append_basic_block(function, "filter_skip");
         let loop_exit = self.context.append_basic_block(function, "filter_exit");
 
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
-        // Header: check counter < length
         self.builder.position_at_end(loop_header);
-        let current = self.builder.build_load(self.f64_type, counter_alloca, "filter_i")
-            .unwrap().into_float_value();
-        let is_done = self.builder.build_float_compare(
-            inkwell::FloatPredicate::OGE, current, len_f64, "filter_done",
-        ).unwrap();
-        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+        let current = self
+            .builder
+            .build_load(self.f64_type, counter_alloca, "filter_i")
+            .unwrap()
+            .into_float_value();
+        let is_done = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OGE,
+                current,
+                len_f64,
+                "filter_done",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_done, loop_exit, loop_body)
+            .unwrap();
 
-        // Body: get element, eval predicate
         self.builder.position_at_end(loop_body);
         ctx.cse_cache.clear();
         let idx_nb = self.wrap_number(current);
-        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "filter_elem");
+        let elem_nb =
+            self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "filter_elem");
         self.builder.build_store(elem_alloca, elem_nb).unwrap();
         self.store_variable(ctx, param_name, elem_nb);
 
         let predicate_result = self.emit_block(ctx, body)?;
 
-        // Check truthiness: nb_is_truthy returns i8
-        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "filter_truthy");
-        let truthy_bool = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE,
-            is_truthy,
-            self.i8_type.const_int(0, false),
-            "filter_bool",
-        ).unwrap();
-        self.builder.build_conditional_branch(truthy_bool, loop_push, loop_skip).unwrap();
+        let is_truthy = self.call_nb(
+            self.runtime.nb_is_truthy,
+            &[predicate_result.into()],
+            "filter_truthy",
+        );
+        let truthy_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                is_truthy,
+                self.i8_type.const_int(0, false),
+                "filter_bool",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(truthy_bool, loop_push, loop_skip)
+            .unwrap();
 
-        // Push: add element to output list (reload from alloca for SSA safety)
         self.builder.position_at_end(loop_push);
-        let saved_elem = self.builder.build_load(self.runtime.value_i64_type, elem_alloca, "saved_elem")
-            .unwrap().into_int_value();
-        let cur_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "cur_out_f")
-            .unwrap().into_int_value();
-        let new_out = self.call_bridged(self.runtime.list_push, &[cur_out, saved_elem], "filter_push");
+        let saved_elem = self
+            .builder
+            .build_load(self.runtime.value_i64_type, elem_alloca, "saved_elem")
+            .unwrap()
+            .into_int_value();
+        let cur_out = self
+            .builder
+            .build_load(self.runtime.value_i64_type, out_alloca, "cur_out_f")
+            .unwrap()
+            .into_int_value();
+        let new_out = self.call_bridged(
+            self.runtime.list_push,
+            &[cur_out, saved_elem],
+            "filter_push",
+        );
         self.builder.build_store(out_alloca, new_out).unwrap();
         self.builder.build_unconditional_branch(loop_skip).unwrap();
 
-        // Skip / continue: increment counter
         self.builder.position_at_end(loop_skip);
-        let next = self.builder.build_float_add(
-            current, self.f64_type.const_float(1.0), "filter_next",
-        ).unwrap();
+        let next = self
+            .builder
+            .build_float_add(current, self.f64_type.const_float(1.0), "filter_next")
+            .unwrap();
         self.builder.build_store(counter_alloca, next).unwrap();
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
-        // Return the output list
         self.builder.position_at_end(loop_exit);
-        let final_out = self.builder.build_load(self.runtime.value_i64_type, out_alloca, "filter_result")
-            .unwrap().into_int_value();
+        let final_out = self
+            .builder
+            .build_load(self.runtime.value_i64_type, out_alloca, "filter_result")
+            .unwrap()
+            .into_int_value();
         Ok(final_out)
     }
 
-    /// C3.2: Emit an inline reduce loop, directly embedding the reducer body.
     fn emit_inline_reduce(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -2183,62 +3206,100 @@ impl<'ctx> CodeGenerator<'ctx> {
         let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "reduce_len");
         let len_f64 = self.value_to_number(len_nb);
 
-        // Accumulator alloca — initialized to first element
-        let acc_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "reduce_acc").unwrap();
+        let acc_alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, "reduce_acc")
+            .unwrap();
         let zero_idx = self.wrap_number(self.f64_type.const_float(0.0));
-        let first_elem = self.call_bridged(self.runtime.list_get, &[list_value, zero_idx], "reduce_first");
+        let first_elem = self.call_bridged(
+            self.runtime.list_get,
+            &[list_value, zero_idx],
+            "reduce_first",
+        );
         self.builder.build_store(acc_alloca, first_elem).unwrap();
 
-        // Counter alloca — start at 1 (skip first element)
-        let counter_alloca = self.builder.build_alloca(self.f64_type, "reduce_counter").unwrap();
-        self.builder.build_store(counter_alloca, self.f64_type.const_float(1.0)).unwrap();
+        let counter_alloca = self
+            .builder
+            .build_alloca(self.f64_type, "reduce_counter")
+            .unwrap();
+        self.builder
+            .build_store(counter_alloca, self.f64_type.const_float(1.0))
+            .unwrap();
 
         let loop_header = self.context.append_basic_block(function, "reduce_cond");
         let loop_body = self.context.append_basic_block(function, "reduce_body");
         let loop_exit = self.context.append_basic_block(function, "reduce_exit");
 
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
-        // Header: check counter < length
         self.builder.position_at_end(loop_header);
-        let current = self.builder.build_load(self.f64_type, counter_alloca, "reduce_i")
-            .unwrap().into_float_value();
-        let is_done = self.builder.build_float_compare(
-            inkwell::FloatPredicate::OGE, current, len_f64, "reduce_done",
-        ).unwrap();
-        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+        let current = self
+            .builder
+            .build_load(self.f64_type, counter_alloca, "reduce_i")
+            .unwrap()
+            .into_float_value();
+        let is_done = self
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OGE,
+                current,
+                len_f64,
+                "reduce_done",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_done, loop_exit, loop_body)
+            .unwrap();
 
-        // Body: bind acc and elem, inline body, store result as new acc
         self.builder.position_at_end(loop_body);
         ctx.cse_cache.clear();
-        let acc_val = self.builder.build_load(self.runtime.value_i64_type, acc_alloca, "acc_val")
-            .unwrap().into_int_value();
+        let acc_val = self
+            .builder
+            .build_load(self.runtime.value_i64_type, acc_alloca, "acc_val")
+            .unwrap()
+            .into_int_value();
         let idx_nb = self.wrap_number(current);
-        let elem_nb = self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "reduce_elem");
+        let elem_nb =
+            self.call_bridged(self.runtime.list_get, &[list_value, idx_nb], "reduce_elem");
         self.store_variable(ctx, acc_name, acc_val);
         self.store_variable(ctx, elem_name, elem_nb);
 
         let result = self.emit_block(ctx, body)?;
         self.builder.build_store(acc_alloca, result).unwrap();
 
-        // Increment counter
-        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-            let cur_f64 = self.builder.build_load(self.f64_type, counter_alloca, "reduce_cur_upd")
-                .unwrap().into_float_value();
-            let next = self.builder.build_float_add(
-                cur_f64, self.f64_type.const_float(1.0), "reduce_next",
-            ).unwrap();
+        if self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_terminator()
+            .is_none()
+        {
+            let cur_f64 = self
+                .builder
+                .build_load(self.f64_type, counter_alloca, "reduce_cur_upd")
+                .unwrap()
+                .into_float_value();
+            let next = self
+                .builder
+                .build_float_add(cur_f64, self.f64_type.const_float(1.0), "reduce_next")
+                .unwrap();
             self.builder.build_store(counter_alloca, next).unwrap();
-            self.builder.build_unconditional_branch(loop_header).unwrap();
+            self.builder
+                .build_unconditional_branch(loop_header)
+                .unwrap();
         }
 
         self.builder.position_at_end(loop_exit);
-        let final_acc = self.builder.build_load(self.runtime.value_i64_type, acc_alloca, "reduce_result")
-            .unwrap().into_int_value();
+        let final_acc = self
+            .builder
+            .build_load(self.runtime.value_i64_type, acc_alloca, "reduce_result")
+            .unwrap()
+            .into_int_value();
         Ok(final_acc)
     }
 
-    /// C3.2: Emit an inline find loop — returns first element where predicate is truthy, else absent.
     fn emit_inline_find(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -2253,12 +3314,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "find_len");
         let len_f64 = self.value_to_number(len_nb);
 
-        let counter_alloca = self.builder.build_alloca(self.f64_type, "find_counter").unwrap();
-        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+        let counter_alloca = self
+            .builder
+            .build_alloca(self.f64_type, "find_counter")
+            .unwrap();
+        self.builder
+            .build_store(counter_alloca, self.f64_type.const_float(0.0))
+            .unwrap();
 
-        let elem_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "find_elem_alloca").unwrap();
+        let elem_alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, "find_elem_alloca")
+            .unwrap();
 
-        let result_alloca = self.builder.build_alloca(self.runtime.value_i64_type, "find_result").unwrap();
+        let result_alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, "find_result")
+            .unwrap();
         let absent = self.wrap_none();
         self.builder.build_store(result_alloca, absent).unwrap();
 
@@ -2268,15 +3340,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         let loop_skip = self.context.append_basic_block(function, "find_skip");
         let loop_exit = self.context.append_basic_block(function, "find_exit");
 
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
         self.builder.position_at_end(loop_header);
-        let current = self.builder.build_load(self.f64_type, counter_alloca, "find_i")
-            .unwrap().into_float_value();
-        let is_done = self.builder.build_float_compare(
-            inkwell::FloatPredicate::OGE, current, len_f64, "find_done",
-        ).unwrap();
-        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+        let current = self
+            .builder
+            .build_load(self.f64_type, counter_alloca, "find_i")
+            .unwrap()
+            .into_float_value();
+        let is_done = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, current, len_f64, "find_done")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_done, loop_exit, loop_body)
+            .unwrap();
 
         self.builder.position_at_end(loop_body);
         ctx.cse_cache.clear();
@@ -2286,37 +3366,52 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.store_variable(ctx, param_name, elem_nb);
 
         let predicate_result = self.emit_block(ctx, body)?;
-        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "find_truthy");
-        let truthy_bool = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE,
-            is_truthy,
-            self.i8_type.const_int(0, false),
-            "find_bool",
-        ).unwrap();
-        self.builder.build_conditional_branch(truthy_bool, loop_found, loop_skip).unwrap();
+        let is_truthy = self.call_nb(
+            self.runtime.nb_is_truthy,
+            &[predicate_result.into()],
+            "find_truthy",
+        );
+        let truthy_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                is_truthy,
+                self.i8_type.const_int(0, false),
+                "find_bool",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(truthy_bool, loop_found, loop_skip)
+            .unwrap();
 
-        // Found: save element, jump to exit
         self.builder.position_at_end(loop_found);
-        let saved_elem = self.builder.build_load(self.runtime.value_i64_type, elem_alloca, "found_elem")
-            .unwrap().into_int_value();
+        let saved_elem = self
+            .builder
+            .build_load(self.runtime.value_i64_type, elem_alloca, "found_elem")
+            .unwrap()
+            .into_int_value();
         self.builder.build_store(result_alloca, saved_elem).unwrap();
         self.builder.build_unconditional_branch(loop_exit).unwrap();
 
-        // Skip: increment and continue
         self.builder.position_at_end(loop_skip);
-        let next = self.builder.build_float_add(
-            current, self.f64_type.const_float(1.0), "find_next",
-        ).unwrap();
+        let next = self
+            .builder
+            .build_float_add(current, self.f64_type.const_float(1.0), "find_next")
+            .unwrap();
         self.builder.build_store(counter_alloca, next).unwrap();
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
         self.builder.position_at_end(loop_exit);
-        let final_result = self.builder.build_load(self.runtime.value_i64_type, result_alloca, "find_result")
-            .unwrap().into_int_value();
+        let final_result = self
+            .builder
+            .build_load(self.runtime.value_i64_type, result_alloca, "find_result")
+            .unwrap()
+            .into_int_value();
         Ok(final_result)
     }
 
-    /// C3.2: Emit an inline any loop — returns true if any element satisfies predicate.
     fn emit_inline_any(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -2331,8 +3426,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "any_len");
         let len_f64 = self.value_to_number(len_nb);
 
-        let counter_alloca = self.builder.build_alloca(self.f64_type, "any_counter").unwrap();
-        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+        let counter_alloca = self
+            .builder
+            .build_alloca(self.f64_type, "any_counter")
+            .unwrap();
+        self.builder
+            .build_store(counter_alloca, self.f64_type.const_float(0.0))
+            .unwrap();
 
         let loop_header = self.context.append_basic_block(function, "any_cond");
         let loop_body = self.context.append_basic_block(function, "any_body");
@@ -2340,15 +3440,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         let loop_skip = self.context.append_basic_block(function, "any_skip");
         let loop_exit = self.context.append_basic_block(function, "any_exit");
 
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
         self.builder.position_at_end(loop_header);
-        let current = self.builder.build_load(self.f64_type, counter_alloca, "any_i")
-            .unwrap().into_float_value();
-        let is_done = self.builder.build_float_compare(
-            inkwell::FloatPredicate::OGE, current, len_f64, "any_done",
-        ).unwrap();
-        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+        let current = self
+            .builder
+            .build_load(self.f64_type, counter_alloca, "any_i")
+            .unwrap()
+            .into_float_value();
+        let is_done = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, current, len_f64, "any_done")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_done, loop_exit, loop_body)
+            .unwrap();
 
         self.builder.position_at_end(loop_body);
         ctx.cse_cache.clear();
@@ -2357,37 +3465,48 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.store_variable(ctx, param_name, elem_nb);
 
         let predicate_result = self.emit_block(ctx, body)?;
-        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "any_truthy");
-        let truthy_bool = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE,
-            is_truthy,
-            self.i8_type.const_int(0, false),
-            "any_bool",
-        ).unwrap();
-        self.builder.build_conditional_branch(truthy_bool, loop_true, loop_skip).unwrap();
+        let is_truthy = self.call_nb(
+            self.runtime.nb_is_truthy,
+            &[predicate_result.into()],
+            "any_truthy",
+        );
+        let truthy_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                is_truthy,
+                self.i8_type.const_int(0, false),
+                "any_bool",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(truthy_bool, loop_true, loop_skip)
+            .unwrap();
 
-        // Found a truthy: return true
         self.builder.position_at_end(loop_true);
         let true_val = self.wrap_bool(self.boolean_to_int(true));
         self.builder.build_unconditional_branch(loop_exit).unwrap();
 
-        // Skip: increment
         self.builder.position_at_end(loop_skip);
-        let next = self.builder.build_float_add(
-            current, self.f64_type.const_float(1.0), "any_next",
-        ).unwrap();
+        let next = self
+            .builder
+            .build_float_add(current, self.f64_type.const_float(1.0), "any_next")
+            .unwrap();
         self.builder.build_store(counter_alloca, next).unwrap();
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
-        // Exit: phi node — true from loop_true, false from loop_header (exhausted)
         self.builder.position_at_end(loop_exit);
         let false_val = self.wrap_bool(self.boolean_to_int(false));
-        let phi = self.builder.build_phi(self.runtime.value_i64_type, "any_result").unwrap();
+        let phi = self
+            .builder
+            .build_phi(self.runtime.value_i64_type, "any_result")
+            .unwrap();
         phi.add_incoming(&[(&true_val, loop_true), (&false_val, loop_header)]);
         Ok(phi.as_basic_value().into_int_value())
     }
 
-    /// C3.2: Emit an inline all loop — returns true only if all elements satisfy predicate.
     fn emit_inline_all(
         &mut self,
         ctx: &mut FunctionContext<'ctx>,
@@ -2402,8 +3521,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let len_nb = self.call_bridged(self.runtime.list_length, &[list_value], "all_len");
         let len_f64 = self.value_to_number(len_nb);
 
-        let counter_alloca = self.builder.build_alloca(self.f64_type, "all_counter").unwrap();
-        self.builder.build_store(counter_alloca, self.f64_type.const_float(0.0)).unwrap();
+        let counter_alloca = self
+            .builder
+            .build_alloca(self.f64_type, "all_counter")
+            .unwrap();
+        self.builder
+            .build_store(counter_alloca, self.f64_type.const_float(0.0))
+            .unwrap();
 
         let loop_header = self.context.append_basic_block(function, "all_cond");
         let loop_body = self.context.append_basic_block(function, "all_body");
@@ -2411,15 +3535,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         let loop_skip = self.context.append_basic_block(function, "all_skip");
         let loop_exit = self.context.append_basic_block(function, "all_exit");
 
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
         self.builder.position_at_end(loop_header);
-        let current = self.builder.build_load(self.f64_type, counter_alloca, "all_i")
-            .unwrap().into_float_value();
-        let is_done = self.builder.build_float_compare(
-            inkwell::FloatPredicate::OGE, current, len_f64, "all_done",
-        ).unwrap();
-        self.builder.build_conditional_branch(is_done, loop_exit, loop_body).unwrap();
+        let current = self
+            .builder
+            .build_load(self.f64_type, counter_alloca, "all_i")
+            .unwrap()
+            .into_float_value();
+        let is_done = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, current, len_f64, "all_done")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(is_done, loop_exit, loop_body)
+            .unwrap();
 
         self.builder.position_at_end(loop_body);
         ctx.cse_cache.clear();
@@ -2428,32 +3560,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.store_variable(ctx, param_name, elem_nb);
 
         let predicate_result = self.emit_block(ctx, body)?;
-        let is_truthy = self.call_nb(self.runtime.nb_is_truthy, &[predicate_result.into()], "all_truthy");
-        let truthy_bool = self.builder.build_int_compare(
-            inkwell::IntPredicate::NE,
-            is_truthy,
-            self.i8_type.const_int(0, false),
-            "all_bool",
-        ).unwrap();
-        self.builder.build_conditional_branch(truthy_bool, loop_skip, loop_false).unwrap();
+        let is_truthy = self.call_nb(
+            self.runtime.nb_is_truthy,
+            &[predicate_result.into()],
+            "all_truthy",
+        );
+        let truthy_bool = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                is_truthy,
+                self.i8_type.const_int(0, false),
+                "all_bool",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(truthy_bool, loop_skip, loop_false)
+            .unwrap();
 
-        // Found a falsy: return false
         self.builder.position_at_end(loop_false);
         let false_val = self.wrap_bool(self.boolean_to_int(false));
         self.builder.build_unconditional_branch(loop_exit).unwrap();
 
-        // Skip: increment
         self.builder.position_at_end(loop_skip);
-        let next = self.builder.build_float_add(
-            current, self.f64_type.const_float(1.0), "all_next",
-        ).unwrap();
+        let next = self
+            .builder
+            .build_float_add(current, self.f64_type.const_float(1.0), "all_next")
+            .unwrap();
         self.builder.build_store(counter_alloca, next).unwrap();
-        self.builder.build_unconditional_branch(loop_header).unwrap();
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .unwrap();
 
-        // Exit: phi node — false from loop_false, true from loop_header (all passed)
         self.builder.position_at_end(loop_exit);
         let true_val = self.wrap_bool(self.boolean_to_int(true));
-        let phi = self.builder.build_phi(self.runtime.value_i64_type, "all_result").unwrap();
+        let phi = self
+            .builder
+            .build_phi(self.runtime.value_i64_type, "all_result")
+            .unwrap();
         phi.add_incoming(&[(&false_val, loop_false), (&true_val, loop_header)]);
         Ok(phi.as_basic_value().into_int_value())
     }

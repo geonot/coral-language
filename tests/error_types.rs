@@ -4,9 +4,9 @@
 //! and that the type system correctly tracks and reports error types.
 
 use coralc::Compiler;
-use coralc::semantic;
-use coralc::parser;
 use coralc::lexer;
+use coralc::parser;
+use coralc::semantic;
 
 /// Helper: compile to IR, expect success.
 fn compile_ok(code: &str) -> String {
@@ -34,7 +34,10 @@ fn t34_error_type_inferred_from_literal() {
 "#;
     // Should compile without type errors
     let ir = compile_ok(code);
-    assert!(ir.contains("@coral_make_error"), "Should create error value");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error value"
+    );
 }
 
 #[test]
@@ -46,7 +49,10 @@ fn t34_error_taxonomy_type_inferred() {
     log(x)
 "#;
     let ir = compile_ok(code);
-    assert!(ir.contains("@coral_make_error"), "Should create hierarchical error value");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create hierarchical error value"
+    );
 }
 
 // ── Error type narrowing in match ──────────────────────────────────────
@@ -63,7 +69,10 @@ fn t34_error_type_flows_through_return() {
     log(result)
 "#;
     let ir = compile_ok(code);
-    assert!(ir.contains("@coral_make_error"), "Should have error creation");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should have error creation"
+    );
 }
 
 #[test]
@@ -81,7 +90,10 @@ fn t34_multiple_error_types_in_function() {
     log(check(50))
 "#;
     let ir = compile_ok(code);
-    assert!(ir.contains("@coral_make_error"), "Should create error values");
+    assert!(
+        ir.contains("@coral_make_error"),
+        "Should create error values"
+    );
 }
 
 // ── Error type in expressions ──────────────────────────────────────────
@@ -100,7 +112,12 @@ fn t34_error_unifies_with_other_types() {
 "#;
     let model = analyze_ok(code);
     // Should have no type errors (error unifies with Int return)
-    assert!(model.warnings.iter().all(|w| !w.message.contains("type inference failed")),
-        "Error type should unify with other return types: {:?}", model.warnings);
+    assert!(
+        model
+            .warnings
+            .iter()
+            .all(|w| !w.message.contains("type inference failed")),
+        "Error type should unify with other return types: {:?}",
+        model.warnings
+    );
 }
-

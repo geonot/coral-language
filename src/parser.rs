@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
-use crate::lexer::{self, Token, TokenKind, TemplateFragment};
+use crate::lexer::{self, TemplateFragment, Token, TokenKind};
 use crate::span::Span;
 
 pub type ParseResult<T> = Result<T, Diagnostic>;
@@ -11,7 +11,7 @@ pub struct Parser {
     source_len: usize,
     pending_error: Option<Diagnostic>,
     layout_depth: usize,
-    /// Accumulated parse errors for multi-error recovery
+
     errors: Vec<Diagnostic>,
 }
 
@@ -56,14 +56,10 @@ impl Parser {
         if self.errors.is_empty() {
             Ok(program)
         } else {
-            // Return the first error for backward compatibility;
-            // all errors are accumulated in self.errors
             Err(self.errors.remove(0))
         }
     }
 
-    /// Return all accumulated errors (for multi-error reporting).
-    /// Call after parse() returns Err to get additional errors.
     pub fn parse_with_recovery(mut self) -> (Program, Vec<Diagnostic>) {
         let mut items = Vec::new();
 
@@ -93,12 +89,9 @@ impl Parser {
         (program, self.errors)
     }
 
-    /// Skip tokens until we find a synchronization point (start of a new item).
-    /// This allows continuing parsing after an error.
     fn synchronize_to_item(&mut self) {
         loop {
             match self.peek_kind() {
-                // Item-start tokens — synchronization points
                 TokenKind::Star
                 | TokenKind::KeywordType
                 | TokenKind::KeywordEnum
@@ -112,11 +105,11 @@ impl Parser {
                 | TokenKind::Eof => {
                     return;
                 }
-                // Newline followed by a top-level construct also syncs
+
                 TokenKind::Newline => {
                     self.advance();
                     self.skip_newlines();
-                    // Check if the next token starts an item
+
                     match self.peek_kind() {
                         TokenKind::Star
                         | TokenKind::KeywordType
@@ -193,7 +186,12 @@ impl Parser {
             span = span.join(annotation.span);
         }
         span = span.join(value.span());
-        Ok(Binding { name, type_annotation, value, span })
+        Ok(Binding {
+            name,
+            type_annotation,
+            value,
+            span,
+        })
     }
 
     fn parse_type_def(&mut self) -> ParseResult<TypeDefinition> {
@@ -208,29 +206,23 @@ impl Parser {
             with_traits,
             fields,
             methods,
-            variants: Vec::new(),  // ADT variants - only for enums
+            variants: Vec::new(),
             span,
         })
     }
 
-    /// Parse enum (sum type / algebraic data type) definition
-    /// Syntax:
-    ///   enum Option
-    ///     Some(value)
-    ///     None
     fn parse_enum_def(&mut self) -> ParseResult<TypeDefinition> {
-        let start = self.advance().span; // consume `enum`
+        let start = self.advance().span;
         let (name, name_span) = self.consume_identifier()?;
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Newline, "expected newline after enum name")?;
-        
+
         let body_start = match self.consume_indent_with_recovery(
             "expected indentation for enum variants",
             "Indent enum variants with spaces or a tab",
         ) {
             Some(span) => span,
             None => {
-                // Empty enum with no variants
                 return Ok(TypeDefinition {
                     name,
                     type_params,
@@ -242,10 +234,10 @@ impl Parser {
                 });
             }
         };
-        
+
         let mut variants = Vec::new();
         let mut end_span = body_start;
-        
+
         loop {
             self.skip_newlines();
             if self.check(TokenKind::Dedent) {
@@ -258,32 +250,28 @@ impl Parser {
                 self.report_missing_dedent(body_start, "missing dedent to close enum body");
                 break;
             }
-            
-            // Parse variant: VariantName or VariantName(field1, field2, ...)
+
             let variant = self.parse_type_variant()?;
             variants.push(variant);
         }
-        
+
         let span = start.join(name_span).join(end_span);
         Ok(TypeDefinition {
             name,
             type_params,
-            with_traits: Vec::new(),  // Enums don't have traits yet
+            with_traits: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
             variants,
             span,
         })
     }
-    
-    /// Parse a single type variant
-    /// Syntax: VariantName or VariantName(field1, field2, ...)
+
     fn parse_type_variant(&mut self) -> ParseResult<TypeVariant> {
         let (variant_name, variant_span) = self.consume_identifier()?;
         let mut fields = Vec::new();
         let mut end_span = variant_span;
-        
-        // Check for fields: VariantName(field1, field2)
+
         if self.matches(TokenKind::LParen) {
             loop {
                 if self.check(TokenKind::RParen) {
@@ -293,17 +281,19 @@ impl Parser {
                 let (field_name, field_span) = self.consume_identifier()?;
                 fields.push(VariantField {
                     name: Some(field_name),
-                    type_annotation: None,  // Type annotations could be added later
+                    type_annotation: None,
                     span: field_span,
                 });
-                
+
                 if !self.matches(TokenKind::Comma) {
-                    end_span = self.expect(TokenKind::RParen, "expected `)` after variant fields")?.span;
+                    end_span = self
+                        .expect(TokenKind::RParen, "expected `)` after variant fields")?
+                        .span;
                     break;
                 }
             }
         }
-        
+
         Ok(TypeVariant {
             name: variant_name,
             fields,
@@ -312,28 +302,31 @@ impl Parser {
     }
 
     fn parse_store_def(&mut self, is_persistent: bool) -> ParseResult<StoreDefinition> {
-        let start = self.advance().span; // consume 'store'
+        let start = self.advance().span;
         self.parse_store_body(start, is_persistent, false)
     }
 
-    /// Parse `persist store Name` syntax for persistent stores
     fn parse_persist_store_def(&mut self) -> ParseResult<StoreDefinition> {
-        let start = self.advance().span; // consume `persist`
+        let start = self.advance().span;
         self.expect(TokenKind::KeywordStore, "expected 'store' after 'persist'")?;
         self.parse_store_body(start, true, false)
     }
 
     fn parse_actor_def(&mut self) -> ParseResult<StoreDefinition> {
-        let start = self.advance().span; // consume `actor`
+        let start = self.advance().span;
         self.parse_store_body(start, false, true)
     }
 
-    fn parse_store_body(&mut self, start: Span, is_persistent: bool, is_actor: bool) -> ParseResult<StoreDefinition> {
+    fn parse_store_body(
+        &mut self,
+        start: Span,
+        is_persistent: bool,
+        is_actor: bool,
+    ) -> ParseResult<StoreDefinition> {
         let (name, name_span) = self.consume_identifier()?;
 
-        // R2.7: Parse optional @messages(TypeName) annotation for actors
         let message_type = if is_actor && self.check(TokenKind::At) {
-            self.advance(); // consume '@'
+            self.advance();
             let (ident, _) = self.consume_identifier()?;
             if ident != "messages" {
                 return Err(self.error_here(&format!(
@@ -363,24 +356,17 @@ impl Parser {
         })
     }
 
-    /// Parse hierarchical error definition:
-    /// ```coral
-    /// err Database
-    ///     err Connection
-    ///         err Timeout
-    ///             code is 5001
-    ///             message is 'Connection timed out'
-    ///         err Refused
-    /// ```
     fn parse_error_definition(&mut self) -> ParseResult<ErrorDefinition> {
-        let start = self.advance().span; // consume `err`
+        let start = self.advance().span;
         let (name, name_span) = self.consume_identifier()?;
-        
-        // Check if there's an indented body
+
         let (code, message, children, end_span) = if self.matches(TokenKind::Newline) {
             if self.matches(TokenKind::Indent) {
                 let (code, message, children, end) = self.parse_error_body()?;
-                self.expect(TokenKind::Dedent, "expected dedent after error definition body")?;
+                self.expect(
+                    TokenKind::Dedent,
+                    "expected dedent after error definition body",
+                )?;
                 (code, message, children, end)
             } else {
                 (None, None, vec![], name_span)
@@ -388,7 +374,7 @@ impl Parser {
         } else {
             (None, None, vec![], name_span)
         };
-        
+
         Ok(ErrorDefinition {
             name,
             code,
@@ -397,30 +383,29 @@ impl Parser {
             span: start.join(end_span),
         })
     }
-    
-    /// Parse the body of an error definition (code, message, and child errors)
-    fn parse_error_body(&mut self) -> ParseResult<(Option<i64>, Option<String>, Vec<ErrorDefinition>, Span)> {
+
+    fn parse_error_body(
+        &mut self,
+    ) -> ParseResult<(Option<i64>, Option<String>, Vec<ErrorDefinition>, Span)> {
         let mut code = None;
         let mut message = None;
         let mut children = Vec::new();
         let mut end_span = self.previous_span();
-        
+
         loop {
             self.skip_newlines();
-            
+
             if self.check(TokenKind::Dedent) || self.check(TokenKind::Eof) {
                 break;
             }
-            
-            // Check for nested error definition
+
             if self.check(TokenKind::KeywordErr) {
                 let child = self.parse_error_definition()?;
                 end_span = child.span;
                 children.push(child);
                 continue;
             }
-            
-            // Check for `code is <number>`
+
             if let TokenKind::Identifier(ident) = self.peek_kind() {
                 let ident = ident.clone();
                 if ident == "code" {
@@ -451,11 +436,10 @@ impl Parser {
                     }
                 }
             }
-            
-            // Unknown token in error body
+
             break;
         }
-        
+
         Ok((code, message, children, end_span))
     }
 
@@ -467,9 +451,6 @@ impl Parser {
         Ok(Some(annotation))
     }
 
-    /// Parse optional type parameters on a type/enum definition.
-    /// Syntax: `[A, B, C]` or `[T with Comparable, U with Display]`
-    /// T2.4: Supports trait bounds via `with TraitName`.
     fn parse_type_params(&mut self) -> ParseResult<Vec<crate::ast::TypeParam>> {
         if !self.matches(TokenKind::LBracket) {
             return Ok(Vec::new());
@@ -480,36 +461,44 @@ impl Parser {
                 self.advance();
                 break;
             }
-            let (param_name, _) = self.consume_identifier()?;
-            // T2.4: Check for trait bounds: `T with Comparable`
-            let mut bounds = Vec::new();
-            if self.matches(TokenKind::KeywordWith) {
-                // Parse one or more trait names separated by commas
-                // But commas also separate type params, so we parse trait names
-                // as long as the next token is an uppercase identifier (trait name)
-                // and not followed by `with` (which would mean next type param).
-                loop {
-                    let (trait_name, _) = self.consume_identifier()?;
-                    bounds.push(trait_name);
-                    // If next is comma, peek ahead: if followed by uppercase + `with` or `]`,
-                    // it's the next type param. If followed by uppercase without `with`, it could
-                    // be another bound or next param. Simplification: after `with`, commas always
-                    // mean "next type param boundary". Multiple bounds use `with T1 and T2` style.
-                    // Actually, let's just use: `T with Comparable` (single bound each for now)
-                    // or `T with Comparable with Hashable` for multiple bounds.
-                    if self.check(TokenKind::KeywordWith) {
-                        self.advance();
-                        continue;
+
+            if self.matches(TokenKind::KeywordConst) {
+                let (param_name, _) = self.consume_identifier()?;
+                params.push(crate::ast::TypeParam::const_param(param_name));
+            } else {
+                let (param_name, _) = self.consume_identifier()?;
+
+                let mut bounds = Vec::new();
+                if self.matches(TokenKind::KeywordWith) {
+                    loop {
+                        let (trait_name, _) = self.consume_identifier()?;
+                        bounds.push(trait_name);
+
+                        if self.check(TokenKind::KeywordWith) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
                     }
-                    break;
                 }
+                params.push(crate::ast::TypeParam::new(param_name, bounds));
             }
-            params.push(crate::ast::TypeParam::new(param_name, bounds));
             if !self.matches(TokenKind::Comma) {
                 self.expect(TokenKind::RBracket, "expected `]` after type parameters")?;
                 break;
             }
         }
+
+        // Detect duplicate type parameter names
+        let mut seen = std::collections::HashSet::new();
+        for p in &params {
+            if !seen.insert(&p.name) {
+                return Err(self.error_here(&format!(
+                    "duplicate type parameter `{}`", p.name
+                )));
+            }
+        }
+
         Ok(params)
     }
 
@@ -521,7 +510,7 @@ impl Parser {
             span = span.join(segment_span);
             segments.push(segment);
         }
-        // Parse type arguments: Type[Arg1, Arg2]
+
         let mut type_args = Vec::new();
         if self.matches(TokenKind::LBracket) {
             loop {
@@ -533,12 +522,19 @@ impl Parser {
                 span = span.join(arg.span);
                 type_args.push(arg);
                 if !self.matches(TokenKind::Comma) {
-                    span = span.join(self.expect(TokenKind::RBracket, "expected `]` after type arguments")?.span);
+                    span = span.join(
+                        self.expect(TokenKind::RBracket, "expected `]` after type arguments")?
+                            .span,
+                    );
                     break;
                 }
             }
         }
-        Ok(TypeAnnotation { segments, type_args, span })
+        Ok(TypeAnnotation {
+            segments,
+            type_args,
+            span,
+        })
     }
 
     fn parse_taxonomy_node(&mut self) -> ParseResult<TaxonomyNode> {
@@ -594,12 +590,12 @@ impl Parser {
         })
     }
 
-    /// Parse composite body with optional `with TraitName` clauses
-    fn parse_composite_body_with_traits(&mut self) -> ParseResult<(Vec<String>, Vec<Field>, Vec<Function>, Span)> {
-        // First, check for `with Trait1, Trait2` on the same line as type/store declaration
+    fn parse_composite_body_with_traits(
+        &mut self,
+    ) -> ParseResult<(Vec<String>, Vec<Field>, Vec<Function>, Span)> {
         let mut with_traits = Vec::new();
         if self.check(TokenKind::KeywordWith) {
-            self.advance(); // consume `with`
+            self.advance();
             loop {
                 let (trait_name, _) = self.consume_identifier()?;
                 with_traits.push(trait_name);
@@ -608,7 +604,7 @@ impl Parser {
                 }
             }
         }
-        
+
         self.expect(TokenKind::Newline, "expected newline before body")?;
         let body_start = match self.consume_indent_with_recovery(
             "expected indentation for body",
@@ -652,14 +648,8 @@ impl Parser {
         }
     }
 
-    /// S4.5: Parse extension definition
-    /// ```coral
-    /// extend String
-    ///     *word_count()
-    ///         self.split(" ").length()
-    /// ```
     fn parse_extension_def(&mut self) -> ParseResult<ExtensionDefinition> {
-        let start = self.advance().span; // consume `extend`
+        let start = self.advance().span;
         let (target_type, _) = self.consume_identifier()?;
 
         self.expect(TokenKind::Newline, "expected newline before extension body")?;
@@ -695,7 +685,11 @@ impl Parser {
                     let func = self.parse_function(FunctionKind::Method)?;
                     methods.push(func);
                 }
-                _ => return Err(self.error_here("expected method definition (starting with *) in extension body")),
+                _ => {
+                    return Err(self.error_here(
+                        "expected method definition (starting with *) in extension body",
+                    ));
+                }
             }
         }
 
@@ -707,21 +701,13 @@ impl Parser {
         })
     }
 
-    /// Parse trait definition
-    /// ```coral
-    /// trait Printable
-    ///     *to_string()
-    ///     *print()
-    ///         log(to_string())
-    /// ```
     fn parse_trait_def(&mut self) -> ParseResult<TraitDefinition> {
-        let start = self.advance().span; // consume `trait`
+        let start = self.advance().span;
         let (name, name_span) = self.consume_identifier()?;
-        
-        // Parse optional `with TraitName, TraitName2, ...` dependencies on the same line
+
         let mut required_traits = Vec::new();
         if self.check(TokenKind::KeywordWith) {
-            self.advance(); // consume `with`
+            self.advance();
             loop {
                 let (trait_name, _) = self.consume_identifier()?;
                 required_traits.push(trait_name);
@@ -730,10 +716,8 @@ impl Parser {
                 }
             }
         }
-        
-        // Check if there's a newline (needed for body or end of definition)
+
         if !self.matches(TokenKind::Newline) {
-            // No newline - trait definition on single line, no body
             return Ok(TraitDefinition {
                 name,
                 required_traits,
@@ -741,10 +725,8 @@ impl Parser {
                 span: start.join(name_span),
             });
         }
-        
-        // Check if there's an indented body (methods)
+
         if !self.check(TokenKind::Indent) {
-            // No indent after newline - empty trait body
             return Ok(TraitDefinition {
                 name,
                 required_traits,
@@ -752,15 +734,14 @@ impl Parser {
                 span: start.join(name_span),
             });
         }
-        
-        // Consume the indent
+
         self.advance();
         self.layout_depth += 1;
         let body_start = self.previous_span();
-        
+
         let mut methods = Vec::new();
         let mut end_span = body_start;
-        
+
         loop {
             self.skip_newlines();
             if self.check(TokenKind::Dedent) {
@@ -773,7 +754,7 @@ impl Parser {
                 self.report_missing_dedent(body_start, "missing dedent to close trait body");
                 break;
             }
-            
+
             if self.check(TokenKind::Star) {
                 let method = self.parse_trait_method()?;
                 methods.push(method);
@@ -781,7 +762,7 @@ impl Parser {
                 return Err(self.error_here("expected `*` for trait method"));
             }
         }
-        
+
         Ok(TraitDefinition {
             name,
             required_traits,
@@ -789,17 +770,14 @@ impl Parser {
             span: start.join(end_span),
         })
     }
-    
-    /// Parse a trait method - may have optional default implementation
+
     fn parse_trait_method(&mut self) -> ParseResult<TraitMethod> {
-        let start = self.advance().span; // consume `*`
+        let start = self.advance().span;
         let (name, name_span) = self.consume_identifier()?;
         self.expect(TokenKind::LParen, "expected `(` after method name")?;
         let params = self.parse_parameters()?;
-        
-        // Check if there's a body (default implementation) or just a signature
+
         let body = if self.matches(TokenKind::Newline) {
-            // Check if next line is indented (body) or not (signature only)
             if self.check(TokenKind::Indent) {
                 Some(self.parse_block()?)
             } else {
@@ -808,7 +786,7 @@ impl Parser {
         } else {
             None
         };
-        
+
         let span = start.join(name_span);
         Ok(TraitMethod {
             name,
@@ -845,7 +823,7 @@ impl Parser {
         }
         let (name, name_span) = self.consume_identifier()?;
         self.expect(TokenKind::LParen, "expected `(` after function name")?;
-        // Allow keywords as parameter names (e.g., actor, type, etc.)
+
         let params = self.parse_parameters_allow_keywords()?;
         self.expect(TokenKind::Newline, "expected newline before function body")?;
         let body = self.parse_block()?;
@@ -929,7 +907,6 @@ impl Parser {
             let stmt = self.parse_statement()?;
             match stmt {
                 Statement::Expression(expr) => {
-                    // Save previous trailing expression as a statement before replacing
                     if let Some(prev) = trailing_value.take() {
                         statements.push(Statement::Expression(prev));
                     }
@@ -952,11 +929,10 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> ParseResult<Statement> {
-        // Check for self.field is value pattern (field assignment in store methods)
         if self.peek_is_self_field_assignment() {
             return self.parse_self_field_assignment();
         }
-        // S1.5: self.field += value (augmented field assignment)
+
         if self.peek_is_self_field_augmented_assign() {
             return self.parse_self_field_augmented_assign();
         }
@@ -964,22 +940,22 @@ impl Parser {
             TokenKind::Identifier(_) if self.peek_is_binding() => {
                 Statement::Binding(self.parse_binding()?)
             }
-            // S1.5: Augmented assignment — `x += 1` desugars to `x is x + 1`
+
             TokenKind::Identifier(_) if self.peek_is_augmented_assign() => {
                 return self.parse_augmented_assign();
             }
-            // S2.4: List destructuring — [a, b, c] is expr
+
             TokenKind::LBracket if self.peek_is_pattern_binding() => {
                 return self.parse_pattern_binding();
             }
-            // S2.4: Constructor destructuring — Some(v) is expr
+
             TokenKind::Identifier(_) if self.peek_is_constructor_pattern_binding() => {
                 return self.parse_pattern_binding();
             }
             TokenKind::KeywordReturn => {
                 let span = self.current_span();
-                self.advance(); // consume 'return'
-                // S5.6: `return if cond` / `return unless cond` — bare return wrapped by postfix handler
+                self.advance();
+
                 if self.check(TokenKind::KeywordIf) || self.check(TokenKind::KeywordUnless) {
                     Statement::Return(Expression::None(span), span)
                 } else {
@@ -1017,12 +993,10 @@ impl Parser {
             }
             _ => Statement::Expression(self.parse_expression()?),
         };
-        // S5.6: Postfix `if` / `unless` — wraps the preceding statement in a conditional.
-        // `log("warning") if debug_mode` → `if debug_mode { log("warning") }`
-        // `exit(1) unless valid` → `if not valid { exit(1) }`
+
         if self.check(TokenKind::KeywordIf) || self.check(TokenKind::KeywordUnless) {
             let is_unless = self.check(TokenKind::KeywordUnless);
-            self.advance(); // consume 'if' or 'unless'
+            self.advance();
             let raw_condition = self.parse_expression()?;
             let condition = if is_unless {
                 Expression::Unary {
@@ -1036,8 +1010,10 @@ impl Parser {
             let stmt_span = match &stmt {
                 Statement::Return(_, s) | Statement::Break(s) | Statement::Continue(s) => *s,
                 Statement::Expression(e) => e.span(),
-                Statement::If { span, .. } | Statement::While { span, .. }
-                | Statement::For { span, .. } | Statement::ForKV { span, .. }
+                Statement::If { span, .. }
+                | Statement::While { span, .. }
+                | Statement::For { span, .. }
+                | Statement::ForKV { span, .. }
                 | Statement::ForRange { span, .. } => *span,
                 Statement::Binding(b) => b.span,
                 Statement::FieldAssign { span, .. } => *span,
@@ -1057,14 +1033,12 @@ impl Parser {
                 span,
             });
         }
-        // Guard statement: `condition ? body` desugars to `if condition { body }`
-        // Also handles binding-as-condition: `x is val ? body` → `if (x == val) { body }`
+
         if self.check(TokenKind::Question) {
             let guard_span = self.current_span();
-            self.advance(); // consume ?
+            self.advance();
             let condition = match stmt {
                 Statement::Binding(ref binding) => {
-                    // Reinterpret `name is value` binding as `name == value` equality check
                     let name_len = binding.name.len();
                     let name_span = Span::new(binding.span.start, binding.span.start + name_len);
                     Expression::Binary {
@@ -1075,12 +1049,14 @@ impl Parser {
                     }
                 }
                 Statement::Expression(expr) => expr,
-                _ => return Err(Diagnostic::new(
-                    "guard `?` can only follow an expression or binding".to_string(),
-                    guard_span,
-                )),
+                _ => {
+                    return Err(Diagnostic::new(
+                        "guard `?` can only follow an expression or binding".to_string(),
+                        guard_span,
+                    ));
+                }
             };
-            // Parse the guard body: either a single inline statement or an indented block
+
             let body = if self.check(TokenKind::Newline) || self.check(TokenKind::Indent) {
                 self.skip_newlines();
                 self.parse_block()?
@@ -1089,7 +1065,11 @@ impl Parser {
                 let body_span = match &body_stmt {
                     Statement::Return(_, s) | Statement::Break(s) | Statement::Continue(s) => *s,
                     Statement::Expression(e) => e.span(),
-                    Statement::If { span, .. } | Statement::While { span, .. } | Statement::For { span, .. } | Statement::ForKV { span, .. } | Statement::ForRange { span, .. } => *span,
+                    Statement::If { span, .. }
+                    | Statement::While { span, .. }
+                    | Statement::For { span, .. }
+                    | Statement::ForKV { span, .. }
+                    | Statement::ForRange { span, .. } => *span,
                     Statement::Binding(b) => b.span,
                     Statement::FieldAssign { span, .. } => *span,
                     Statement::PatternBinding { span, .. } => *span,
@@ -1113,7 +1093,6 @@ impl Parser {
         Ok(stmt)
     }
 
-    /// Parse `if condition\n  body\n[elif condition\n  body\n]*[else\n  body\n]`
     fn parse_if_statement(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         self.expect(TokenKind::KeywordIf, "expected 'if'")?;
@@ -1123,7 +1102,7 @@ impl Parser {
 
         let mut elif_branches = Vec::new();
         while self.check(TokenKind::KeywordElif) {
-            self.advance(); // consume 'elif'
+            self.advance();
             let elif_cond = self.parse_expression()?;
             self.skip_newlines();
             let elif_body = self.parse_block()?;
@@ -1131,7 +1110,7 @@ impl Parser {
         }
 
         let else_body = if self.check(TokenKind::KeywordElse) {
-            self.advance(); // consume 'else'
+            self.advance();
             self.skip_newlines();
             Some(self.parse_block()?)
         } else {
@@ -1147,7 +1126,6 @@ impl Parser {
         })
     }
 
-    /// Parse `while condition\n  body`
     fn parse_while_statement(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         self.expect(TokenKind::KeywordWhile, "expected 'while'")?;
@@ -1161,7 +1139,6 @@ impl Parser {
         })
     }
 
-    /// Parse `unless condition\n  body` — desugars to `if !(condition) { body }`
     fn parse_unless_statement(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         self.expect(TokenKind::KeywordUnless, "expected 'unless'")?;
@@ -1182,7 +1159,6 @@ impl Parser {
         })
     }
 
-    /// Parse `until condition\n  body` — desugars to `while !(condition) { body }`
     fn parse_until_statement(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         self.expect(TokenKind::KeywordUntil, "expected 'until'")?;
@@ -1201,7 +1177,6 @@ impl Parser {
         })
     }
 
-    /// Parse `loop\n  body` — desugars to `while true { body }`
     fn parse_loop_statement(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         self.expect(TokenKind::KeywordLoop, "expected 'loop'")?;
@@ -1215,7 +1190,6 @@ impl Parser {
         })
     }
 
-    /// Parse `for variable in iterable\n  body`
     fn parse_for_statement(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         self.expect(TokenKind::KeywordFor, "expected 'for'")?;
@@ -1232,8 +1206,7 @@ impl Parser {
                 ));
             }
         };
-        
-        // Check for key-value syntax: `for key, value in map`
+
         if self.matches(TokenKind::Comma) {
             let value_var = match self.peek_kind() {
                 TokenKind::Identifier(name) => {
@@ -1260,11 +1233,10 @@ impl Parser {
                 span,
             });
         }
-        
+
         self.expect(TokenKind::KeywordIn, "expected 'in' after for variable")?;
         let start_expr = self.parse_expression()?;
-        
-        // Check for range syntax: `for i in start to end [step s]`
+
         if self.matches(TokenKind::KeywordTo) {
             let end_expr = self.parse_expression()?;
             let step_expr = if self.matches(TokenKind::KeywordStep) {
@@ -1283,7 +1255,7 @@ impl Parser {
                 span,
             });
         }
-        
+
         self.skip_newlines();
         let body = self.parse_block()?;
         Ok(Statement::For {
@@ -1293,15 +1265,13 @@ impl Parser {
             span,
         })
     }
-    
-    /// Check if we have a `self.field is value` pattern
+
     fn peek_is_self_field_assignment(&self) -> bool {
-        // Look for: Identifier("self") Dot Identifier(_) KeywordIs
         let tok0 = self.tokens.get(self.index);
         let tok1 = self.tokens.get(self.index + 1);
         let tok2 = self.tokens.get(self.index + 2);
         let tok3 = self.tokens.get(self.index + 3);
-        
+
         matches!(
             (tok0, tok1, tok2, tok3),
             (
@@ -1312,20 +1282,19 @@ impl Parser {
             ) if name == "self"
         )
     }
-    
-    /// Parse `self.field is value` as a field assignment statement
+
     fn parse_self_field_assignment(&mut self) -> ParseResult<Statement> {
         let start_span = self.current_span();
-        self.advance(); // consume 'self'
-        self.advance(); // consume '.'
+        self.advance();
+        self.advance();
         let (field_name, _) = self.consume_identifier()?;
         self.expect(TokenKind::KeywordIs, "expected `is`")?;
         self.skip_newlines();
         let value = self.parse_expression()?;
         let span = start_span.join(value.span());
-        
+
         let self_expr = Expression::Identifier("self".to_string(), start_span);
-        
+
         self.skip_newlines();
         Ok(Statement::FieldAssign {
             target: self_expr,
@@ -1334,8 +1303,6 @@ impl Parser {
             span,
         })
     }
-
-    // ─── S1.5: Augmented Assignment ────────────────────────────────
 
     fn is_augmented_assign_token(kind: &TokenKind) -> Option<BinaryOp> {
         match kind {
@@ -1347,23 +1314,20 @@ impl Parser {
         }
     }
 
-    /// Check if current position is `identifier +=` (or `-=`, `*=`, `/=`)
     fn peek_is_augmented_assign(&self) -> bool {
         matches!(
             self.tokens.get(self.index + 1).map(|t| &t.kind),
             Some(TokenKind::PlusEquals)
-            | Some(TokenKind::MinusEquals)
-            | Some(TokenKind::StarEquals)
-            | Some(TokenKind::SlashEquals)
+                | Some(TokenKind::MinusEquals)
+                | Some(TokenKind::StarEquals)
+                | Some(TokenKind::SlashEquals)
         )
     }
 
-    /// Parse `x += expr` and desugar to `x is x + expr` (Binding)
     fn parse_augmented_assign(&mut self) -> ParseResult<Statement> {
         let (name, name_span) = self.consume_identifier()?;
-        let op_token = self.advance(); // consume +=, -=, *=, /=
-        let op = Self::is_augmented_assign_token(&op_token.kind)
-            .expect("augmented assign token");
+        let op_token = self.advance();
+        let op = Self::is_augmented_assign_token(&op_token.kind).expect("augmented assign token");
         self.skip_newlines();
         let rhs = self.parse_expression()?;
         let span = name_span.join(rhs.span());
@@ -1381,13 +1345,12 @@ impl Parser {
         }))
     }
 
-    /// Check if current position is `self.field +=` (or `-=`, `*=`, `/=`)
     fn peek_is_self_field_augmented_assign(&self) -> bool {
         let tok0 = self.tokens.get(self.index);
         let tok1 = self.tokens.get(self.index + 1);
         let tok2 = self.tokens.get(self.index + 2);
         let tok3 = self.tokens.get(self.index + 3);
-        
+
         let is_self_dot_field = matches!(
             (tok0, tok1, tok2),
             (
@@ -1396,31 +1359,31 @@ impl Parser {
                 Some(Token { kind: TokenKind::Identifier(_), .. }),
             ) if name == "self"
         );
-        if !is_self_dot_field { return false; }
+        if !is_self_dot_field {
+            return false;
+        }
         matches!(
             tok3.map(|t| &t.kind),
             Some(TokenKind::PlusEquals)
-            | Some(TokenKind::MinusEquals)
-            | Some(TokenKind::StarEquals)
-            | Some(TokenKind::SlashEquals)
+                | Some(TokenKind::MinusEquals)
+                | Some(TokenKind::StarEquals)
+                | Some(TokenKind::SlashEquals)
         )
     }
 
-    /// Parse `self.field += expr` and desugar to `self.field is self.field + expr`
     fn parse_self_field_augmented_assign(&mut self) -> ParseResult<Statement> {
         let start_span = self.current_span();
-        self.advance(); // consume 'self'
-        self.advance(); // consume '.'
+        self.advance();
+        self.advance();
         let (field_name, field_span) = self.consume_identifier()?;
-        let op_token = self.advance(); // consume +=, -=, *=, /=
-        let op = Self::is_augmented_assign_token(&op_token.kind)
-            .expect("augmented assign token");
+        let op_token = self.advance();
+        let op = Self::is_augmented_assign_token(&op_token.kind).expect("augmented assign token");
         self.skip_newlines();
         let rhs = self.parse_expression()?;
         let span = start_span.join(rhs.span());
 
         let self_expr = Expression::Identifier("self".to_string(), start_span);
-        // Build `self.field` as the existing value
+
         let field_access = Expression::Member {
             target: Box::new(self_expr.clone()),
             property: field_name.clone(),
@@ -1446,14 +1409,9 @@ impl Parser {
         self.parse_ternary_or_propagate()
     }
 
-    /// Parse ternary expressions and error propagation:
-    /// - `cond ? then ! else` - ternary conditional
-    /// - `expr ! return err` - error propagation (return if expr is error)
-    /// - `cond ! err Name` - guard clause (return error if cond is false)
     fn parse_ternary_or_propagate(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_pipeline()?;
         if self.check(TokenKind::Question) {
-            // Check what follows the `?` to distinguish ternary from guard statement
             let is_guard = match self.tokens.get(self.index + 1).map(|t| &t.kind) {
                 Some(TokenKind::KeywordReturn)
                 | Some(TokenKind::KeywordBreak)
@@ -1462,9 +1420,8 @@ impl Parser {
                 _ => false,
             };
             if !is_guard {
-                // Ternary: cond ? then ! else
-                self.advance(); // consume ?
-                // For then branch, use parse_pipeline to avoid consuming `! err` as guard clause
+                self.advance();
+
                 let then_branch = self.parse_pipeline()?;
                 self.expect(TokenKind::Bang, "expected `!` in ternary expression")?;
                 let else_branch = self.parse_expression()?;
@@ -1476,13 +1433,13 @@ impl Parser {
                     span,
                 };
             }
-            // else: guard — don't consume ?, let statement parser handle it
         } else if self.check(TokenKind::Bang) && self.check_ahead(1, TokenKind::KeywordReturn) {
-            // Error propagation: expr ! return err
-            // Only consume if we see `! return` to avoid conflict with ternary `!`
-            self.advance(); // consume `!`
-            self.advance(); // consume `return`
-            self.expect(TokenKind::KeywordErr, "expected `err` after `! return` in error propagation")?;
+            self.advance();
+            self.advance();
+            self.expect(
+                TokenKind::KeywordErr,
+                "expected `err` after `! return` in error propagation",
+            )?;
             let err_span = self.previous_span();
             let span = expr.span().join(err_span);
             expr = Expression::ErrorPropagate {
@@ -1490,30 +1447,27 @@ impl Parser {
                 span,
             };
         } else if self.check(TokenKind::Bang) && self.check_ahead(1, TokenKind::KeywordErr) {
-            // Guard clause: cond ! err Name
-            // Desugars to: cond ? () ! err Name (but we generate a proper Ternary)
-            // Actually: if cond is false, return the error. So: cond ? none ! err Name
-            self.advance(); // consume `!`
-            self.advance(); // consume `err`
-            // Parse the error name (taxonomy path)
+            self.advance();
+            self.advance();
+
             let path = self.parse_error_name()?;
             let err_span = self.previous_span();
             let span = expr.span().join(err_span);
-            // Create: condition ? none ! err Name
-            // Where `none` means "continue with unit value" if condition is true
-            let then_span = Span::new(span.start, span.start); // tiny span
+
+            let then_span = Span::new(span.start, span.start);
             expr = Expression::Ternary {
                 condition: Box::new(expr),
                 then_branch: Box::new(Expression::None(then_span)),
-                else_branch: Box::new(Expression::ErrorValue { path, span: err_span }),
+                else_branch: Box::new(Expression::ErrorValue {
+                    path,
+                    span: err_span,
+                }),
                 span,
             };
         }
         Ok(expr)
     }
 
-    /// Parse pipeline expressions: `expr ~ fn(args)` => `fn(expr, args)`
-    /// Left-associative, lower precedence than logic operators
     fn parse_pipeline(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_logic_or()?;
         while self.matches(TokenKind::Tilde) {
@@ -1529,7 +1483,7 @@ impl Parser {
     }
 
     fn parse_logic_or(&mut self) -> ParseResult<Expression> {
-            let mut expr = self.parse_logic_and()?;
+        let mut expr = self.parse_logic_and()?;
         while self.matches(TokenKind::KeywordOr) {
             let rhs = self.parse_logic_and()?;
             let span = expr.span().join(rhs.span());
@@ -1544,9 +1498,9 @@ impl Parser {
     }
 
     fn parse_logic_and(&mut self) -> ParseResult<Expression> {
-            let mut expr = self.parse_bitwise_or()?;
+        let mut expr = self.parse_bitwise_or()?;
         while self.matches(TokenKind::KeywordAnd) {
-                let rhs = self.parse_bitwise_or()?;
+            let rhs = self.parse_bitwise_or()?;
             let span = expr.span().join(rhs.span());
             expr = Expression::Binary {
                 op: BinaryOp::And,
@@ -1558,50 +1512,50 @@ impl Parser {
         Ok(expr)
     }
 
-        fn parse_bitwise_or(&mut self) -> ParseResult<Expression> {
-            let mut expr = self.parse_bitwise_xor()?;
-            while self.matches(TokenKind::Pipe) {
-                let rhs = self.parse_bitwise_xor()?;
-                let span = expr.span().join(rhs.span());
-                expr = Expression::Binary {
-                    op: BinaryOp::BitOr,
-                    left: Box::new(expr),
-                    right: Box::new(rhs),
-                    span,
-                };
-            }
-            Ok(expr)
+    fn parse_bitwise_or(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.parse_bitwise_xor()?;
+        while self.matches(TokenKind::Pipe) {
+            let rhs = self.parse_bitwise_xor()?;
+            let span = expr.span().join(rhs.span());
+            expr = Expression::Binary {
+                op: BinaryOp::BitOr,
+                left: Box::new(expr),
+                right: Box::new(rhs),
+                span,
+            };
         }
+        Ok(expr)
+    }
 
-        fn parse_bitwise_xor(&mut self) -> ParseResult<Expression> {
-            let mut expr = self.parse_bitwise_and()?;
-            while self.matches(TokenKind::Caret) {
-                let rhs = self.parse_bitwise_and()?;
-                let span = expr.span().join(rhs.span());
-                expr = Expression::Binary {
-                    op: BinaryOp::BitXor,
-                    left: Box::new(expr),
-                    right: Box::new(rhs),
-                    span,
-                };
-            }
-            Ok(expr)
+    fn parse_bitwise_xor(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.parse_bitwise_and()?;
+        while self.matches(TokenKind::Caret) {
+            let rhs = self.parse_bitwise_and()?;
+            let span = expr.span().join(rhs.span());
+            expr = Expression::Binary {
+                op: BinaryOp::BitXor,
+                left: Box::new(expr),
+                right: Box::new(rhs),
+                span,
+            };
         }
+        Ok(expr)
+    }
 
-        fn parse_bitwise_and(&mut self) -> ParseResult<Expression> {
-            let mut expr = self.parse_equality()?;
-            while self.matches(TokenKind::Ampersand) {
-                let rhs = self.parse_equality()?;
-                let span = expr.span().join(rhs.span());
-                expr = Expression::Binary {
-                    op: BinaryOp::BitAnd,
-                    left: Box::new(expr),
-                    right: Box::new(rhs),
-                    span,
-                };
-            }
-            Ok(expr)
+    fn parse_bitwise_and(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.parse_equality()?;
+        while self.matches(TokenKind::Ampersand) {
+            let rhs = self.parse_equality()?;
+            let span = expr.span().join(rhs.span());
+            expr = Expression::Binary {
+                op: BinaryOp::BitAnd,
+                left: Box::new(expr),
+                right: Box::new(rhs),
+                span,
+            };
         }
+        Ok(expr)
+    }
 
     fn parse_equality(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_comparison()?;
@@ -1643,7 +1597,7 @@ impl Parser {
             };
             if let Some(op) = op {
                 self.advance();
-                    let rhs = self.parse_shift()?;
+                let rhs = self.parse_shift()?;
                 let span = expr.span().join(rhs.span());
                 expr = Expression::Binary {
                     op,
@@ -1658,30 +1612,30 @@ impl Parser {
         Ok(expr)
     }
 
-        fn parse_shift(&mut self) -> ParseResult<Expression> {
-            let mut expr = self.parse_term()?;
-            loop {
-                let op = match self.peek_kind() {
-                    TokenKind::ShiftLeft => Some(BinaryOp::ShiftLeft),
-                    TokenKind::ShiftRight => Some(BinaryOp::ShiftRight),
-                    _ => None,
+    fn parse_shift(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.parse_term()?;
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::ShiftLeft => Some(BinaryOp::ShiftLeft),
+                TokenKind::ShiftRight => Some(BinaryOp::ShiftRight),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.advance();
+                let rhs = self.parse_term()?;
+                let span = expr.span().join(rhs.span());
+                expr = Expression::Binary {
+                    op,
+                    left: Box::new(expr),
+                    right: Box::new(rhs),
+                    span,
                 };
-                if let Some(op) = op {
-                    self.advance();
-                    let rhs = self.parse_term()?;
-                    let span = expr.span().join(rhs.span());
-                    expr = Expression::Binary {
-                        op,
-                        left: Box::new(expr),
-                        right: Box::new(rhs),
-                        span,
-                    };
-                } else {
-                    break;
-                }
+            } else {
+                break;
             }
-            Ok(expr)
         }
+        Ok(expr)
+    }
 
     fn parse_term(&mut self) -> ParseResult<Expression> {
         let mut expr = self.parse_factor()?;
@@ -1735,7 +1689,8 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> ParseResult<Expression> {
-        if self.check(TokenKind::Bang) && matches!(self.peek_next_kind(), Some(TokenKind::BangBang)) {
+        if self.check(TokenKind::Bang) && matches!(self.peek_next_kind(), Some(TokenKind::BangBang))
+        {
             let bang_span = self.current_span();
             self.advance();
             let value = self.parse_unary()?;
@@ -1763,8 +1718,7 @@ impl Parser {
                 span,
             });
         }
-        // Note: ~ is now the pipeline operator, BitNot is removed from Coral
-        // (Use integer methods or bitwise functions instead)
+
         self.parse_call()
     }
 
@@ -1773,9 +1727,7 @@ impl Parser {
         loop {
             if self.matches(TokenKind::LParen) {
                 let (mut args, mut arg_names) = self.parse_arguments()?;
-                // S5.5: Check for trailing `do..end` block after call arguments
-                // Save position so we don't consume statement-terminating newlines
-                // when no `do` keyword follows.
+
                 let saved_index = self.index;
                 self.skip_newlines();
                 if self.matches(TokenKind::KeywordDo) {
@@ -1795,7 +1747,14 @@ impl Parser {
                     span,
                 };
             } else if self.matches(TokenKind::KeywordDo) {
-                // S5.5: `identifier do ... end` without parens — desugar to call(lambda)
+                match &expr {
+                    Expression::Identifier(_, _)
+                    | Expression::Member { .. }
+                    | Expression::Call { .. } => {}
+                    _ => {
+                        return Err(self.error_here("do..end block requires a callable expression"));
+                    }
+                }
                 let do_block = self.parse_do_end_block()?;
                 let span = expr.span().join(self.previous_span());
                 expr = Expression::Call {
@@ -1814,7 +1773,7 @@ impl Parser {
                 };
             } else if self.matches(TokenKind::LBracket) {
                 let start_expr = self.parse_expression()?;
-                // S2.5: Check for `to` keyword → slice syntax
+
                 if self.matches(TokenKind::KeywordTo) {
                     let end_expr = self.parse_expression()?;
                     let end_span = self.current_span();
@@ -1843,14 +1802,11 @@ impl Parser {
         Ok(expr)
     }
 
-    /// S5.5: Parse a `do..end` block. The `do` keyword has already been consumed.
-    /// Returns a Lambda expression with zero params wrapping the block body.
     fn parse_do_end_block(&mut self) -> ParseResult<Expression> {
         let do_span = self.previous_span();
         let mut statements = Vec::new();
         let mut trailing_value: Option<Expression> = None;
 
-        // Skip newlines and indent tokens that the layout engine inserts after `do`
         self.skip_newlines();
         if self.check(TokenKind::Indent) {
             self.layout_depth += 1;
@@ -1860,17 +1816,15 @@ impl Parser {
         loop {
             self.skip_newlines();
 
-            // Check for `end` keyword
             if self.check(TokenKind::KeywordEnd) {
-                // Consume any remaining dedent before end
                 break;
             }
-            // Also break on dedent that precedes `end`
+
             if self.check(TokenKind::Dedent) {
                 self.leave_layout_block(self.current_span());
                 self.advance();
                 self.skip_newlines();
-                // After dedent, `end` should follow
+
                 break;
             }
             if self.check(TokenKind::Eof) {
@@ -1914,23 +1868,19 @@ impl Parser {
         })
     }
 
-    /// Parse function call arguments, supporting both positional and named args.
-    /// Named args use `name: value` syntax. Positional args must come before named args.
     fn parse_arguments(&mut self) -> ParseResult<(Vec<Expression>, Vec<Option<String>>)> {
         let mut args = Vec::new();
         let mut arg_names: Vec<Option<String>> = Vec::new();
         let mut seen_named = false;
-        
-        // Handle empty argument list
+
         if self.matches(TokenKind::RParen) {
             return Ok((args, arg_names));
         }
-        
-        // Check if arguments are indented (multiline)
+
         let is_indented = if self.check(TokenKind::Newline) {
-            self.advance(); // consume Newline
+            self.advance();
             if self.check(TokenKind::Indent) {
-                self.advance(); // consume Indent
+                self.advance();
                 self.layout_depth += 1;
                 true
             } else {
@@ -1939,34 +1889,30 @@ impl Parser {
         } else {
             false
         };
-        
+
         loop {
-            // In indented mode, skip additional newlines
             if is_indented {
                 while self.check(TokenKind::Newline) {
                     self.advance();
                 }
-                
-                // Check for dedent (end of indented arguments)
+
                 if self.check(TokenKind::Dedent) {
                     self.leave_layout_block(self.current_span());
-                    self.advance(); // consume Dedent
+                    self.advance();
                     break;
                 }
             }
-            
-            // S4.1: Check for named argument: `identifier: expression`
-            // Look ahead for Identifier followed by Colon (not inside taxonomy path)
+
             let is_named_arg = if let TokenKind::Identifier(_) = self.peek_kind() {
-                // Check if next-next token is a Colon
-                self.index + 1 < self.tokens.len() && self.tokens[self.index + 1].kind == TokenKind::Colon
+                self.index + 1 < self.tokens.len()
+                    && self.tokens[self.index + 1].kind == TokenKind::Colon
             } else {
                 false
             };
-            
+
             if is_named_arg {
                 let (name, _name_span) = self.consume_identifier_or_keyword()?;
-                self.advance(); // consume Colon
+                self.advance();
                 let value = self.parse_expression()?;
                 args.push(value);
                 arg_names.push(Some(name));
@@ -1978,38 +1924,33 @@ impl Parser {
                         self.current_span(),
                     ));
                 }
-                // Parse the argument expression
+
                 args.push(self.parse_expression()?);
                 arg_names.push(None);
             }
-            
-            // Handle comma separator
+
             if self.matches(TokenKind::Comma) {
                 continue;
             }
-            
-            // Handle end of arguments
+
             if is_indented {
-                // In indented mode, expect dedent before rparen
                 while self.check(TokenKind::Newline) {
                     self.advance();
                 }
                 if self.check(TokenKind::Dedent) {
                     self.leave_layout_block(self.current_span());
-                    self.advance(); // consume Dedent
+                    self.advance();
                 }
             }
-            
-            // Expect closing parenthesis
+
             self.expect(TokenKind::RParen, "expected `)` to close arguments")?;
             break;
         }
-        
-        // Only include arg_names if there are named args
+
         if !seen_named {
             arg_names.clear();
         }
-        
+
         Ok((args, arg_names))
     }
 
@@ -2090,9 +2031,7 @@ impl Parser {
                     Ok(Expression::Identifier(name, span))
                 }
             }
-            // Allow keywords as identifiers in expression position.
-            // NOTE: KeywordMatch, KeywordUnsafe, KeywordAsm have special semantics
-            // and are handled below with their own cases.
+
             TokenKind::KeywordActor
             | TokenKind::KeywordStore
             | TokenKind::KeywordPersist
@@ -2123,11 +2062,11 @@ impl Parser {
                     return Ok(Expression::Unit);
                 }
                 let first = self.parse_expression()?;
-                // S2.7: Tuple syntax — (a, b, c) parsed as list literal
+
                 if self.matches(TokenKind::Comma) {
                     let mut items = vec![first];
                     self.skip_newlines();
-                    // Handle trailing comma: (a,) is single-element tuple
+
                     if !self.check(TokenKind::RParen) {
                         loop {
                             items.push(self.parse_expression()?);
@@ -2150,97 +2089,96 @@ impl Parser {
             TokenKind::LBracket => self.parse_list_literal(),
             TokenKind::At => self.parse_ptr_load(),
             other => {
-                // Debug: dump surrounding tokens
-                let start = if self.index > 10 { self.index - 10 } else { 0 };
-                let end = std::cmp::min(self.index + 5, self.tokens.len());
-                eprintln!("=== TOKEN DUMP at index {} ===", self.index);
-                for i in start..end {
-                    let t = &self.tokens[i];
-                    let marker = if i == self.index { ">>>" } else { "   " };
-                    eprintln!("{} [{}] {:?} @ {:?}", marker, i, t.kind, t.span);
-                }
                 Err(self.error_here(&format!("unexpected token in expression: {:?}", other)))
             }
         }
     }
 
-    /// Parse error name path: `Name` or `Name:SubName:SubSubName`
-    /// Returns the path segments (Vec<String>)
     fn parse_error_name(&mut self) -> ParseResult<Vec<String>> {
-        // Check for naked error (no name following)
-        if !matches!(self.peek_kind(), TokenKind::Identifier(_)) {
-            return Ok(vec![]); // Empty path = generic error
+        // Accept either identifiers (err Name:Sub) or a string literal (err "Name")
+        if let TokenKind::String(s) = self.peek_kind() {
+            let name = s.clone();
+            self.advance();
+            return Ok(vec![name]);
         }
-        
+        if !matches!(self.peek_kind(), TokenKind::Identifier(_)) {
+            return Err(self.error_here("expected error name after `err`"));
+        }
+
         let (first, _) = self.consume_identifier()?;
         let mut path = vec![first];
-        
-        // Parse colon-separated path: Name:SubName:SubSubName
+
         while self.matches(TokenKind::Colon) {
             let (segment, _) = self.consume_identifier()?;
             path.push(segment);
         }
-        
+
         Ok(path)
     }
 
-    /// Parse error value expression: `err Name` or `err Name:SubName:SubSubName`
     fn parse_error_value(&mut self) -> ParseResult<Expression> {
-        let start = self.advance().span; // consume `err`
+        let start = self.advance().span;
         let path = self.parse_error_name()?;
         let end_span = self.previous_span();
-        let span = if path.is_empty() { start } else { start.join(end_span) };
-        
+        let span = if path.is_empty() {
+            start
+        } else {
+            start.join(end_span)
+        };
+
         Ok(Expression::ErrorValue { path, span })
     }
 
     fn parse_map_literal(&mut self, name_span: Span) -> ParseResult<Expression> {
         let open = self.expect(TokenKind::LParen, "expected `(` after map literal")?;
         let start = name_span.join(open.span);
-        
-        // Handle indented map entries
+
         self.skip_newlines();
         let is_indented = if self.check(TokenKind::Indent) {
-            self.advance(); // consume Indent
+            self.advance();
             self.layout_depth += 1;
             true
         } else {
             false
         };
-        
+
         let mut entries = Vec::new();
         if self.matches(TokenKind::RParen) {
             return Ok(Expression::Map(entries, start.join(self.previous_span())));
         }
-        
+
         loop {
-            // Handle indented entries
             if is_indented {
                 self.skip_newlines();
-                // Check for dedent (end of indented entries)
+
                 if self.check(TokenKind::Dedent) {
                     self.leave_layout_block(self.current_span());
-                    self.advance(); // consume Dedent
+                    self.advance();
                     break;
                 }
             } else {
                 self.skip_newlines();
             }
-            
+
             let key = self.parse_unary()?;
             self.skip_newlines();
-            // Accept both `:` and `is` as map key-value separator (`:` preferred)
+
             if !self.matches(TokenKind::Colon) {
-                self.expect(TokenKind::KeywordIs, "expected `:` or `is` between map key and value")?;
+                self.expect(
+                    TokenKind::KeywordIs,
+                    "expected `:` or `is` between map key and value",
+                )?;
             }
             self.skip_newlines();
             let value = self.parse_expression()?;
-            
-            // S2.3: Map comprehension — map(key: value for var in iterable if cond)
+
             if entries.is_empty() && self.check(TokenKind::KeywordFor) {
-                self.advance(); // consume `for`
+                self.advance();
                 let (var, _) = self.consume_identifier()?;
-                self.expect(TokenKind::KeywordIn, "expected `in` after comprehension variable")?;
+                self.expect(
+                    TokenKind::KeywordIn,
+                    "expected `in` after comprehension variable",
+                )?;
                 let iterable = self.parse_expression()?;
                 let condition = if self.check(TokenKind::KeywordIf) {
                     self.advance();
@@ -2248,7 +2186,9 @@ impl Parser {
                 } else {
                     None
                 };
-                let end = self.expect(TokenKind::RParen, "expected `)` to close map comprehension")?.span;
+                let end = self
+                    .expect(TokenKind::RParen, "expected `)` to close map comprehension")?
+                    .span;
                 return Ok(Expression::MapComprehension {
                     key: Box::new(key),
                     value: Box::new(value),
@@ -2258,30 +2198,32 @@ impl Parser {
                     span: start.join(end),
                 });
             }
-            
+
             entries.push((key, value));
-            
+
             self.skip_newlines();
             if self.matches(TokenKind::Comma) {
                 self.skip_newlines();
                 continue;
             }
-            
-            // Handle end of map
+
             if is_indented {
                 self.skip_newlines();
                 if self.check(TokenKind::Dedent) {
                     self.leave_layout_block(self.current_span());
-                    self.advance(); // consume Dedent
+                    self.advance();
                 }
             }
-            
-            let end = self.expect(TokenKind::RParen, "expected `)` to close map literal")?.span;
+
+            let end = self
+                .expect(TokenKind::RParen, "expected `)` to close map literal")?
+                .span;
             return Ok(Expression::Map(entries, start.join(end)));
         }
-        
-        // If we exited via dedent, still expect the closing paren
-        let end = self.expect(TokenKind::RParen, "expected `)` to close map literal")?.span;
+
+        let end = self
+            .expect(TokenKind::RParen, "expected `)` to close map literal")?
+            .span;
         Ok(Expression::Map(entries, start.join(end)))
     }
 
@@ -2306,11 +2248,16 @@ impl Parser {
             return Ok(Expression::String(String::new(), span));
         }
         if !matches!(parts.first(), Some(Expression::String(_, _))) {
-            parts.insert(0, Expression::String(String::new(), Span::new(span.start, span.start)));
+            parts.insert(
+                0,
+                Expression::String(String::new(), Span::new(span.start, span.start)),
+            );
         }
         let mut iter = parts.into_iter();
-        // Safe: we checked !parts.is_empty() above and inserted at least one element
-        let mut acc = iter.next().expect("template parts must be non-empty after processing");
+
+        let mut acc = iter
+            .next()
+            .expect("template parts must be non-empty after processing");
         for part in iter {
             let combined_span = acc.span().join(part.span());
             acc = Expression::Binary {
@@ -2367,36 +2314,33 @@ impl Parser {
     fn parse_list_literal(&mut self) -> ParseResult<Expression> {
         let start = self.advance().span;
         let mut items = Vec::new();
-        
+
         if self.matches(TokenKind::RBracket) {
             return Ok(Expression::List(items, start));
         }
-        
-        // Handle indented list items
+
         self.skip_newlines();
         let is_indented = if self.check(TokenKind::Indent) {
-            self.advance(); // consume Indent
+            self.advance();
             self.layout_depth += 1;
             true
         } else {
             false
         };
-        
+
         loop {
-            // Handle indented items
             if is_indented {
                 self.skip_newlines();
-                // Check for dedent (end of indented items)
+
                 if self.check(TokenKind::Dedent) {
                     self.leave_layout_block(self.current_span());
-                    self.advance(); // consume Dedent
+                    self.advance();
                     break;
                 }
             } else {
                 self.skip_newlines();
             }
-            
-            // S2.6: Spread operator — ...expr
+
             if self.check(TokenKind::Ellipsis) {
                 let spread_span = self.advance().span;
                 let inner = self.parse_expression()?;
@@ -2406,19 +2350,26 @@ impl Parser {
                 items.push(self.parse_expression()?);
             }
 
-            // S2.2: List comprehension — [body for var in iterable if cond]
             if items.len() == 1 && self.check(TokenKind::KeywordFor) {
-                self.advance(); // consume `for`
+                self.advance();
                 let (var, _) = self.consume_identifier()?;
-                self.expect(TokenKind::KeywordIn, "expected `in` after comprehension variable")?;
+                self.expect(
+                    TokenKind::KeywordIn,
+                    "expected `in` after comprehension variable",
+                )?;
                 let iterable = self.parse_expression()?;
                 let condition = if self.check(TokenKind::KeywordIf) {
-                    self.advance(); // consume `if`
+                    self.advance();
                     Some(Box::new(self.parse_expression()?))
                 } else {
                     None
                 };
-                let end = self.expect(TokenKind::RBracket, "expected `]` to close list comprehension")?.span;
+                let end = self
+                    .expect(
+                        TokenKind::RBracket,
+                        "expected `]` to close list comprehension",
+                    )?
+                    .span;
                 return Ok(Expression::ListComprehension {
                     body: Box::new(items.pop().unwrap()),
                     var,
@@ -2427,42 +2378,31 @@ impl Parser {
                     span: start.join(end),
                 });
             }
-            
+
             self.skip_newlines();
             if self.matches(TokenKind::Comma) {
                 self.skip_newlines();
                 continue;
             }
-            
-            // Handle end of list
+
             if is_indented {
                 self.skip_newlines();
                 if self.check(TokenKind::Dedent) {
                     self.leave_layout_block(self.current_span());
-                    self.advance(); // consume Dedent
+                    self.advance();
                 }
             }
-            
+
             let end = self.expect(TokenKind::RBracket, "expected ]")?.span;
             return Ok(Expression::List(items, start.join(end)));
         }
-        
-        // If we exited via dedent, still expect the closing bracket
+
         let end = self.expect(TokenKind::RBracket, "expected ]")?.span;
         Ok(Expression::List(items, start.join(end)))
     }
 
-    /// Parse `when` expression — desugars to nested ternary expressions.
-    /// Syntax:
-    /// ```text
-    /// when
-    ///   condition1 ? value1
-    ///   condition2 ? value2
-    ///   _          ? default_value
-    /// ```
-    /// Desugars to: `condition1 ? value1 ! (condition2 ? value2 ! default_value)`
     fn parse_when_expression(&mut self) -> ParseResult<Expression> {
-        let when_span = self.advance().span; // consume 'when'
+        let when_span = self.advance().span;
         self.expect(TokenKind::Newline, "expected newline after 'when'")?;
         let arms_start = match self.consume_indent_with_recovery(
             "expected indented when arms",
@@ -2473,10 +2413,10 @@ impl Parser {
                 return Ok(Expression::None(when_span));
             }
         };
-        
+
         let mut arms: Vec<(Expression, Expression)> = Vec::new();
         let mut default_expr: Option<Expression> = None;
-        
+
         loop {
             self.skip_newlines();
             if self.check(TokenKind::Dedent) {
@@ -2489,12 +2429,12 @@ impl Parser {
                 self.report_missing_dedent(arms_start, "missing dedent to close when arms");
                 break;
             }
-            // Check for wildcard/default arm: `_ ? value`
+
             if self.check(TokenKind::Identifier("_".into())) {
                 let tok = self.peek_kind().clone();
                 if let TokenKind::Identifier(name) = &tok {
                     if name == "_" {
-                        self.advance(); // consume _
+                        self.advance();
                         self.expect(TokenKind::Question, "expected '?' after '_' in when arm")?;
                         default_expr = Some(self.parse_expression()?);
                         self.skip_newlines();
@@ -2502,28 +2442,30 @@ impl Parser {
                     }
                 }
             }
-            // Normal arm: `condition ? value`
+
             let condition = self.parse_pipeline()?;
             self.expect(TokenKind::Question, "expected '?' in when arm")?;
             let value = self.parse_expression()?;
             arms.push((condition, value));
             self.skip_newlines();
         }
-        
-        // Build the expression from the bottom up (right fold into nested ternaries)
+
         let none_expr = Expression::None(when_span);
         let base = default_expr.unwrap_or(none_expr);
-        
-        let result = arms.into_iter().rev().fold(base, |else_branch, (condition, then_branch)| {
-            let span = condition.span().join(else_branch.span());
-            Expression::Ternary {
-                condition: Box::new(condition),
-                then_branch: Box::new(then_branch),
-                else_branch: Box::new(else_branch),
-                span,
-            }
-        });
-        
+
+        let result = arms
+            .into_iter()
+            .rev()
+            .fold(base, |else_branch, (condition, then_branch)| {
+                let span = condition.span().join(else_branch.span());
+                Expression::Ternary {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                    span,
+                }
+            });
+
         Ok(result)
     }
 
@@ -2560,9 +2502,8 @@ impl Parser {
                 break;
             }
             if self.matches(TokenKind::Bang) {
-                // S3.1: Default arm also supports multi-statement blocks
                 let body = if self.check(TokenKind::Newline) {
-                    self.advance(); // consume newline
+                    self.advance();
                     if self.check(TokenKind::Indent) {
                         self.parse_block()?
                     } else {
@@ -2581,7 +2522,7 @@ impl Parser {
                 continue;
             }
             let pattern = self.parse_match_pattern()?;
-            // S3.3: Or-patterns — `Pat1 or Pat2 or Pat3 ? body`
+
             let pattern = if self.check(TokenKind::KeywordOr) {
                 let mut alternatives = vec![pattern];
                 while self.matches(TokenKind::KeywordOr) {
@@ -2591,24 +2532,20 @@ impl Parser {
             } else {
                 pattern
             };
-            // S3.2: Optional guard clause — `Pattern if condition ? body`
-            // Use parse_pipeline to avoid consuming the `?` as a ternary operator
-            let guard = if self.check(TokenKind::KeywordIf) {
-                self.advance(); // consume `if`
+
+            let guard = if self.check(TokenKind::KeywordIf) || self.check(TokenKind::KeywordWhen) {
+                self.advance();
                 Some(Box::new(self.parse_pipeline()?))
             } else {
                 None
             };
             self.expect(TokenKind::Question, "expected `?` in match arm")?;
-            // S3.1: Multi-statement match arms — if `?` is followed by a
-            // newline + indent, parse a full block (multiple statements).
-            // Otherwise, parse a single expression as before.
+
             let body = if self.check(TokenKind::Newline) {
-                self.advance(); // consume newline
+                self.advance();
                 if self.check(TokenKind::Indent) {
                     self.parse_block()?
                 } else {
-                    // Newline but no indent — empty arm body (unit)
                     Block {
                         statements: vec![],
                         value: None,
@@ -2640,10 +2577,9 @@ impl Parser {
             TokenKind::Integer(_) => {
                 let token = self.advance();
                 if let TokenKind::Integer(value) = token.kind {
-                    // S3.5: Check for range pattern `start to end`
                     if self.check(TokenKind::KeywordTo) {
                         let start_span = token.span;
-                        self.advance(); // consume `to`
+                        self.advance();
                         let end_token = self.advance();
                         if let TokenKind::Integer(end_value) = end_token.kind {
                             return Ok(MatchPattern::Range {
@@ -2652,7 +2588,10 @@ impl Parser {
                                 span: start_span.join(end_token.span),
                             });
                         } else {
-                            return Err(Diagnostic::new("expected integer after `to` in range pattern", end_token.span));
+                            return Err(Diagnostic::new(
+                                "expected integer after `to` in range pattern",
+                                end_token.span,
+                            ));
                         }
                     }
                     Ok(MatchPattern::Integer(value))
@@ -2677,17 +2616,16 @@ impl Parser {
                 }
             }
             TokenKind::LBracket => {
-                self.advance(); // consume `[`
+                self.advance();
                 let mut patterns = Vec::new();
                 while !self.check(TokenKind::RBracket) && !self.check(TokenKind::Eof) {
-                    // S3.4: Check for rest/spread pattern `...name`
                     if self.check(TokenKind::Ellipsis) {
                         let ellipsis_span = self.advance().span;
                         let (rest_name, rest_span) = self.consume_identifier()?;
                         patterns.push(MatchPattern::Rest(rest_name, ellipsis_span.join(rest_span)));
-                        // Rest must be last in the list pattern
+
                         if !self.check(TokenKind::RBracket) {
-                            self.matches(TokenKind::Comma); // consume optional trailing comma
+                            self.matches(TokenKind::Comma);
                         }
                         break;
                     }
@@ -2701,54 +2639,54 @@ impl Parser {
             }
             TokenKind::Identifier(_) => {
                 let (name, name_span) = self.consume_identifier()?;
-                
-                // Check for wildcard pattern `_`
+
                 if name == "_" {
                     return Ok(MatchPattern::Wildcard(name_span));
                 }
-                
-                // Check if this is a constructor pattern: Name(binding1, binding2, ...)
+
                 if self.check(TokenKind::LParen) {
-                    self.advance(); // consume `(`
+                    self.advance();
                     let mut fields = Vec::new();
-                    
+
                     loop {
                         if self.check(TokenKind::RParen) {
                             break;
                         }
-                        // Recursively parse nested patterns
+
                         let pattern = self.parse_match_pattern()?;
                         fields.push(pattern);
-                        
+
                         if !self.matches(TokenKind::Comma) {
                             break;
                         }
                     }
-                    
-                    let end_span = self.expect(TokenKind::RParen, "expected `)` after constructor pattern")?;
+
+                    let end_span =
+                        self.expect(TokenKind::RParen, "expected `)` after constructor pattern")?;
                     let span = name_span.join(end_span.span);
-                    
-                    return Ok(MatchPattern::Constructor {
-                        name,
-                        fields,
-                        span,
-                    });
+
+                    return Ok(MatchPattern::Constructor { name, fields, span });
                 }
-                
-                // Check if this looks like a nullary constructor (capitalized) vs a binding variable
-                // Convention: Capitalized names are constructors, lowercase are bindings
-                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    // Nullary constructor like `None`
+
+                if name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false)
+                {
                     return Ok(MatchPattern::Constructor {
                         name,
                         fields: Vec::new(),
                         span: name_span,
                     });
                 }
-                
-                // S3.5: Range binding pattern: `x from 0 to 10`
-                if matches!(self.tokens.get(self.index), Some(token) if matches!(&token.kind, TokenKind::Identifier(s) if s == "from")) {
-                    self.advance(); // consume `from`
+
+                // `from` is a contextual keyword: only special when it appears
+                // after an identifier in pattern position, forming a range binding
+                // (e.g., `x from 1 to 10`). Standalone `from` is a valid identifier.
+                if matches!(self.tokens.get(self.index), Some(token) if matches!(&token.kind, TokenKind::Identifier(s) if s == "from"))
+                {
+                    self.advance();
                     let start_token = self.advance();
                     let start_val = match &start_token.kind {
                         TokenKind::Integer(v) => *v,
@@ -2757,10 +2695,16 @@ impl Parser {
                             if let TokenKind::Integer(v) = next.kind {
                                 -v
                             } else {
-                                return Err(self.error_here("expected integer after `-` in range pattern"));
+                                return Err(
+                                    self.error_here("expected integer after `-` in range pattern")
+                                );
                             }
                         }
-                        _ => return Err(self.error_here("expected integer after `from` in range pattern")),
+                        _ => {
+                            return Err(
+                                self.error_here("expected integer after `from` in range pattern")
+                            );
+                        }
                     };
                     self.expect(TokenKind::KeywordTo, "expected `to` in range pattern")?;
                     let end_token = self.advance();
@@ -2771,10 +2715,16 @@ impl Parser {
                             if let TokenKind::Integer(v) = next.kind {
                                 -v
                             } else {
-                                return Err(self.error_here("expected integer after `-` in range pattern"));
+                                return Err(
+                                    self.error_here("expected integer after `-` in range pattern")
+                                );
                             }
                         }
-                        _ => return Err(self.error_here("expected integer after `to` in range pattern")),
+                        _ => {
+                            return Err(
+                                self.error_here("expected integer after `to` in range pattern")
+                            );
+                        }
                     };
                     let span = name_span.join(end_token.span);
                     return Ok(MatchPattern::RangeBinding {
@@ -2784,7 +2734,7 @@ impl Parser {
                         span,
                     });
                 }
-                
+
                 Ok(MatchPattern::Identifier(name))
             }
             _ => Err(self.error_here("invalid match pattern")),
@@ -2805,7 +2755,6 @@ impl Parser {
         }
     }
 
-    /// Consume an identifier or keyword-as-identifier (for parameter names in extern fn).
     fn consume_identifier_or_keyword(&mut self) -> ParseResult<(String, Span)> {
         let kind = self.peek_kind().clone();
         let span = self.current_span();
@@ -2814,43 +2763,151 @@ impl Parser {
                 self.advance();
                 Ok((name, span))
             }
-            // Allow keywords as identifiers in extern fn parameters.
-            TokenKind::KeywordActor => { self.advance(); Ok(("actor".to_string(), span)) }
-            TokenKind::KeywordStore => { self.advance(); Ok(("store".to_string(), span)) }
-            TokenKind::KeywordPersist => { self.advance(); Ok(("persist".to_string(), span)) }
-            TokenKind::KeywordType => { self.advance(); Ok(("type".to_string(), span)) }
-            TokenKind::KeywordMatch => { self.advance(); Ok(("match".to_string(), span)) }
-            TokenKind::KeywordFn => { self.advance(); Ok(("fn".to_string(), span)) }
-            TokenKind::KeywordAnd => { self.advance(); Ok(("and".to_string(), span)) }
-            TokenKind::KeywordOr => { self.advance(); Ok(("or".to_string(), span)) }
-            TokenKind::KeywordTrue => { self.advance(); Ok(("true".to_string(), span)) }
-            TokenKind::KeywordFalse => { self.advance(); Ok(("false".to_string(), span)) }
-            TokenKind::KeywordIs => { self.advance(); Ok(("is".to_string(), span)) }
-            TokenKind::KeywordIsnt => { self.advance(); Ok(("isnt".to_string(), span)) }
-            TokenKind::KeywordExtern => { self.advance(); Ok(("extern".to_string(), span)) }
-            TokenKind::KeywordUnsafe => { self.advance(); Ok(("unsafe".to_string(), span)) }
-            TokenKind::KeywordAsm => { self.advance(); Ok(("asm".to_string(), span)) }
-            TokenKind::KeywordPtr => { self.advance(); Ok(("ptr".to_string(), span)) }
-            TokenKind::KeywordErr => { self.advance(); Ok(("err".to_string(), span)) }
-            TokenKind::KeywordNone => { self.advance(); Ok(("none".to_string(), span)) }
-            TokenKind::KeywordEnum => { self.advance(); Ok(("enum".to_string(), span)) }
-            TokenKind::KeywordReturn => { self.advance(); Ok(("return".to_string(), span)) }
-            TokenKind::KeywordTrait => { self.advance(); Ok(("trait".to_string(), span)) }
-            TokenKind::KeywordWith => { self.advance(); Ok(("with".to_string(), span)) }
-            TokenKind::KeywordIf => { self.advance(); Ok(("if".to_string(), span)) }
-            TokenKind::KeywordElif => { self.advance(); Ok(("elif".to_string(), span)) }
-            TokenKind::KeywordElse => { self.advance(); Ok(("else".to_string(), span)) }
-            TokenKind::KeywordWhile => { self.advance(); Ok(("while".to_string(), span)) }
-            TokenKind::KeywordFor => { self.advance(); Ok(("for".to_string(), span)) }
-            TokenKind::KeywordIn => { self.advance(); Ok(("in".to_string(), span)) }
-            TokenKind::KeywordBreak => { self.advance(); Ok(("break".to_string(), span)) }
-            TokenKind::KeywordContinue => { self.advance(); Ok(("continue".to_string(), span)) }
-            TokenKind::KeywordTo => { self.advance(); Ok(("to".to_string(), span)) }
-            TokenKind::KeywordStep => { self.advance(); Ok(("step".to_string(), span)) }
-            TokenKind::KeywordUnless => { self.advance(); Ok(("unless".to_string(), span)) }
-            TokenKind::KeywordUntil => { self.advance(); Ok(("until".to_string(), span)) }
-            TokenKind::KeywordLoop => { self.advance(); Ok(("loop".to_string(), span)) }
-            TokenKind::KeywordWhen => { self.advance(); Ok(("when".to_string(), span)) }
+
+            TokenKind::KeywordActor => {
+                self.advance();
+                Ok(("actor".to_string(), span))
+            }
+            TokenKind::KeywordStore => {
+                self.advance();
+                Ok(("store".to_string(), span))
+            }
+            TokenKind::KeywordPersist => {
+                self.advance();
+                Ok(("persist".to_string(), span))
+            }
+            TokenKind::KeywordType => {
+                self.advance();
+                Ok(("type".to_string(), span))
+            }
+            TokenKind::KeywordMatch => {
+                self.advance();
+                Ok(("match".to_string(), span))
+            }
+            TokenKind::KeywordFn => {
+                self.advance();
+                Ok(("fn".to_string(), span))
+            }
+            TokenKind::KeywordAnd => {
+                self.advance();
+                Ok(("and".to_string(), span))
+            }
+            TokenKind::KeywordOr => {
+                self.advance();
+                Ok(("or".to_string(), span))
+            }
+            TokenKind::KeywordTrue => {
+                self.advance();
+                Ok(("true".to_string(), span))
+            }
+            TokenKind::KeywordFalse => {
+                self.advance();
+                Ok(("false".to_string(), span))
+            }
+            TokenKind::KeywordIs => {
+                self.advance();
+                Ok(("is".to_string(), span))
+            }
+            TokenKind::KeywordIsnt => {
+                self.advance();
+                Ok(("isnt".to_string(), span))
+            }
+            TokenKind::KeywordExtern => {
+                self.advance();
+                Ok(("extern".to_string(), span))
+            }
+            TokenKind::KeywordUnsafe => {
+                self.advance();
+                Ok(("unsafe".to_string(), span))
+            }
+            TokenKind::KeywordAsm => {
+                self.advance();
+                Ok(("asm".to_string(), span))
+            }
+            TokenKind::KeywordPtr => {
+                self.advance();
+                Ok(("ptr".to_string(), span))
+            }
+            TokenKind::KeywordErr => {
+                self.advance();
+                Ok(("err".to_string(), span))
+            }
+            TokenKind::KeywordNone => {
+                self.advance();
+                Ok(("none".to_string(), span))
+            }
+            TokenKind::KeywordEnum => {
+                self.advance();
+                Ok(("enum".to_string(), span))
+            }
+            TokenKind::KeywordReturn => {
+                self.advance();
+                Ok(("return".to_string(), span))
+            }
+            TokenKind::KeywordTrait => {
+                self.advance();
+                Ok(("trait".to_string(), span))
+            }
+            TokenKind::KeywordWith => {
+                self.advance();
+                Ok(("with".to_string(), span))
+            }
+            TokenKind::KeywordIf => {
+                self.advance();
+                Ok(("if".to_string(), span))
+            }
+            TokenKind::KeywordElif => {
+                self.advance();
+                Ok(("elif".to_string(), span))
+            }
+            TokenKind::KeywordElse => {
+                self.advance();
+                Ok(("else".to_string(), span))
+            }
+            TokenKind::KeywordWhile => {
+                self.advance();
+                Ok(("while".to_string(), span))
+            }
+            TokenKind::KeywordFor => {
+                self.advance();
+                Ok(("for".to_string(), span))
+            }
+            TokenKind::KeywordIn => {
+                self.advance();
+                Ok(("in".to_string(), span))
+            }
+            TokenKind::KeywordBreak => {
+                self.advance();
+                Ok(("break".to_string(), span))
+            }
+            TokenKind::KeywordContinue => {
+                self.advance();
+                Ok(("continue".to_string(), span))
+            }
+            TokenKind::KeywordTo => {
+                self.advance();
+                Ok(("to".to_string(), span))
+            }
+            TokenKind::KeywordStep => {
+                self.advance();
+                Ok(("step".to_string(), span))
+            }
+            TokenKind::KeywordUnless => {
+                self.advance();
+                Ok(("unless".to_string(), span))
+            }
+            TokenKind::KeywordUntil => {
+                self.advance();
+                Ok(("until".to_string(), span))
+            }
+            TokenKind::KeywordLoop => {
+                self.advance();
+                Ok(("loop".to_string(), span))
+            }
+            TokenKind::KeywordWhen => {
+                self.advance();
+                Ok(("when".to_string(), span))
+            }
             _ => Err(self.error_here("expected identifier")),
         }
     }
@@ -2887,7 +2944,13 @@ impl Parser {
     }
 
     fn report_missing_dedent(&mut self, start_span: Span, context: &str) {
-        let span = start_span.join(self.previous_span());
+        let end = self.previous_span();
+        // At EOF, use a point-span at the end rather than spanning the entire block
+        let span = if self.check(TokenKind::Eof) {
+            Span::with_file(end.end, end.end, end.file_id)
+        } else {
+            start_span.join(end)
+        };
         let diagnostic = Diagnostic::new(context, span)
             .with_help("Add a matching dedent/outdent to close this block.");
         self.record_error(diagnostic);
@@ -2963,21 +3026,24 @@ impl Parser {
         false
     }
 
-    /// S2.4: Check if current `[` starts a destructuring pattern binding `[a, b] is expr`
     fn peek_is_pattern_binding(&self) -> bool {
-        // Scan forward from [ to find matching ], then check for `is`
         let mut offset = 1usize;
         let mut depth = 1i32;
         while let Some(token) = self.tokens.get(self.index + offset) {
             match &token.kind {
-                TokenKind::LBracket => { depth += 1; offset += 1; }
+                TokenKind::LBracket => {
+                    depth += 1;
+                    offset += 1;
+                }
                 TokenKind::RBracket => {
                     depth -= 1;
                     if depth == 0 {
-                        // Check if next non-newline token is `is`
                         offset += 1;
                         while let Some(t) = self.tokens.get(self.index + offset) {
-                            if matches!(t.kind, TokenKind::Newline) { offset += 1; continue; }
+                            if matches!(t.kind, TokenKind::Newline) {
+                                offset += 1;
+                                continue;
+                            }
                             return matches!(t.kind, TokenKind::KeywordIs);
                         }
                         return false;
@@ -2985,31 +3051,36 @@ impl Parser {
                     offset += 1;
                 }
                 TokenKind::Newline | TokenKind::Eof => return false,
-                _ => { offset += 1; }
+                _ => {
+                    offset += 1;
+                }
             }
         }
         false
     }
 
-    /// S2.4: Check if current identifier is a constructor destructuring `Some(x) is expr`
     fn peek_is_constructor_pattern_binding(&self) -> bool {
-        // Must be an uppercase identifier followed by `(`
         if let Some(TokenKind::Identifier(name)) = self.tokens.get(self.index).map(|t| &t.kind) {
             if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                // Look for ( after identifier, skip to matching ), then check for `is`
                 if let Some(t) = self.tokens.get(self.index + 1) {
                     if matches!(t.kind, TokenKind::LParen) {
                         let mut offset = 2usize;
                         let mut depth = 1i32;
                         while let Some(token) = self.tokens.get(self.index + offset) {
                             match &token.kind {
-                                TokenKind::LParen => { depth += 1; offset += 1; }
+                                TokenKind::LParen => {
+                                    depth += 1;
+                                    offset += 1;
+                                }
                                 TokenKind::RParen => {
                                     depth -= 1;
                                     if depth == 0 {
                                         offset += 1;
                                         while let Some(t) = self.tokens.get(self.index + offset) {
-                                            if matches!(t.kind, TokenKind::Newline) { offset += 1; continue; }
+                                            if matches!(t.kind, TokenKind::Newline) {
+                                                offset += 1;
+                                                continue;
+                                            }
                                             return matches!(t.kind, TokenKind::KeywordIs);
                                         }
                                         return false;
@@ -3017,7 +3088,9 @@ impl Parser {
                                     offset += 1;
                                 }
                                 TokenKind::Newline | TokenKind::Eof => return false,
-                                _ => { offset += 1; }
+                                _ => {
+                                    offset += 1;
+                                }
                             }
                         }
                     }
@@ -3027,14 +3100,20 @@ impl Parser {
         false
     }
 
-    /// S2.4: Parse a destructuring pattern binding
     fn parse_pattern_binding(&mut self) -> ParseResult<Statement> {
         let span = self.current_span();
         let pattern = self.parse_match_pattern()?;
-        self.expect(TokenKind::KeywordIs, "expected `is` after destructuring pattern")?;
+        self.expect(
+            TokenKind::KeywordIs,
+            "expected `is` after destructuring pattern",
+        )?;
         self.skip_newlines();
         let value = self.parse_expression()?;
-        Ok(Statement::PatternBinding { pattern, value, span })
+        Ok(Statement::PatternBinding {
+            pattern,
+            value,
+            span,
+        })
     }
 
     fn parse_extern_function(&mut self) -> ParseResult<ExternFunction> {
@@ -3048,9 +3127,9 @@ impl Parser {
         } else {
             None
         };
-        let span = start.join(name_span).join(
-            return_type.as_ref().map(|t| t.span).unwrap_or(name_span)
-        );
+        let span = start
+            .join(name_span)
+            .join(return_type.as_ref().map(|t| t.span).unwrap_or(name_span));
         Ok(ExternFunction {
             name,
             params,
@@ -3114,10 +3193,7 @@ impl Parser {
 
     fn peek_kind(&self) -> &TokenKind {
         static EOF: TokenKind = TokenKind::Eof;
-        self.tokens
-            .get(self.index)
-            .map(|t| &t.kind)
-            .unwrap_or(&EOF)
+        self.tokens.get(self.index).map(|t| &t.kind).unwrap_or(&EOF)
     }
 
     fn peek_next_kind(&self) -> Option<&TokenKind> {
@@ -3128,8 +3204,6 @@ impl Parser {
         matches!(self.tokens.get(self.index), Some(token) if token.kind == kind)
     }
 
-    /// Check if the token at `offset` positions ahead matches the given kind.
-    /// `check_ahead(0, ...)` is equivalent to `check(...)`.
     fn check_ahead(&self, offset: usize, kind: TokenKind) -> bool {
         matches!(self.tokens.get(self.index + offset), Some(token) if token.kind == kind)
     }
@@ -3152,11 +3226,9 @@ impl Parser {
     }
 
     fn advance(&mut self) -> Token {
-        let token = self
-            .tokens
-            .get(self.index)
-            .cloned()
-            .unwrap_or_else(|| Token::new(TokenKind::Eof, Span::new(self.source_len, self.source_len)));
+        let token = self.tokens.get(self.index).cloned().unwrap_or_else(|| {
+            Token::new(TokenKind::Eof, Span::new(self.source_len, self.source_len))
+        });
         self.index += 1;
         token
     }

@@ -34,8 +34,8 @@ impl PlaceholderLowerer {
             Item::Store(store) => self.lower_store(store).map(Item::Store),
             Item::Taxonomy(node) => self.lower_taxonomy(node).map(Item::Taxonomy),
             Item::ExternFunction(_) => Ok(item),
-            Item::ErrorDefinition(_) => Ok(item),  // Error definitions are already in final form
-            Item::TraitDefinition(_) => Ok(item),  // Trait definitions are already in final form
+            Item::ErrorDefinition(_) => Ok(item),
+            Item::TraitDefinition(_) => Ok(item),
             Item::Extension(mut ext) => {
                 let mut lowered_methods = Vec::new();
                 for method in ext.methods {
@@ -160,7 +160,13 @@ impl PlaceholderLowerer {
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 Ok(Statement::Return(value, span))
             }
-            Statement::If { condition, body, elif_branches, else_body, span } => {
+            Statement::If {
+                condition,
+                body,
+                elif_branches,
+                else_body,
+                span,
+            } => {
                 let condition = self
                     .lower_expression(condition)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
@@ -177,58 +183,129 @@ impl PlaceholderLowerer {
                     Some(blk) => Some(self.lower_block(blk)?),
                     None => None,
                 };
-                Ok(Statement::If { condition, body, elif_branches: lowered_elifs, else_body, span })
+                Ok(Statement::If {
+                    condition,
+                    body,
+                    elif_branches: lowered_elifs,
+                    else_body,
+                    span,
+                })
             }
-            Statement::While { condition, body, span } => {
+            Statement::While {
+                condition,
+                body,
+                span,
+            } => {
                 let condition = self
                     .lower_expression(condition)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 let body = self.lower_block(body)?;
-                Ok(Statement::While { condition, body, span })
+                Ok(Statement::While {
+                    condition,
+                    body,
+                    span,
+                })
             }
-            Statement::For { variable, iterable, body, span } => {
+            Statement::For {
+                variable,
+                iterable,
+                body,
+                span,
+            } => {
                 let iterable = self
                     .lower_expression(iterable)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 let body = self.lower_block(body)?;
-                Ok(Statement::For { variable, iterable, body, span })
+                Ok(Statement::For {
+                    variable,
+                    iterable,
+                    body,
+                    span,
+                })
             }
-            Statement::ForKV { key_var, value_var, iterable, body, span } => {
+            Statement::ForKV {
+                key_var,
+                value_var,
+                iterable,
+                body,
+                span,
+            } => {
                 let iterable = self
                     .lower_expression(iterable)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 let body = self.lower_block(body)?;
-                Ok(Statement::ForKV { key_var, value_var, iterable, body, span })
+                Ok(Statement::ForKV {
+                    key_var,
+                    value_var,
+                    iterable,
+                    body,
+                    span,
+                })
             }
-            Statement::ForRange { variable, start, end, step, body, span } => {
+            Statement::ForRange {
+                variable,
+                start,
+                end,
+                step,
+                body,
+                span,
+            } => {
                 let start = self
                     .lower_expression(start)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 let end = self
                     .lower_expression(end)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
-                let step = step.map(|s| self.lower_expression(s)
-                    .and_then(|e| e.expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)))
+                let step = step
+                    .map(|s| {
+                        self.lower_expression(s)
+                            .and_then(|e| e.expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE))
+                    })
                     .transpose()?;
                 let body = self.lower_block(body)?;
-                Ok(Statement::ForRange { variable, start, end, step, body, span })
+                Ok(Statement::ForRange {
+                    variable,
+                    start,
+                    end,
+                    step,
+                    body,
+                    span,
+                })
             }
             Statement::Break(span) => Ok(Statement::Break(span)),
             Statement::Continue(span) => Ok(Statement::Continue(span)),
-            Statement::FieldAssign { target, field, value, span } => {
+            Statement::FieldAssign {
+                target,
+                field,
+                value,
+                span,
+            } => {
                 let target = self
                     .lower_expression(target)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
                 let value = self
                     .lower_expression(value)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
-                Ok(Statement::FieldAssign { target, field, value, span })
+                Ok(Statement::FieldAssign {
+                    target,
+                    field,
+                    value,
+                    span,
+                })
             }
-            Statement::PatternBinding { pattern, value, span } => {
+            Statement::PatternBinding {
+                pattern,
+                value,
+                span,
+            } => {
                 let value = self
                     .lower_expression(value)?
                     .expect_no_placeholders(PLACEHOLDER_USAGE_MESSAGE)?;
-                Ok(Statement::PatternBinding { pattern, value, span })
+                Ok(Statement::PatternBinding {
+                    pattern,
+                    value,
+                    span,
+                })
             }
         }
     }
@@ -239,7 +316,12 @@ impl PlaceholderLowerer {
                 Expression::Placeholder(index, span),
                 PlaceholderInfo::new(index, span),
             )),
-            Expression::Binary { op, left, right, span } => {
+            Expression::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => {
                 let left = self.lower_expression(*left)?;
                 let right = self.lower_expression(*right)?;
                 Ok(ExprLowering::with_children(
@@ -253,7 +335,11 @@ impl PlaceholderLowerer {
                     right.placeholder,
                 ))
             }
-            Expression::Unary { op, expr: inner, span } => {
+            Expression::Unary {
+                op,
+                expr: inner,
+                span,
+            } => {
                 let lowered = self.lower_expression(*inner)?;
                 Ok(ExprLowering::with_child(
                     Expression::Unary {
@@ -273,8 +359,10 @@ impl PlaceholderLowerer {
                 for (key, value) in entries {
                     let lowered_key = self.lower_expression(key)?;
                     let lowered_value = self.lower_expression(value)?;
-                    placeholder = PlaceholderInfo::merge_option(placeholder, lowered_key.placeholder);
-                    placeholder = PlaceholderInfo::merge_option(placeholder, lowered_value.placeholder);
+                    placeholder =
+                        PlaceholderInfo::merge_option(placeholder, lowered_key.placeholder);
+                    placeholder =
+                        PlaceholderInfo::merge_option(placeholder, lowered_value.placeholder);
                     lowered_entries.push((lowered_key.expr, lowered_value.expr));
                 }
                 Ok(ExprLowering::new_with_placeholder(
@@ -292,8 +380,18 @@ impl PlaceholderLowerer {
                     lowered.placeholder,
                 ))
             }
-            Expression::Call { callee, args, arg_names, span, .. } => self.lower_call(*callee, args, arg_names, span),
-            Expression::Member { target, property, span } => {
+            Expression::Call {
+                callee,
+                args,
+                arg_names,
+                span,
+                ..
+            } => self.lower_call(*callee, args, arg_names, span),
+            Expression::Member {
+                target,
+                property,
+                span,
+            } => {
                 let lowered = self.lower_expression(*target)?;
                 Ok(ExprLowering::with_child(
                     Expression::Member {
@@ -304,7 +402,11 @@ impl PlaceholderLowerer {
                     lowered.placeholder,
                 ))
             }
-            Expression::Index { target, index, span } => {
+            Expression::Index {
+                target,
+                index,
+                span,
+            } => {
                 let target_lowered = self.lower_expression(*target)?;
                 let index_lowered = self.lower_expression(*index)?;
                 let placeholder = PlaceholderInfo::merge_option(
@@ -320,7 +422,12 @@ impl PlaceholderLowerer {
                     placeholder,
                 ))
             }
-            Expression::Ternary { condition, then_branch, else_branch, span } => {
+            Expression::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            } => {
                 let cond = self.lower_expression(*condition)?;
                 let then_b = self.lower_expression(*then_branch)?;
                 let else_b = self.lower_expression(*else_branch)?;
@@ -343,12 +450,16 @@ impl PlaceholderLowerer {
                 let body = self.lower_block(body)?;
                 Ok(ExprLowering::new(Expression::Lambda { params, body, span }))
             }
-            // S2.1: Pipeline desugaring — `a ~ f(args)` → `f(a, args)` (or with $ replacement)
-            Expression::Pipeline { left, right, span } => {
-                self.lower_pipeline(*left, *right, span)
-            }
-            // S2.2/S2.3: Comprehensions — lower sub-expressions
-            Expression::ListComprehension { body, var, iterable, condition, span } => {
+
+            Expression::Pipeline { left, right, span } => self.lower_pipeline(*left, *right, span),
+
+            Expression::ListComprehension {
+                body,
+                var,
+                iterable,
+                condition,
+                span,
+            } => {
                 let body = self.lower_expression(*body)?;
                 let iterable = self.lower_expression(*iterable)?;
                 let condition = match condition {
@@ -363,7 +474,14 @@ impl PlaceholderLowerer {
                     span,
                 }))
             }
-            Expression::MapComprehension { key, value, var, iterable, condition, span } => {
+            Expression::MapComprehension {
+                key,
+                value,
+                var,
+                iterable,
+                condition,
+                span,
+            } => {
                 let key = self.lower_expression(*key)?;
                 let value = self.lower_expression(*value)?;
                 let iterable = self.lower_expression(*iterable)?;
@@ -384,7 +502,12 @@ impl PlaceholderLowerer {
         }
     }
 
-    fn lower_collection<F>(&mut self, items: Vec<Expression>, _span: Span, make: F) -> Result<ExprLowering, Diagnostic>
+    fn lower_collection<F>(
+        &mut self,
+        items: Vec<Expression>,
+        _span: Span,
+        make: F,
+    ) -> Result<ExprLowering, Diagnostic>
     where
         F: Fn(Vec<Expression>) -> Expression,
     {
@@ -395,7 +518,10 @@ impl PlaceholderLowerer {
             placeholder = PlaceholderInfo::merge_option(placeholder, lowered.placeholder);
             lowered_items.push(lowered.expr);
         }
-        Ok(ExprLowering::new_with_placeholder(make(lowered_items), placeholder))
+        Ok(ExprLowering::new_with_placeholder(
+            make(lowered_items),
+            placeholder,
+        ))
     }
 
     fn lower_call(
@@ -428,12 +554,12 @@ impl PlaceholderLowerer {
 
     fn lower_match(&mut self, match_expr: MatchExpression) -> Result<ExprLowering, Diagnostic> {
         let mut lowered = match_expr;
-    let value = self.lower_expression(*lowered.value)?;
-    lowered.value = Box::new(value.expr);
-    let placeholder = value.placeholder;
+        let value = self.lower_expression(*lowered.value)?;
+        lowered.value = Box::new(value.expr);
+        let placeholder = value.placeholder;
         for arm in lowered.arms.iter_mut() {
             arm.body = self.lower_block(arm.body.clone())?;
-            // S3.2: Lower guard expression if present
+
             if let Some(guard) = arm.guard.take() {
                 let lowered_guard = self.lower_expression(*guard)?;
                 arm.guard = Some(Box::new(lowered_guard.expr));
@@ -448,25 +574,24 @@ impl PlaceholderLowerer {
         ))
     }
 
-    /// S2.1: Desugar pipeline `a ~ f(args)` into a plain call.
-    ///
-    /// Three forms:
-    ///   1. `a ~ f(x, $, y)` → `f(x, a, y)`       (explicit $ placeholder)
-    ///   2. `a ~ f(x, y)`    → `f(a, x, y)`        (prepend as first arg)
-    ///   3. `a ~ f`          → `f(a)`               (bare identifier)
     fn lower_pipeline(
         &mut self,
         left: Expression,
         right: Expression,
         span: Span,
     ) -> Result<ExprLowering, Diagnostic> {
-        // Lower the left-hand side first
         let left_lowered = self.lower_expression(left)?;
-        let left_expr = left_lowered
-            .expect_no_placeholders("placeholder ($) cannot appear on the left side of a pipeline")?;
+        let left_expr = left_lowered.expect_no_placeholders(
+            "placeholder ($) cannot appear on the left side of a pipeline",
+        )?;
 
         let desugared = match right {
-            Expression::Call { callee, args, span: call_span, .. } => {
+            Expression::Call {
+                callee,
+                args,
+                span: call_span,
+                ..
+            } => {
                 let has_placeholder = args.iter().any(|a| expr_contains_placeholder(a));
                 let new_args = if has_placeholder {
                     args.into_iter()
@@ -498,7 +623,6 @@ impl PlaceholderLowerer {
             }
         };
 
-        // Recursively lower the desugared result (handles nested pipelines, placeholders in args, etc.)
         self.lower_expression(desugared)
     }
 
@@ -524,7 +648,11 @@ impl PlaceholderLowerer {
         let replaced = info.replace_placeholders(body, &names);
         let block = Block::from_expression(replaced);
         let span = block.span;
-        Ok(Expression::Lambda { params, body: block, span })
+        Ok(Expression::Lambda {
+            params,
+            body: block,
+            span,
+        })
     }
 }
 
@@ -628,11 +756,9 @@ impl PlaceholderInfo {
         }
         for expected in 1..=max {
             if !self.indexes.contains(&expected) {
-                return Err(
-                    self.diagnostic(format!(
-                        "missing placeholder ${expected} (placeholders must be contiguous from $ or $1)"
-                    )),
-                );
+                return Err(self.diagnostic(format!(
+                    "missing placeholder ${expected} (placeholders must be contiguous from $ or $1)"
+                )));
             }
         }
         Ok(())
@@ -649,7 +775,12 @@ impl PlaceholderInfo {
                     .unwrap_or_else(|| format!("_arg{}", param_idx));
                 Expression::Identifier(name, span)
             }
-            Expression::Binary { op, left, right, span } => Expression::Binary {
+            Expression::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => Expression::Binary {
                 op,
                 left: Box::new(self.replace_placeholders(*left, names)),
                 right: Box::new(self.replace_placeholders(*right, names)),
@@ -683,7 +814,9 @@ impl PlaceholderInfo {
                     .collect(),
                 span,
             ),
-            Expression::Call { callee, args, span, .. } => Expression::Call {
+            Expression::Call {
+                callee, args, span, ..
+            } => Expression::Call {
                 callee: Box::new(self.replace_placeholders(*callee, names)),
                 args: args
                     .into_iter()
@@ -692,17 +825,30 @@ impl PlaceholderInfo {
                 arg_names: vec![],
                 span,
             },
-            Expression::Member { target, property, span } => Expression::Member {
+            Expression::Member {
+                target,
+                property,
+                span,
+            } => Expression::Member {
                 target: Box::new(self.replace_placeholders(*target, names)),
                 property,
                 span,
             },
-            Expression::Index { target, index, span } => Expression::Index {
+            Expression::Index {
+                target,
+                index,
+                span,
+            } => Expression::Index {
                 target: Box::new(self.replace_placeholders(*target, names)),
                 index: Box::new(self.replace_placeholders(*index, names)),
                 span,
             },
-            Expression::Ternary { condition, then_branch, else_branch, span } => Expression::Ternary {
+            Expression::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            } => Expression::Ternary {
                 condition: Box::new(self.replace_placeholders(*condition, names)),
                 then_branch: Box::new(self.replace_placeholders(*then_branch, names)),
                 else_branch: Box::new(self.replace_placeholders(*else_branch, names)),
@@ -714,7 +860,6 @@ impl PlaceholderInfo {
                     .arms
                     .into_iter()
                     .map(|mut arm| {
-                        // S3.2: Replace placeholders in guard expression
                         if let Some(guard) = arm.guard.take() {
                             arm.guard = Some(Box::new(self.replace_placeholders(*guard, names)));
                         }
@@ -744,51 +889,131 @@ impl PlaceholderInfo {
                 Statement::Expression(expr) => {
                     Statement::Expression(self.replace_placeholders(expr, names))
                 }
-                Statement::Return(expr, span) => Statement::Return(
-                    self.replace_placeholders(expr, names),
+                Statement::Return(expr, span) => {
+                    Statement::Return(self.replace_placeholders(expr, names), span)
+                }
+                Statement::If {
+                    condition,
+                    body,
+                    elif_branches,
+                    else_body,
                     span,
-                ),
-                Statement::If { condition, body, elif_branches, else_body, span } => {
+                } => {
                     let condition = self.replace_placeholders(condition, names);
                     let body = self.replace_block_placeholders(body, names);
-                    let elif_branches = elif_branches.into_iter().map(|(cond, blk)| {
-                        (self.replace_placeholders(cond, names), self.replace_block_placeholders(blk, names))
-                    }).collect();
-                    let else_body = else_body.map(|blk| self.replace_block_placeholders(blk, names));
-                    Statement::If { condition, body, elif_branches, else_body, span }
+                    let elif_branches = elif_branches
+                        .into_iter()
+                        .map(|(cond, blk)| {
+                            (
+                                self.replace_placeholders(cond, names),
+                                self.replace_block_placeholders(blk, names),
+                            )
+                        })
+                        .collect();
+                    let else_body =
+                        else_body.map(|blk| self.replace_block_placeholders(blk, names));
+                    Statement::If {
+                        condition,
+                        body,
+                        elif_branches,
+                        else_body,
+                        span,
+                    }
                 }
-                Statement::While { condition, body, span } => {
+                Statement::While {
+                    condition,
+                    body,
+                    span,
+                } => {
                     let condition = self.replace_placeholders(condition, names);
                     let body = self.replace_block_placeholders(body, names);
-                    Statement::While { condition, body, span }
+                    Statement::While {
+                        condition,
+                        body,
+                        span,
+                    }
                 }
-                Statement::For { variable, iterable, body, span } => {
+                Statement::For {
+                    variable,
+                    iterable,
+                    body,
+                    span,
+                } => {
                     let iterable = self.replace_placeholders(iterable, names);
                     let body = self.replace_block_placeholders(body, names);
-                    Statement::For { variable, iterable, body, span }
+                    Statement::For {
+                        variable,
+                        iterable,
+                        body,
+                        span,
+                    }
                 }
-                Statement::ForKV { key_var, value_var, iterable, body, span } => {
+                Statement::ForKV {
+                    key_var,
+                    value_var,
+                    iterable,
+                    body,
+                    span,
+                } => {
                     let iterable = self.replace_placeholders(iterable, names);
                     let body = self.replace_block_placeholders(body, names);
-                    Statement::ForKV { key_var, value_var, iterable, body, span }
+                    Statement::ForKV {
+                        key_var,
+                        value_var,
+                        iterable,
+                        body,
+                        span,
+                    }
                 }
-                Statement::ForRange { variable, start, end, step, body, span } => {
+                Statement::ForRange {
+                    variable,
+                    start,
+                    end,
+                    step,
+                    body,
+                    span,
+                } => {
                     let start = self.replace_placeholders(start, names);
                     let end = self.replace_placeholders(end, names);
                     let step = step.map(|s| self.replace_placeholders(s, names));
                     let body = self.replace_block_placeholders(body, names);
-                    Statement::ForRange { variable, start, end, step, body, span }
+                    Statement::ForRange {
+                        variable,
+                        start,
+                        end,
+                        step,
+                        body,
+                        span,
+                    }
                 }
                 Statement::Break(span) => Statement::Break(span),
                 Statement::Continue(span) => Statement::Continue(span),
-                Statement::FieldAssign { target, field, value, span } => {
+                Statement::FieldAssign {
+                    target,
+                    field,
+                    value,
+                    span,
+                } => {
                     let target = self.replace_placeholders(target, names);
                     let value = self.replace_placeholders(value, names);
-                    Statement::FieldAssign { target, field, value, span }
+                    Statement::FieldAssign {
+                        target,
+                        field,
+                        value,
+                        span,
+                    }
                 }
-                Statement::PatternBinding { pattern, value, span } => {
+                Statement::PatternBinding {
+                    pattern,
+                    value,
+                    span,
+                } => {
                     let value = self.replace_placeholders(value, names);
-                    Statement::PatternBinding { pattern, value, span }
+                    Statement::PatternBinding {
+                        pattern,
+                        value,
+                        span,
+                    }
                 }
             })
             .collect();
@@ -805,9 +1030,6 @@ impl PlaceholderInfo {
     }
 }
 
-// ── Pipeline helpers (S2.1) ──────────────────────────────────────────
-
-/// Returns `true` if `expr` (or any sub-expression) contains a `$` placeholder.
 fn expr_contains_placeholder(expr: &Expression) -> bool {
     match expr {
         Expression::Placeholder(_, _) => true,
@@ -826,7 +1048,12 @@ fn expr_contains_placeholder(expr: &Expression) -> bool {
         Expression::Map(entries, _) => entries
             .iter()
             .any(|(k, v)| expr_contains_placeholder(k) || expr_contains_placeholder(v)),
-        Expression::Ternary { condition, then_branch, else_branch, .. } => {
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             expr_contains_placeholder(condition)
                 || expr_contains_placeholder(then_branch)
                 || expr_contains_placeholder(else_branch)
@@ -836,22 +1063,32 @@ fn expr_contains_placeholder(expr: &Expression) -> bool {
     }
 }
 
-/// Replaces every `$` placeholder in `expr` with a clone of `replacement`.
 fn replace_placeholder_in_expr(expr: Expression, replacement: &Expression) -> Expression {
     match expr {
         Expression::Placeholder(_, _) => replacement.clone(),
-        Expression::Binary { op, left, right, span } => Expression::Binary {
+        Expression::Binary {
+            op,
+            left,
+            right,
+            span,
+        } => Expression::Binary {
             op,
             left: Box::new(replace_placeholder_in_expr(*left, replacement)),
             right: Box::new(replace_placeholder_in_expr(*right, replacement)),
             span,
         },
-        Expression::Unary { op, expr: inner, span } => Expression::Unary {
+        Expression::Unary {
+            op,
+            expr: inner,
+            span,
+        } => Expression::Unary {
             op,
             expr: Box::new(replace_placeholder_in_expr(*inner, replacement)),
             span,
         },
-        Expression::Call { callee, args, span, .. } => Expression::Call {
+        Expression::Call {
+            callee, args, span, ..
+        } => Expression::Call {
             callee: Box::new(replace_placeholder_in_expr(*callee, replacement)),
             args: args
                 .into_iter()
@@ -860,12 +1097,20 @@ fn replace_placeholder_in_expr(expr: Expression, replacement: &Expression) -> Ex
             arg_names: vec![],
             span,
         },
-        Expression::Member { target, property, span } => Expression::Member {
+        Expression::Member {
+            target,
+            property,
+            span,
+        } => Expression::Member {
             target: Box::new(replace_placeholder_in_expr(*target, replacement)),
             property,
             span,
         },
-        Expression::Index { target, index, span } => Expression::Index {
+        Expression::Index {
+            target,
+            index,
+            span,
+        } => Expression::Index {
             target: Box::new(replace_placeholder_in_expr(*target, replacement)),
             index: Box::new(replace_placeholder_in_expr(*index, replacement)),
             span,
@@ -889,14 +1134,17 @@ fn replace_placeholder_in_expr(expr: Expression, replacement: &Expression) -> Ex
                 .collect(),
             span,
         ),
-        Expression::Ternary { condition, then_branch, else_branch, span } => {
-            Expression::Ternary {
-                condition: Box::new(replace_placeholder_in_expr(*condition, replacement)),
-                then_branch: Box::new(replace_placeholder_in_expr(*then_branch, replacement)),
-                else_branch: Box::new(replace_placeholder_in_expr(*else_branch, replacement)),
-                span,
-            }
-        }
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => Expression::Ternary {
+            condition: Box::new(replace_placeholder_in_expr(*condition, replacement)),
+            then_branch: Box::new(replace_placeholder_in_expr(*then_branch, replacement)),
+            else_branch: Box::new(replace_placeholder_in_expr(*else_branch, replacement)),
+            span,
+        },
         Expression::Throw { value, span } => Expression::Throw {
             value: Box::new(replace_placeholder_in_expr(*value, replacement)),
             span,

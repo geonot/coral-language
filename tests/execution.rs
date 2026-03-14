@@ -73,7 +73,10 @@ fn assert_output_contains(source: &str, substring: &str) {
     assert!(
         stdout.contains(substring),
         "Expected stdout to contain {:?} but got:\n--- STDOUT ---\n{}\n--- STDERR ---\n{}\n--- EXIT CODE: {} ---\n",
-        substring, stdout, stderr, code
+        substring,
+        stdout,
+        stderr,
+        code
     );
 }
 
@@ -469,7 +472,10 @@ fn e2e_fizzbuzz() {
 *main()
     fizzbuzz(15)
 "#,
-        &["1", "2", "Fizz", "4", "Buzz", "Fizz", "7", "8", "Fizz", "Buzz", "11", "Fizz", "13", "14", "FizzBuzz"],
+        &[
+            "1", "2", "Fizz", "4", "Buzz", "Fizz", "7", "8", "Fizz", "Buzz", "11", "Fizz", "13",
+            "14", "FizzBuzz",
+        ],
     );
 }
 
@@ -933,7 +939,11 @@ fn e2e_process_exit() {
     assert!(stdout.contains("before"));
     assert!(!stdout.contains("after"));
     // exit(0) via lli may produce code 0 or -1 (signal) depending on timing
-    assert!(code == 0 || code == -1, "expected exit code 0 or -1 (signal), got {}", code);
+    assert!(
+        code == 0 || code == -1,
+        "expected exit code 0 or -1 (signal), got {}",
+        code
+    );
 }
 
 #[test]
@@ -3544,7 +3554,20 @@ fn e2e_default_param_multiple() {
     config("example.com", 9090)
     config("example.com", 9090, true)
 "#,
-        &["localhost", "8080", "false", "example.com", "8080", "false", "example.com", "9090", "false", "example.com", "9090", "true"],
+        &[
+            "localhost",
+            "8080",
+            "false",
+            "example.com",
+            "8080",
+            "false",
+            "example.com",
+            "9090",
+            "false",
+            "example.com",
+            "9090",
+            "true",
+        ],
     );
 }
 

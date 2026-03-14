@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use coralc::lexer;
 use coralc::parser::Parser;
 use std::env;
@@ -7,8 +7,7 @@ use std::path::Path;
 
 fn main() -> Result<()> {
     let path = env::args().nth(1).expect("usage: dump_tokens <file>");
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path))?;
+    let contents = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path))?;
     let tokens = lexer::lex(&contents).map_err(|diag| anyhow!(diag.message.clone()))?;
     println!("tokens for {}:", Path::new(&path).display());
     for token in &tokens {

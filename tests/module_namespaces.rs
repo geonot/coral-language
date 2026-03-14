@@ -1,5 +1,5 @@
-use coralc::module_loader::{ImportDirective, ModuleLoader};
 use coralc::Compiler;
+use coralc::module_loader::{ImportDirective, ModuleLoader};
 use std::path::PathBuf;
 
 // ============================================================
@@ -19,14 +19,19 @@ fn parse_selective_import_basic() {
     let modules = loader.load_modules(&main_file).expect("load_modules");
 
     // math module should be loaded (the selective import still loads the full module)
-    let math_mod = modules.iter().find(|m| m.name == "math").expect("math module");
+    let math_mod = modules
+        .iter()
+        .find(|m| m.name == "math")
+        .expect("math module");
     assert!(math_mod.exports.contains(&"sin".to_string()));
     assert!(math_mod.exports.contains(&"cos".to_string()));
     assert!(math_mod.exports.contains(&"tan".to_string()));
 
     // The importing module should have the import directive with selections
     let main_mod = modules.last().expect("main module");
-    let math_directive = main_mod.import_directives.iter()
+    let math_directive = main_mod
+        .import_directives
+        .iter()
         .find(|d| d.module_path == "math")
         .expect("math import directive");
     assert!(math_directive.selections.is_some());
@@ -50,7 +55,9 @@ fn parse_directive_without_selection() {
 
     let modules = loader.load_modules(&main_file).expect("load_modules");
     let main_mod = modules.last().expect("main module");
-    let directive = main_mod.import_directives.iter()
+    let directive = main_mod
+        .import_directives
+        .iter()
         .find(|d| d.module_path == "math")
         .expect("math directive");
     assert!(directive.selections.is_none());
@@ -67,14 +74,22 @@ fn qualified_access_via_module_pipeline() {
     let math = temp_dir.path().join("mylib.coral");
     let main_file = temp_dir.path().join("main.coral");
     std::fs::write(&math, "*add(a, b)\n    a + b\n").unwrap();
-    std::fs::write(&main_file, "use mylib\nresult is mylib.add(3, 4)\nlog(result)\n").unwrap();
+    std::fs::write(
+        &main_file,
+        "use mylib\nresult is mylib.add(3, 4)\nlog(result)\n",
+    )
+    .unwrap();
 
     let mut loader = ModuleLoader::new(vec![]);
     let module_sources = loader.load_modules(&main_file).expect("load_modules");
 
     let compiler = Compiler;
     let result = compiler.compile_modules_to_ir(&module_sources);
-    assert!(result.is_ok(), "qualified access should compile: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "qualified access should compile: {:?}",
+        result.err()
+    );
     let (ir, _) = result.unwrap();
     assert!(ir.contains("define"), "should have function definitions");
 }
@@ -87,13 +102,18 @@ fn qualified_access_e2e_execution() {
     let main_file = temp_dir.path().join("main.coral");
     std::fs::write(&helper, "*double(x)\n    x * 2\n").unwrap();
     // Use both qualified (helper.double) and unqualified (double) access
-    std::fs::write(&main_file, "use helper\nresult is helper.double(21)\nlog(result)\n").unwrap();
+    std::fs::write(
+        &main_file,
+        "use helper\nresult is helper.double(21)\nlog(result)\n",
+    )
+    .unwrap();
 
     let mut loader = ModuleLoader::new(vec![]);
     let module_sources = loader.load_modules(&main_file).expect("load_modules");
 
     let compiler = Compiler;
-    let (ir, _) = compiler.compile_modules_to_ir(&module_sources)
+    let (ir, _) = compiler
+        .compile_modules_to_ir(&module_sources)
         .expect("compile modules");
 
     // Write IR to temp file and run via lli
@@ -124,13 +144,18 @@ fn selective_import_e2e_execution() {
     let main_file = temp_dir.path().join("main.coral");
     std::fs::write(&mymath, "*add(a, b)\n    a + b\n*sub(a, b)\n    a - b\n").unwrap();
     // Selective import — use only add
-    std::fs::write(&main_file, "use mymath.{add}\nresult is add(10, 32)\nlog(result)\n").unwrap();
+    std::fs::write(
+        &main_file,
+        "use mymath.{add}\nresult is add(10, 32)\nlog(result)\n",
+    )
+    .unwrap();
 
     let mut loader = ModuleLoader::new(vec![]);
     let module_sources = loader.load_modules(&main_file).expect("load_modules");
 
     let compiler = Compiler;
-    let (ir, _) = compiler.compile_modules_to_ir(&module_sources)
+    let (ir, _) = compiler
+        .compile_modules_to_ir(&module_sources)
         .expect("compile modules");
 
     let ir_file = temp_dir.path().join("test.ll");
@@ -166,7 +191,8 @@ fn module_exports_in_semantic_model() {
 
     // Parse, lower, and analyze using the compiler's module path
     let compiler = Compiler;
-    let (ir, _) = compiler.compile_modules_to_ir(&module_sources)
+    let (ir, _) = compiler
+        .compile_modules_to_ir(&module_sources)
         .expect("compile modules");
     // If we get here, module_exports was correctly populated
     assert!(!ir.is_empty());
@@ -197,7 +223,10 @@ fn find_runtime_lib() -> PathBuf {
         if candidate.exists() {
             return candidate;
         }
-        let candidate = workspace.join("target").join(profile).join("libruntime.dylib");
+        let candidate = workspace
+            .join("target")
+            .join(profile)
+            .join("libruntime.dylib");
         if candidate.exists() {
             return candidate;
         }

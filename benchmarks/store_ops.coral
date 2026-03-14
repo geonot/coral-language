@@ -1,0 +1,64 @@
+# Benchmark: Store (struct) operations
+# Tests: store creation, field access, method calls
+
+store Point
+    x ? 0
+    y ? 0
+    *set_xy(nx, ny)
+        self.x is nx
+        self.y is ny
+    *dist_sq(other)
+        dx is other.x - self.x
+        dy is other.y - self.y
+        dx * dx + dy * dy
+
+store Rect
+    x1 ? 0
+    y1 ? 0
+    x2 ? 0
+    y2 ? 0
+    *set_bounds(a, b, c, d)
+        self.x1 is a
+        self.y1 is b
+        self.x2 is c
+        self.y2 is d
+    *area()
+        w is self.x2 - self.x1
+        h is self.y2 - self.y1
+        w * h
+
+*main()
+    start is time_now()
+
+    # Create many points and compute distances
+    total_dist is 0
+    i is 0
+    while i < 100000
+        p1 is make_Point()
+        p1.set_xy(i, i * 2)
+        p2 is make_Point()
+        p2.set_xy(i + 1, i * 2 + 3)
+        total_dist is total_dist + p1.dist_sq(p2)
+        i is i + 1
+
+    # Create rects and compute areas
+    total_area is 0
+    j is 0
+    while j < 100000
+        r is make_Rect()
+        r.set_bounds(j, j, j + 10, j + 20)
+        total_area is total_area + r.area()
+        j is j + 1
+
+    # Field access in a loop
+    p is make_Point()
+    k is 0
+    while k < 100000
+        p.set_xy(p.x + 1, p.y + 2)
+        k is k + 1
+
+    elapsed is time_now() - start
+    log("total_distance_sq = " + to_string(total_dist))
+    log("total_area = " + to_string(total_area))
+    log("final_point = (" + to_string(p.x) + ", " + to_string(p.y) + ")")
+    log("elapsed_ms: " + to_string(elapsed))

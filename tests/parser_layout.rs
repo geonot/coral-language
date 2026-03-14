@@ -43,7 +43,10 @@ fn reports_missing_block_indent_with_help() {
     let parser = Parser::new(tokens, source.len());
     let error = parser.parse().expect_err("parser should emit diagnostics");
     assert_eq!(error.message, "expected indentation for block");
-    assert_eq!(error.help.as_deref(), Some("Indent block contents with spaces or a tab"));
+    assert_eq!(
+        error.help.as_deref(),
+        Some("Indent block contents with spaces or a tab")
+    );
     let newline = source.find('\n').unwrap() + 1;
     assert_eq!(error.span.start, newline);
 }
@@ -139,7 +142,10 @@ fn parses_regular_store_as_non_persistent() {
     match &program.items[0] {
         Item::Store(store) => {
             assert_eq!(store.name, "Ephemeral");
-            assert!(!store.is_persistent, "regular store should not be persistent");
+            assert!(
+                !store.is_persistent,
+                "regular store should not be persistent"
+            );
             assert!(!store.is_actor);
         }
         other => panic!("expected store definition, got {:?}", other),

@@ -1,0 +1,18 @@
+# Example test file for Coral's test runner
+
+*test_addition()
+    result is 2 + 2
+    log('  checking 2 + 2 = 4')
+
+*test_string_template()
+    name is 'Coral'
+    greeting is 'Hello ${name}'
+    log('  checking template string')
+
+*test_list_operations()
+    items is [1, 2, 3]
+    log('  checking list creation')
+
+*test_boolean_logic()
+    result is true and true
+    log('  checking boolean and')

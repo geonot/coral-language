@@ -1,57 +1,51 @@
-//! Runtime function bindings for LLVM codegen.
-//!
-//! This module declares all external runtime functions that the generated
-//! LLVM IR can call into the Coral runtime library.
-
+use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{FunctionType, IntType, PointerType, StructType};
 use inkwell::values::FunctionValue;
-use inkwell::AddressSpace;
 
-/// Bindings to Coral runtime functions declared in the LLVM module.
 #[allow(dead_code)]
 pub struct RuntimeBindings<'ctx> {
     pub value_ptr_type: PointerType<'ctx>,
-    // NaN-boxing: i64 is the new universal value type
+
     pub value_i64_type: IntType<'ctx>,
-    // NaN-boxing: bridge functions for old-API interop
+
     pub nb_to_handle: FunctionValue<'ctx>,
     pub nb_from_handle: FunctionValue<'ctx>,
-    // NaN-boxing: hot-path constructors (zero allocation for immediates)
+
     pub nb_make_number: FunctionValue<'ctx>,
     pub nb_make_bool: FunctionValue<'ctx>,
     pub nb_make_unit: FunctionValue<'ctx>,
     pub nb_make_none: FunctionValue<'ctx>,
     pub nb_make_string: FunctionValue<'ctx>,
-    // NaN-boxing: hot-path extractors
+
     pub nb_as_number: FunctionValue<'ctx>,
     pub nb_as_bool: FunctionValue<'ctx>,
     pub nb_tag: FunctionValue<'ctx>,
     pub nb_is_truthy: FunctionValue<'ctx>,
     pub nb_is_err: FunctionValue<'ctx>,
     pub nb_is_absent: FunctionValue<'ctx>,
-    // NaN-boxing: retain/release (no-op for immediates)
+
     pub nb_retain: FunctionValue<'ctx>,
     pub nb_release: FunctionValue<'ctx>,
-    // NaN-boxing: arithmetic (fast path for numbers)
+
     pub nb_add: FunctionValue<'ctx>,
     pub nb_sub: FunctionValue<'ctx>,
     pub nb_mul: FunctionValue<'ctx>,
     pub nb_div: FunctionValue<'ctx>,
     pub nb_rem: FunctionValue<'ctx>,
     pub nb_neg: FunctionValue<'ctx>,
-    // NaN-boxing: comparisons (fast path for numbers + immediates)
+
     pub nb_equals: FunctionValue<'ctx>,
     pub nb_not_equals: FunctionValue<'ctx>,
     pub nb_less_than: FunctionValue<'ctx>,
     pub nb_greater_than: FunctionValue<'ctx>,
     pub nb_less_equal: FunctionValue<'ctx>,
     pub nb_greater_equal: FunctionValue<'ctx>,
-    // NaN-boxing: I/O
+
     pub nb_print: FunctionValue<'ctx>,
     pub nb_println: FunctionValue<'ctx>,
-    // Original pointer-based API (kept for cold-path calls via bridge)
+
     pub make_number: FunctionValue<'ctx>,
     pub make_bool: FunctionValue<'ctx>,
     pub make_string: FunctionValue<'ctx>,
@@ -110,28 +104,28 @@ pub struct RuntimeBindings<'ctx> {
     pub actor_send: FunctionValue<'ctx>,
     pub actor_stop: FunctionValue<'ctx>,
     pub actor_self: FunctionValue<'ctx>,
-    // Named actor registry
+
     pub actor_spawn_named: FunctionValue<'ctx>,
     pub actor_lookup: FunctionValue<'ctx>,
     pub actor_register: FunctionValue<'ctx>,
     pub actor_unregister: FunctionValue<'ctx>,
     pub actor_send_named: FunctionValue<'ctx>,
     pub actor_list_named: FunctionValue<'ctx>,
-    // Timer operations
+
     pub timer_send_after: FunctionValue<'ctx>,
     pub timer_schedule_repeat: FunctionValue<'ctx>,
     pub timer_cancel: FunctionValue<'ctx>,
     pub timer_pending_count: FunctionValue<'ctx>,
-    // Main actor sync
+
     pub main_wait: FunctionValue<'ctx>,
     pub main_done_signal: FunctionValue<'ctx>,
     pub closure_invoke_type: FunctionType<'ctx>,
     pub closure_release_type: FunctionType<'ctx>,
-    // Tagged value (ADT) operations
+
     pub make_tagged: FunctionValue<'ctx>,
     pub tagged_is_tag: FunctionValue<'ctx>,
     pub tagged_get_field: FunctionValue<'ctx>,
-    // String operations
+
     pub string_slice: FunctionValue<'ctx>,
     pub string_char_at: FunctionValue<'ctx>,
     pub string_index_of: FunctionValue<'ctx>,
@@ -146,7 +140,7 @@ pub struct RuntimeBindings<'ctx> {
     pub string_contains: FunctionValue<'ctx>,
     pub string_parse_number: FunctionValue<'ctx>,
     pub number_to_string: FunctionValue<'ctx>,
-    // Error value operations
+
     pub make_error: FunctionValue<'ctx>,
     pub make_absent: FunctionValue<'ctx>,
     pub is_err: FunctionValue<'ctx>,
@@ -155,7 +149,7 @@ pub struct RuntimeBindings<'ctx> {
     pub error_name: FunctionValue<'ctx>,
     pub error_code: FunctionValue<'ctx>,
     pub value_or: FunctionValue<'ctx>,
-    // Math operations
+
     pub math_abs: FunctionValue<'ctx>,
     pub math_sqrt: FunctionValue<'ctx>,
     pub math_floor: FunctionValue<'ctx>,
@@ -179,41 +173,41 @@ pub struct RuntimeBindings<'ctx> {
     pub math_tanh: FunctionValue<'ctx>,
     pub math_trunc: FunctionValue<'ctx>,
     pub math_sign: FunctionValue<'ctx>,
-    // Universal iterator
+
     pub value_iter_next: FunctionValue<'ctx>,
-    // Process/environment
+
     pub process_args: FunctionValue<'ctx>,
     pub process_exit: FunctionValue<'ctx>,
     pub env_get: FunctionValue<'ctx>,
     pub env_set: FunctionValue<'ctx>,
-    // File I/O extensions
+
     pub fs_append: FunctionValue<'ctx>,
     pub fs_read_dir: FunctionValue<'ctx>,
     pub fs_mkdir: FunctionValue<'ctx>,
     pub fs_delete: FunctionValue<'ctx>,
     pub fs_is_dir: FunctionValue<'ctx>,
-    // stdin
+
     pub stdin_read_line: FunctionValue<'ctx>,
-    // L2.4: std.io enhancements
+
     pub stderr_write: FunctionValue<'ctx>,
     pub fs_size: FunctionValue<'ctx>,
     pub fs_rename: FunctionValue<'ctx>,
     pub fs_copy: FunctionValue<'ctx>,
     pub fs_mkdirs: FunctionValue<'ctx>,
     pub fs_temp_dir: FunctionValue<'ctx>,
-    // L4.2: std.path operations
+
     pub path_normalize: FunctionValue<'ctx>,
     pub path_resolve: FunctionValue<'ctx>,
     pub path_is_absolute: FunctionValue<'ctx>,
     pub path_parent: FunctionValue<'ctx>,
     pub path_stem: FunctionValue<'ctx>,
-    // L2.5: Process extensions
+
     pub process_exec: FunctionValue<'ctx>,
     pub process_cwd: FunctionValue<'ctx>,
     pub process_chdir: FunctionValue<'ctx>,
     pub process_pid: FunctionValue<'ctx>,
     pub process_hostname: FunctionValue<'ctx>,
-    // List extensions
+
     pub list_contains: FunctionValue<'ctx>,
     pub list_index_of: FunctionValue<'ctx>,
     pub list_reverse: FunctionValue<'ctx>,
@@ -221,29 +215,29 @@ pub struct RuntimeBindings<'ctx> {
     pub list_sort: FunctionValue<'ctx>,
     pub list_join: FunctionValue<'ctx>,
     pub list_concat: FunctionValue<'ctx>,
-    // Map extensions
+
     pub map_remove: FunctionValue<'ctx>,
     pub map_values: FunctionValue<'ctx>,
     pub map_entries: FunctionValue<'ctx>,
     pub map_has_key: FunctionValue<'ctx>,
     pub map_merge: FunctionValue<'ctx>,
-    // Bytes extensions
+
     pub bytes_get: FunctionValue<'ctx>,
     pub bytes_from_string: FunctionValue<'ctx>,
     pub bytes_to_string: FunctionValue<'ctx>,
     pub bytes_slice_val: FunctionValue<'ctx>,
-    // Type reflection
+
     pub type_of: FunctionValue<'ctx>,
-    // Debug introspection (L4.1)
+
     pub debug_inspect: FunctionValue<'ctx>,
     pub debug_time_ns: FunctionValue<'ctx>,
-    // Cooperative yielding (R2.4)
+
     pub actor_yield_check: FunctionValue<'ctx>,
-    // Character operations
+
     pub string_ord: FunctionValue<'ctx>,
     pub string_chr: FunctionValue<'ctx>,
     pub string_compare: FunctionValue<'ctx>,
-    // Store persistence operations
+
     pub store_open: FunctionValue<'ctx>,
     pub store_close: FunctionValue<'ctx>,
     pub store_save_all: FunctionValue<'ctx>,
@@ -257,17 +251,17 @@ pub struct RuntimeBindings<'ctx> {
     pub store_persist: FunctionValue<'ctx>,
     pub store_checkpoint: FunctionValue<'ctx>,
     pub store_all_indices: FunctionValue<'ctx>,
-    // Secondary index operations (R3.7)
+
     pub store_create_index: FunctionValue<'ctx>,
     pub store_drop_index: FunctionValue<'ctx>,
     pub store_find_by_field: FunctionValue<'ctx>,
     pub store_find_by_range: FunctionValue<'ctx>,
     pub store_indexed_fields: FunctionValue<'ctx>,
-    // JSON operations (SL-8)
+
     pub json_parse: FunctionValue<'ctx>,
     pub json_serialize: FunctionValue<'ctx>,
     pub json_serialize_pretty: FunctionValue<'ctx>,
-    // Time operations (SL-9)
+
     pub time_now: FunctionValue<'ctx>,
     pub time_timestamp: FunctionValue<'ctx>,
     pub time_format_iso: FunctionValue<'ctx>,
@@ -277,60 +271,60 @@ pub struct RuntimeBindings<'ctx> {
     pub time_hour: FunctionValue<'ctx>,
     pub time_minute: FunctionValue<'ctx>,
     pub time_second: FunctionValue<'ctx>,
-    // Sleep (L2.3)
+
     pub sleep: FunctionValue<'ctx>,
-    // Random operations (L2.1)
+
     pub random: FunctionValue<'ctx>,
     pub random_int: FunctionValue<'ctx>,
     pub random_seed: FunctionValue<'ctx>,
-    // String lines (SL-6 ext)
+
     pub string_lines: FunctionValue<'ctx>,
-    // Sort (SL-11)
+
     pub list_sort_natural: FunctionValue<'ctx>,
-    // Bytes extensions (SL-7)
+
     pub bytes_from_hex: FunctionValue<'ctx>,
     pub bytes_contains: FunctionValue<'ctx>,
     pub bytes_find: FunctionValue<'ctx>,
-    // Encoding (SL-12)
+
     pub base64_encode: FunctionValue<'ctx>,
     pub base64_decode: FunctionValue<'ctx>,
     pub hex_encode: FunctionValue<'ctx>,
     pub hex_decode: FunctionValue<'ctx>,
-    // URL encoding (L3.2)
+
     pub url_encode: FunctionValue<'ctx>,
     pub url_decode: FunctionValue<'ctx>,
-    // TCP networking (SL-13)
+
     pub tcp_listen: FunctionValue<'ctx>,
     pub tcp_accept: FunctionValue<'ctx>,
     pub tcp_connect: FunctionValue<'ctx>,
     pub tcp_read: FunctionValue<'ctx>,
     pub tcp_write: FunctionValue<'ctx>,
     pub tcp_close: FunctionValue<'ctx>,
-    // HTTP client (L3.1)
+
     pub http_get: FunctionValue<'ctx>,
     pub http_post: FunctionValue<'ctx>,
     pub http_request: FunctionValue<'ctx>,
-    // UDP networking (L3.3)
+
     pub udp_bind: FunctionValue<'ctx>,
     pub udp_send: FunctionValue<'ctx>,
     pub udp_recv: FunctionValue<'ctx>,
     pub udp_close: FunctionValue<'ctx>,
-    // Cryptography (L3.4)
+
     pub sha256: FunctionValue<'ctx>,
     pub hmac_sha256: FunctionValue<'ctx>,
     pub aes256_encrypt: FunctionValue<'ctx>,
     pub aes256_decrypt: FunctionValue<'ctx>,
     pub random_bytes: FunctionValue<'ctx>,
-    // Actor monitoring (AC-2)
+
     pub actor_monitor: FunctionValue<'ctx>,
     pub actor_demonitor: FunctionValue<'ctx>,
-    // Graceful stop (AC-4)
+
     pub actor_graceful_stop: FunctionValue<'ctx>,
-    // Fast message dispatch (R2.3)
+
     pub msg_dispatch: FunctionValue<'ctx>,
-    // Range helper (Phase D)
+
     pub list_range: FunctionValue<'ctx>,
-    // StringBuilder / optimized string ops (L1.1)
+
     pub sb_new: FunctionValue<'ctx>,
     pub sb_push: FunctionValue<'ctx>,
     pub sb_finish: FunctionValue<'ctx>,
@@ -339,7 +333,7 @@ pub struct RuntimeBindings<'ctx> {
     pub string_repeat: FunctionValue<'ctx>,
     pub string_reverse: FunctionValue<'ctx>,
     pub value_to_string: FunctionValue<'ctx>,
-    // Regex operations (L2.2)
+
     pub regex_match: FunctionValue<'ctx>,
     pub regex_find: FunctionValue<'ctx>,
     pub regex_find_all: FunctionValue<'ctx>,
@@ -348,7 +342,6 @@ pub struct RuntimeBindings<'ctx> {
 }
 
 impl<'ctx> RuntimeBindings<'ctx> {
-    /// Declare all runtime functions in the given LLVM module.
     pub fn declare(context: &'ctx Context, module: &Module<'ctx>) -> Self {
         let i8_type = context.i8_type();
         let i16_type = context.i16_type();
@@ -356,49 +349,39 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let i64_type = context.i64_type();
         let f64_type = context.f64_type();
         let usize_type = context.i64_type();
-        
-        // Value struct layout matching runtime
+
         let payload = i8_type.array_type(16);
         let value_type = context.struct_type(
             &[
-                i8_type.into(),   // tag
-                i8_type.into(),   // flags
-                i16_type.into(),  // reserved
-                i64_type.into(),  // rc
-                i32_type.into(),  // extra1
-                i32_type.into(),  // extra2
-                payload.into(),   // payload
+                i8_type.into(),
+                i8_type.into(),
+                i16_type.into(),
+                i64_type.into(),
+                i32_type.into(),
+                i32_type.into(),
+                payload.into(),
             ],
             false,
         );
         let value_ptr_type = value_type.ptr_type(AddressSpace::default());
         let value_ptr_ptr_type = value_ptr_type.ptr_type(AddressSpace::default());
         let i8_ptr = i8_type.ptr_type(AddressSpace::default());
-        
-        // Map entry type: (key, value) pair
-        let map_entry_type = context.struct_type(
-            &[value_ptr_type.into(), value_ptr_type.into()],
-            false,
-        );
+
+        let map_entry_type =
+            context.struct_type(&[value_ptr_type.into(), value_ptr_type.into()], false);
         let map_entry_ptr_type = map_entry_type.ptr_type(AddressSpace::default());
-        
-        // Closure function types
+
         let closure_invoke_type = context.void_type().fn_type(
             &[
-                i8_ptr.into(),           // env pointer
-                value_ptr_ptr_type.into(), // args array
-                usize_type.into(),       // arg count
-                value_ptr_ptr_type.into(), // out pointer
+                i8_ptr.into(),
+                value_ptr_ptr_type.into(),
+                usize_type.into(),
+                value_ptr_ptr_type.into(),
             ],
             false,
         );
         let closure_release_type = context.void_type().fn_type(&[i8_ptr.into()], false);
 
-        // ════════════════════════════════════════════════════════════════
-        // NaN-boxing: i64-based FFI declarations
-        // ════════════════════════════════════════════════════════════════
-
-        // Bridge functions (old API ↔ new i64 API)
         let nb_to_handle = module.add_function(
             "coral_nb_to_handle",
             value_ptr_type.fn_type(&[i64_type.into()], false),
@@ -410,7 +393,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // NaN-box constructors (zero-allocation for immediates)
         let nb_make_number = module.add_function(
             "coral_nb_make_number",
             i64_type.fn_type(&[f64_type.into()], false),
@@ -421,23 +403,16 @@ impl<'ctx> RuntimeBindings<'ctx> {
             i64_type.fn_type(&[i8_type.into()], false),
             None,
         );
-        let nb_make_unit = module.add_function(
-            "coral_nb_make_unit",
-            i64_type.fn_type(&[], false),
-            None,
-        );
-        let nb_make_none = module.add_function(
-            "coral_nb_make_none",
-            i64_type.fn_type(&[], false),
-            None,
-        );
+        let nb_make_unit =
+            module.add_function("coral_nb_make_unit", i64_type.fn_type(&[], false), None);
+        let nb_make_none =
+            module.add_function("coral_nb_make_none", i64_type.fn_type(&[], false), None);
         let nb_make_string = module.add_function(
             "coral_nb_make_string",
             i64_type.fn_type(&[i8_ptr.into(), usize_type.into()], false),
             None,
         );
 
-        // NaN-box extractors
         let nb_as_number = module.add_function(
             "coral_nb_as_number",
             f64_type.fn_type(&[i64_type.into()], false),
@@ -469,7 +444,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // NaN-box retain/release (no-op for immediates)
         let nb_retain = module.add_function(
             "coral_nb_retain",
             context.void_type().fn_type(&[i64_type.into()], false),
@@ -481,7 +455,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // NaN-box arithmetic (fast path for numbers)
         let nb_add = module.add_function(
             "coral_nb_add",
             i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
@@ -513,7 +486,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // NaN-box comparisons (fast path for numbers + immediates)
         let nb_equals = module.add_function(
             "coral_nb_equals",
             i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
@@ -545,7 +517,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // NaN-box I/O
         let nb_print = module.add_function(
             "coral_nb_print",
             context.void_type().fn_type(&[i64_type.into()], false),
@@ -557,11 +528,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // ════════════════════════════════════════════════════════════════
-        // Original pointer-based API (kept for cold-path via bridge)
-        // ════════════════════════════════════════════════════════════════
-
-        // Value constructors
         let make_number = module.add_function(
             "coral_make_number",
             value_ptr_type.fn_type(&[f64_type.into()], false),
@@ -582,11 +548,8 @@ impl<'ctx> RuntimeBindings<'ctx> {
             value_ptr_type.fn_type(&[i8_ptr.into(), usize_type.into()], false),
             None,
         );
-        let make_unit = module.add_function(
-            "coral_make_unit",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
+        let make_unit =
+            module.add_function("coral_make_unit", value_ptr_type.fn_type(&[], false), None);
         let make_list = module.add_function(
             "coral_make_list",
             value_ptr_type.fn_type(&[value_ptr_ptr_type.into(), usize_type.into()], false),
@@ -614,7 +577,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // List operations
         let list_push = module.add_function(
             "coral_list_push",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -658,7 +620,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let list_reduce = module.add_function(
             "coral_list_reduce",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
@@ -679,7 +645,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Map operations
         let map_get = module.add_function(
             "coral_map_get",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -688,7 +653,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let map_set = module.add_function(
             "coral_map_set",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
@@ -714,7 +683,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Value operations
         let value_length = module.add_function(
             "coral_value_length",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -766,7 +734,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Bitwise operations
         let value_bitand = module.add_function(
             "coral_value_bitand",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -798,7 +765,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // I/O and logging
         let log = module.add_function(
             "coral_log",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -820,13 +786,14 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Closure operations
         let make_closure = module.add_function(
             "coral_make_closure",
             value_ptr_type.fn_type(
                 &[
                     closure_invoke_type.ptr_type(AddressSpace::default()).into(),
-                    closure_release_type.ptr_type(AddressSpace::default()).into(),
+                    closure_release_type
+                        .ptr_type(AddressSpace::default())
+                        .into(),
                     i8_ptr.into(),
                     usize_type.into(),
                 ],
@@ -837,13 +804,16 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let closure_invoke = module.add_function(
             "coral_closure_invoke",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_ptr_type.into(), usize_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_ptr_type.into(),
+                    usize_type.into(),
+                ],
                 false,
             ),
             None,
         );
 
-        // Memory management
         let value_retain = module.add_function(
             "coral_value_retain",
             context.void_type().fn_type(&[value_ptr_type.into()], false),
@@ -865,7 +835,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Actor operations
         let actor_spawn = module.add_function(
             "coral_actor_spawn",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -881,13 +850,9 @@ impl<'ctx> RuntimeBindings<'ctx> {
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        let actor_self = module.add_function(
-            "coral_actor_self",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
+        let actor_self =
+            module.add_function("coral_actor_self", value_ptr_type.fn_type(&[], false), None);
 
-        // Named actor registry operations
         let actor_spawn_named = module.add_function(
             "coral_actor_spawn_named",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -919,11 +884,14 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Timer operations
         let timer_send_after = module.add_function(
             "coral_timer_send_after",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
@@ -931,7 +899,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let timer_schedule_repeat = module.add_function(
             "coral_timer_schedule_repeat",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
@@ -947,23 +919,23 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Main actor synchronization
-        let main_wait = module.add_function(
-            "coral_main_wait",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
+        let main_wait =
+            module.add_function("coral_main_wait", value_ptr_type.fn_type(&[], false), None);
         let main_done_signal = module.add_function(
             "coral_main_done_signal",
             value_ptr_type.fn_type(&[], false),
             None,
         );
 
-        // Tagged value (ADT) operations
         let make_tagged = module.add_function(
             "coral_make_tagged",
             value_ptr_type.fn_type(
-                &[i8_ptr.into(), usize_type.into(), value_ptr_ptr_type.into(), usize_type.into()],
+                &[
+                    i8_ptr.into(),
+                    usize_type.into(),
+                    value_ptr_ptr_type.into(),
+                    usize_type.into(),
+                ],
                 false,
             ),
             None,
@@ -978,44 +950,35 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let tagged_get_field = module.add_function(
             "coral_tagged_get_field",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), usize_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), usize_type.into()], false),
             None,
         );
 
-        // String operations
         let string_slice = module.add_function(
             "coral_string_slice",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
         let string_char_at = module.add_function(
             "coral_string_char_at",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let string_index_of = module.add_function(
             "coral_string_index_of",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let string_split = module.add_function(
             "coral_string_split",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let string_to_chars = module.add_function(
@@ -1025,18 +988,12 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let string_starts_with = module.add_function(
             "coral_string_starts_with",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let string_ends_with = module.add_function(
             "coral_string_ends_with",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let string_trim = module.add_function(
@@ -1057,17 +1014,18 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let string_replace = module.add_function(
             "coral_string_replace",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
         let string_contains = module.add_function(
             "coral_string_contains",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
         let string_parse_number = module.add_function(
@@ -1081,7 +1039,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Error value operations
         let make_error = module.add_function(
             "coral_make_error",
             value_ptr_type.fn_type(&[i32_type.into(), i8_ptr.into(), usize_type.into()], false),
@@ -1123,7 +1080,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Math operations - unary functions (Value -> Value)
         let math_abs = module.add_function(
             "coral_math_abs",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1219,7 +1175,7 @@ impl<'ctx> RuntimeBindings<'ctx> {
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        // Math operations - binary functions (Value, Value -> Value)
+
         let math_pow = module.add_function(
             "coral_math_pow",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1241,14 +1197,12 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Universal iterator next
         let value_iter_next = module.add_function(
             "coral_value_iter_next",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Process/environment
         let process_args = module.add_function(
             "coral_process_args",
             value_ptr_type.fn_type(&[], false),
@@ -1270,7 +1224,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // File I/O extensions
         let fs_append = module.add_function(
             "coral_fs_append",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1297,14 +1250,12 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // stdin
         let stdin_read_line = module.add_function(
             "coral_stdin_read_line",
             value_ptr_type.fn_type(&[], false),
             None,
         );
 
-        // L2.4: std.io enhancements
         let stderr_write = module.add_function(
             "coral_stderr_write",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1336,7 +1287,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // L2.5: Process extensions
         let process_exec = module.add_function(
             "coral_process_exec",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1363,7 +1313,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // L4.2: std.path operations
         let path_normalize = module.add_function(
             "coral_path_normalize",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1390,7 +1339,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // List extensions
         let list_contains = module.add_function(
             "coral_list_contains",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1409,7 +1357,11 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let list_slice = module.add_function(
             "coral_list_slice",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
@@ -1430,20 +1382,14 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Range helper
         let list_range = module.add_function(
             "coral_range",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
 
-        // StringBuilder / optimized string ops (L1.1)
         let void_type = context.void_type();
-        let sb_new = module.add_function(
-            "coral_sb_new",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
+        let sb_new = module.add_function("coral_sb_new", value_ptr_type.fn_type(&[], false), None);
         let sb_push = module.add_function(
             "coral_sb_push",
             void_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1480,7 +1426,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Regex operations (L2.2)
         let regex_match = module.add_function(
             "coral_regex_match",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1498,7 +1443,14 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let regex_replace = module.add_function(
             "coral_regex_replace",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            value_ptr_type.fn_type(
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
+                false,
+            ),
             None,
         );
         let regex_split = module.add_function(
@@ -1507,7 +1459,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Map extensions
         let map_remove = module.add_function(
             "coral_map_remove",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1534,7 +1485,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Bytes extensions
         let bytes_get = module.add_function(
             "coral_bytes_get",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1553,20 +1503,22 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let bytes_slice_val = module.add_function(
             "coral_bytes_slice_val",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
 
-        // Type reflection
         let type_of = module.add_function(
             "coral_type_of",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Debug introspection (L4.1)
         let debug_inspect = module.add_function(
             "coral_debug_inspect",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1578,7 +1530,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Cooperative yielding (R2.4) — void function, no args
         let void_type = context.void_type();
         let actor_yield_check = module.add_function(
             "coral_actor_yield_check",
@@ -1586,7 +1537,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Character operations
         let string_ord = module.add_function(
             "coral_string_ord",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1603,45 +1553,46 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Store persistence operations
-        // coral_store_open(type_ptr, type_len, name_ptr, name_len, path_ptr, path_len) -> ValuePtr
         let store_open = module.add_function(
             "coral_store_open",
             value_ptr_type.fn_type(
                 &[
-                    i8_ptr.into(), usize_type.into(),  // store_type
-                    i8_ptr.into(), usize_type.into(),  // store_name
-                    i8_ptr.into(), usize_type.into(),  // data_path
+                    i8_ptr.into(),
+                    usize_type.into(),
+                    i8_ptr.into(),
+                    usize_type.into(),
+                    i8_ptr.into(),
+                    usize_type.into(),
                 ],
                 false,
             ),
             None,
         );
-        // coral_store_close(handle) -> ValuePtr
+
         let store_close = module.add_function(
             "coral_store_close",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        // coral_store_save_all() -> ValuePtr
+
         let store_save_all = module.add_function(
             "coral_store_save_all",
             value_ptr_type.fn_type(&[], false),
             None,
         );
-        // coral_store_create(handle, fields_map) -> ValuePtr
+
         let store_create = module.add_function(
             "coral_store_create",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
-        // coral_store_get_by_index(handle, index) -> ValuePtr
+
         let store_get_by_index = module.add_function(
             "coral_store_get_by_index",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
-        // coral_store_get_by_uuid(handle, uuid_ptr, uuid_len) -> ValuePtr
+
         let store_get_by_uuid = module.add_function(
             "coral_store_get_by_uuid",
             value_ptr_type.fn_type(
@@ -1650,97 +1601,108 @@ impl<'ctx> RuntimeBindings<'ctx> {
             ),
             None,
         );
-        // coral_store_update(handle, index, fields_map) -> ValuePtr
+
         let store_update = module.add_function(
             "coral_store_update",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
-        // coral_store_soft_delete(handle, index) -> ValuePtr
+
         let store_soft_delete = module.add_function(
             "coral_store_soft_delete",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
-        // coral_store_stats(handle) -> ValuePtr
+
         let store_stats = module.add_function(
             "coral_store_stats",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        // coral_store_count(handle) -> ValuePtr
+
         let store_count = module.add_function(
             "coral_store_count",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        // coral_store_persist(handle) -> ValuePtr
+
         let store_persist = module.add_function(
             "coral_store_persist",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        // coral_store_checkpoint(handle) -> ValuePtr
+
         let store_checkpoint = module.add_function(
             "coral_store_checkpoint",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
-        // coral_store_all_indices(handle) -> ValuePtr
+
         let store_all_indices = module.add_function(
             "coral_store_all_indices",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Secondary index operations (R3.7)
-        // coral_store_create_index(handle, field_name, kind) -> ValuePtr
         let store_create_index = module.add_function(
             "coral_store_create_index",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
-        // coral_store_drop_index(handle, field_name) -> ValuePtr
+
         let store_drop_index = module.add_function(
             "coral_store_drop_index",
-            value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into()],
-                false,
-            ),
+            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
-        // coral_store_find_by_field(handle, field_name, value) -> ValuePtr
+
         let store_find_by_field = module.add_function(
             "coral_store_find_by_field",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
-        // coral_store_find_by_range(handle, field_name, min, max) -> ValuePtr
+
         let store_find_by_range = module.add_function(
             "coral_store_find_by_range",
             value_ptr_type.fn_type(
-                &[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()],
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
                 false,
             ),
             None,
         );
-        // coral_store_indexed_fields(handle) -> ValuePtr
+
         let store_indexed_fields = module.add_function(
             "coral_store_indexed_fields",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // JSON operations (SL-8)
         let json_parse = module.add_function(
             "coral_json_parse",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1757,12 +1719,8 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Time operations (SL-9)
-        let time_now = module.add_function(
-            "coral_time_now",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
+        let time_now =
+            module.add_function("coral_time_now", value_ptr_type.fn_type(&[], false), None);
         let time_timestamp = module.add_function(
             "coral_time_timestamp",
             value_ptr_type.fn_type(&[], false),
@@ -1804,19 +1762,13 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Sleep (L2.3)
         let sleep = module.add_function(
             "coral_sleep",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Random operations (L2.1)
-        let random = module.add_function(
-            "coral_random",
-            value_ptr_type.fn_type(&[], false),
-            None,
-        );
+        let random = module.add_function("coral_random", value_ptr_type.fn_type(&[], false), None);
         let random_int = module.add_function(
             "coral_random_int",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1828,21 +1780,18 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // String lines
         let string_lines = module.add_function(
             "coral_string_lines",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Sort
         let list_sort_natural = module.add_function(
             "coral_list_sort_natural",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Bytes extensions
         let bytes_from_hex = module.add_function(
             "coral_bytes_from_hex",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1859,7 +1808,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Encoding
         let base64_encode = module.add_function(
             "coral_base64_encode",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1881,7 +1829,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // URL encoding (L3.2)
         let url_encode = module.add_function(
             "coral_url_encode",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1893,7 +1840,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // TCP networking
         let tcp_listen = module.add_function(
             "coral_tcp_listen",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1925,7 +1871,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // HTTP client (L3.1)
         let http_get = module.add_function(
             "coral_http_get",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1938,11 +1883,18 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let http_request = module.add_function(
             "coral_http_request",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            value_ptr_type.fn_type(
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
+                false,
+            ),
             None,
         );
 
-        // UDP networking (L3.3)
         let udp_bind = module.add_function(
             "coral_udp_bind",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -1950,7 +1902,15 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let udp_send = module.add_function(
             "coral_udp_send",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            value_ptr_type.fn_type(
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
+                false,
+            ),
             None,
         );
         let udp_recv = module.add_function(
@@ -1964,7 +1924,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Cryptography (L3.4)
         let sha256 = module.add_function(
             "coral_sha256",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
@@ -1977,12 +1936,26 @@ impl<'ctx> RuntimeBindings<'ctx> {
         );
         let aes256_encrypt = module.add_function(
             "coral_aes256_encrypt",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            value_ptr_type.fn_type(
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
+                false,
+            ),
             None,
         );
         let aes256_decrypt = module.add_function(
             "coral_aes256_decrypt",
-            value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into(), value_ptr_type.into()], false),
+            value_ptr_type.fn_type(
+                &[
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                    value_ptr_type.into(),
+                ],
+                false,
+            ),
             None,
         );
         let random_bytes = module.add_function(
@@ -1991,7 +1964,6 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
-        // Actor monitoring (AC-2)
         let actor_monitor = module.add_function(
             "coral_actor_monitor",
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
@@ -2002,23 +1974,21 @@ impl<'ctx> RuntimeBindings<'ctx> {
             value_ptr_type.fn_type(&[value_ptr_type.into(), value_ptr_type.into()], false),
             None,
         );
-        // Graceful stop (AC-4)
+
         let actor_graceful_stop = module.add_function(
             "coral_actor_graceful_stop",
             value_ptr_type.fn_type(&[value_ptr_type.into()], false),
             None,
         );
 
-        // Fast message dispatch (R2.3)
-        // coral_msg_dispatch(msg_name, table_ptrs, table_lens, count) -> i64
         let msg_dispatch = module.add_function(
             "coral_msg_dispatch",
             i64_type.fn_type(
                 &[
-                    value_ptr_type.into(),                                  // msg_name
-                    i8_ptr.ptr_type(AddressSpace::default()).into(),         // table (array of i8*)
-                    usize_type.ptr_type(AddressSpace::default()).into(),     // lengths (array of usize)
-                    usize_type.into(),                                      // count
+                    value_ptr_type.into(),
+                    i8_ptr.ptr_type(AddressSpace::default()).into(),
+                    usize_type.ptr_type(AddressSpace::default()).into(),
+                    usize_type.into(),
                 ],
                 false,
             ),

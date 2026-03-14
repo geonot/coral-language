@@ -1,67 +1,44 @@
-//! Persistent store implementation for Coral
-//!
-//! This module implements the persistent store system as specified in
-//! docs/PERSISTENT_STORE_SPEC.md. Key features:
-//!
-//! - Hierarchical configuration (global → store-type → instance)
-//! - System attributes (_index, _uuid, _created_at, _updated_at, _deleted_at, _version)
-//! - Dual storage (binary + JSON Lines)
-//! - Primary index (index → uuid → offsets)
-//! - Write-Ahead Log (WAL) for durability
-//!
-//! # Directory Structure
-//!
-//! ```text
-//! {data_path}/
-//! ├── coral.stores.toml           # Configuration file
-//! ├── _meta/
-//! │   └── store_registry.json     # All known store types
-//! └── {store_type}/
-//!     └── {store_name}/
-//!         ├── index/
-//!         │   └── primary.idx     # index → (uuid, offsets)
-//!         ├── data/
-//!         │   ├── data.bin        # Binary storage
-//!         │   └── data.jsonl      # JSON Lines storage
-//!         └── wal/
-//!             └── wal-*.log       # Write-ahead log segments
-//! ```
-
-mod config;
-mod uuid7;
-mod index;
 mod binary;
-mod jsonl;
-mod wal;
-mod secondary_index;
+mod config;
 mod engine;
 pub mod ffi;
+mod index;
+mod jsonl;
+pub mod mmap;
+pub mod query;
+mod secondary_index;
+pub mod transaction;
+mod uuid7;
+mod wal;
 
-pub use config::{StoreConfig, GlobalConfig, StoreTypeConfig, parse_config, load_config};
-pub use uuid7::Uuid7;
-pub use index::{PrimaryIndex, IndexEntry};
-pub use binary::{BinaryWriter, BinaryReader, BinaryRecord, StoredValue};
-pub use jsonl::{JsonlWriter, JsonlReader, JsonlRecord};
-pub use wal::{WalWriter, WalReader, WalEntry};
-pub use secondary_index::{SecondaryIndex, SecondaryIndexKind, SecondaryIndexManager};
-pub use engine::{StoreEngine, SharedStoreEngine, CachedObject, StoreStats};
+pub use binary::{BinaryReader, BinaryRecord, BinaryWriter, StoredValue};
+pub use config::{GlobalConfig, StoreConfig, StoreTypeConfig, load_config, parse_config};
+pub use engine::{CachedObject, SharedStoreEngine, StoreEngine, StoreStats};
 pub use ffi::*;
+pub use index::{IndexEntry, PrimaryIndex};
+pub use jsonl::{JsonlReader, JsonlRecord, JsonlWriter};
+pub use mmap::MmapReader;
+pub use query::{
+    AggregateOp, FilterOp, QueryFilter, QueryPlan, QueryPlanner, QueryResult, aggregate,
+    execute_plan, query,
+};
+pub use secondary_index::{SecondaryIndex, SecondaryIndexKind, SecondaryIndexManager};
+pub use transaction::Transaction;
+pub use uuid7::Uuid7;
+pub use wal::{WalEntry, WalReader, WalWriter};
 
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Mutex, OnceLock};
 
-/// Magic bytes for various file formats
 pub const INDEX_MAGIC: &[u8; 8] = b"CORALIDX";
 pub const BINARY_MAGIC: &[u8; 8] = b"CORALBIN";
 pub const WAL_MAGIC: &[u8; 8] = b"CORALWAL";
 
-/// Current file format versions
 pub const INDEX_VERSION: u32 = 1;
 pub const BINARY_VERSION: u32 = 1;
 pub const WAL_VERSION: u32 = 1;
 
-/// Value type tags for binary encoding
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueTag {
@@ -79,7 +56,7 @@ pub enum ValueTag {
 
 impl TryFrom<u8> for ValueTag {
     type Error = io::Error;
-    
+
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0x00 => Ok(ValueTag::Unit),
@@ -100,7 +77,6 @@ impl TryFrom<u8> for ValueTag {
     }
 }
 
-/// Index entry flags
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexFlags {
@@ -110,7 +86,6 @@ pub enum IndexFlags {
     Compressed = 0x0004,
 }
 
-/// WAL entry types
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalOpType {
@@ -123,7 +98,7 @@ pub enum WalOpType {
 
 impl TryFrom<u8> for WalOpType {
     type Error = io::Error;
-    
+
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0x01 => Ok(WalOpType::Insert),
@@ -139,14 +114,12 @@ impl TryFrom<u8> for WalOpType {
     }
 }
 
-/// Global registry of open store engines
 static ENGINE_REGISTRY: OnceLock<Mutex<HashMap<String, SharedStoreEngine>>> = OnceLock::new();
 
 fn get_engine_registry() -> &'static Mutex<HashMap<String, SharedStoreEngine>> {
     ENGINE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Open or create a store engine for a given store type and name
 pub fn open_store_engine(
     store_type: &str,
     store_name: &str,
@@ -154,18 +127,17 @@ pub fn open_store_engine(
 ) -> io::Result<SharedStoreEngine> {
     let key = format!("{}:{}", store_type, store_name);
     let mut registry = get_engine_registry().lock().unwrap();
-    
+
     if let Some(engine) = registry.get(&key) {
         return Ok(engine.clone());
     }
-    
+
     let engine = StoreEngine::open(store_type, store_name, config)?;
     let shared = SharedStoreEngine::new(engine);
     registry.insert(key, shared.clone());
     Ok(shared)
 }
 
-/// Save all open store engines
 pub fn save_all_engines() -> io::Result<()> {
     let registry = get_engine_registry().lock().unwrap();
     for engine in registry.values() {
@@ -174,12 +146,10 @@ pub fn save_all_engines() -> io::Result<()> {
     Ok(())
 }
 
-/// Close a store engine
 pub fn close_engine(store_type: &str, store_name: &str) -> bool {
     let key = format!("{}:{}", store_type, store_name);
     let mut registry = get_engine_registry().lock().unwrap();
     if let Some(engine) = registry.remove(&key) {
-        // Save before closing
         let _ = engine.save();
         true
     } else {
@@ -190,7 +160,7 @@ pub fn close_engine(store_type: &str, store_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_value_tag_roundtrip() {
         for tag in [
@@ -210,7 +180,7 @@ mod tests {
             assert_eq!(tag, restored);
         }
     }
-    
+
     #[test]
     fn test_wal_op_type_roundtrip() {
         for op in [

@@ -1,8 +1,5 @@
-//! Core type representations for Coral.
-
 use std::fmt;
 
-/// Primitive types in Coral.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Primitive {
     Int,
@@ -32,7 +29,6 @@ impl fmt::Display for Primitive {
     }
 }
 
-/// Unique identifier for a type variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVarId(pub u32);
 
@@ -42,48 +38,46 @@ impl fmt::Display for TypeVarId {
     }
 }
 
-/// Representation of types in Coral.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum TypeId {
-    /// Primitive types (Int, Float, Bool, String, Bytes, Unit, Any, Actor).
     Primitive(Primitive),
-    /// Homogeneous list type: [T].
+
     List(Box<TypeId>),
-    /// Map type: {K: V}.
+
     Map(Box<TypeId>, Box<TypeId>),
-    /// Function type: fn(T1, T2, ...) -> R.
+
     Func(Vec<TypeId>, Box<TypeId>),
-    /// Placeholder from $ syntax (before lambda desugaring).
+
     Placeholder(u32),
-    /// Type variable (for inference).
+
     TypeVar(TypeVarId),
-    /// Algebraic Data Type (user-defined enum/sum type), with optional type arguments.
+
     Adt(String, Vec<TypeId>),
-    /// Store instance type (typed store/type instances).
+
     Store(String),
-    /// Error type with taxonomy segments: `err Foo:Bar:Baz` → `Error(["Foo", "Bar", "Baz"])`.
-    /// Empty segments means "any error" (unconstrained error type).
+
     Error(Vec<String>),
-    /// Unknown type (for permissive parsing — persisting after solving emits a warning).
+
     #[default]
     Unknown,
 }
 
 impl TypeId {
-    /// Check if this type is numeric (Int or Float).
     pub fn is_numeric(&self) -> bool {
         matches!(self, TypeId::Primitive(Primitive::Int | Primitive::Float))
     }
 
-    /// Check if this type is a type variable.
     pub fn is_var(&self) -> bool {
         matches!(self, TypeId::TypeVar(_))
     }
 
-    /// Check if this type contains no unresolved type variables.
     pub fn is_concrete(&self) -> bool {
         match self {
-            TypeId::Primitive(_) | TypeId::Unknown | TypeId::Placeholder(_) | TypeId::Store(_) | TypeId::Error(_) => true,
+            TypeId::Primitive(_)
+            | TypeId::Unknown
+            | TypeId::Placeholder(_)
+            | TypeId::Store(_)
+            | TypeId::Error(_) => true,
             TypeId::Adt(_, args) => args.iter().all(|a| a.is_concrete()),
             TypeId::TypeVar(_) => false,
             TypeId::List(elem) => elem.is_concrete(),
@@ -94,7 +88,6 @@ impl TypeId {
         }
     }
 
-    /// Check if this type contains `Unknown` anywhere in its structure.
     pub fn contains_unknown(&self) -> bool {
         match self {
             TypeId::Unknown => true,
@@ -108,7 +101,6 @@ impl TypeId {
         }
     }
 
-    /// Get the element type if this is a List type.
     pub fn list_element_type(&self) -> Option<&TypeId> {
         match self {
             TypeId::List(elem) => Some(elem),
@@ -116,7 +108,6 @@ impl TypeId {
         }
     }
 
-    /// Get the key and value types if this is a Map type.
     pub fn map_types(&self) -> Option<(&TypeId, &TypeId)> {
         match self {
             TypeId::Map(k, v) => Some((k, v)),
@@ -124,27 +115,22 @@ impl TypeId {
         }
     }
 
-    /// Check if this type is a List.
     pub fn is_list(&self) -> bool {
         matches!(self, TypeId::List(_))
     }
 
-    /// Check if this type is a Map.
     pub fn is_map(&self) -> bool {
         matches!(self, TypeId::Map(_, _))
     }
 
-    /// Check if this type is a collection (List or Map).
     pub fn is_collection(&self) -> bool {
         self.is_list() || self.is_map()
     }
 
-    /// Check if this type is callable (function type).
     pub fn is_callable(&self) -> bool {
         matches!(self, TypeId::Func(_, _))
     }
 
-    /// Get the return type if this is a function type.
     pub fn return_type(&self) -> Option<&TypeId> {
         match self {
             TypeId::Func(_, ret) => Some(ret),
@@ -152,7 +138,6 @@ impl TypeId {
         }
     }
 
-    /// Get the parameter types if this is a function type.
     pub fn param_types(&self) -> Option<&[TypeId]> {
         match self {
             TypeId::Func(params, _) => Some(params),
@@ -161,7 +146,6 @@ impl TypeId {
     }
 }
 
-/// Format a type for display in error messages.
 pub fn format_type(ty: &TypeId) -> String {
     match ty {
         TypeId::Primitive(p) => p.to_string(),
@@ -219,7 +203,10 @@ mod tests {
     #[test]
     fn format_function_types() {
         let fn_ty = TypeId::Func(
-            vec![TypeId::Primitive(Primitive::Int), TypeId::Primitive(Primitive::Int)],
+            vec![
+                TypeId::Primitive(Primitive::Int),
+                TypeId::Primitive(Primitive::Int),
+            ],
             Box::new(TypeId::Primitive(Primitive::Int)),
         );
         assert_eq!(format_type(&fn_ty), "fn(Int, Int) -> Int");
@@ -237,10 +224,10 @@ mod tests {
     fn is_concrete_checks() {
         assert!(TypeId::Primitive(Primitive::Int).is_concrete());
         assert!(!TypeId::TypeVar(TypeVarId(0)).is_concrete());
-        
+
         let list_var = TypeId::List(Box::new(TypeId::TypeVar(TypeVarId(0))));
         assert!(!list_var.is_concrete());
-        
+
         let list_int = TypeId::List(Box::new(TypeId::Primitive(Primitive::Int)));
         assert!(list_int.is_concrete());
     }

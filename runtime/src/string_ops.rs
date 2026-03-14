@@ -1,7 +1,4 @@
-//! String operations FFI functions for the Coral runtime.
-
 use crate::*;
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_concat(a: ValueHandle, b: ValueHandle) -> ValueHandle {
@@ -20,12 +17,12 @@ pub extern "C" fn coral_string_concat(a: ValueHandle, b: ValueHandle) -> ValueHa
     }
 }
 
-
-/// Get a substring of a string.
-/// coral_string_slice(str, start, end) returns str[start..end]
-/// start and end are byte indices (0-based). If end is greater than length, uses length.
 #[unsafe(no_mangle)]
-pub extern "C" fn coral_string_slice(s: ValueHandle, start: ValueHandle, end: ValueHandle) -> ValueHandle {
+pub extern "C" fn coral_string_slice(
+    s: ValueHandle,
+    start: ValueHandle,
+    end: ValueHandle,
+) -> ValueHandle {
     if s.is_null() || start.is_null() || end.is_null() {
         return coral_make_unit();
     }
@@ -43,9 +40,6 @@ pub extern "C" fn coral_string_slice(s: ValueHandle, start: ValueHandle, end: Va
     coral_make_string(slice.as_ptr(), slice.len())
 }
 
-
-/// Get the character (byte) at a given index.
-/// Returns the byte as a single-character string, or Unit if out of bounds.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_char_at(s: ValueHandle, index: ValueHandle) -> ValueHandle {
     if s.is_null() || index.is_null() {
@@ -64,9 +58,6 @@ pub extern "C" fn coral_string_char_at(s: ValueHandle, index: ValueHandle) -> Va
     coral_make_string(&byte as *const u8, 1)
 }
 
-
-/// Find the index of a substring in a string.
-/// Returns the 0-based index as a number, or -1 if not found.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_index_of(haystack: ValueHandle, needle: ValueHandle) -> ValueHandle {
     if haystack.is_null() || needle.is_null() {
@@ -74,7 +65,9 @@ pub extern "C" fn coral_string_index_of(haystack: ValueHandle, needle: ValueHand
     }
     let vh = unsafe { &*haystack };
     let vn = unsafe { &*needle };
-    if (vh.tag != ValueTag::String as u8 && vh.tag != ValueTag::Bytes as u8) || (vn.tag != ValueTag::String as u8 && vn.tag != ValueTag::Bytes as u8) {
+    if (vh.tag != ValueTag::String as u8 && vh.tag != ValueTag::Bytes as u8)
+        || (vn.tag != ValueTag::String as u8 && vn.tag != ValueTag::Bytes as u8)
+    {
         return coral_make_number(-1.0);
     }
     let haystack_bytes = string_to_bytes(vh);
@@ -90,9 +83,6 @@ pub extern "C" fn coral_string_index_of(haystack: ValueHandle, needle: ValueHand
     coral_make_number(-1.0)
 }
 
-
-/// Split a string by a delimiter.
-/// Returns a list of strings.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_split(s: ValueHandle, delimiter: ValueHandle) -> ValueHandle {
     if s.is_null() || delimiter.is_null() {
@@ -100,16 +90,17 @@ pub extern "C" fn coral_string_split(s: ValueHandle, delimiter: ValueHandle) -> 
     }
     let vs = unsafe { &*s };
     let vd = unsafe { &*delimiter };
-    if (vs.tag != ValueTag::String as u8 && vs.tag != ValueTag::Bytes as u8) || (vd.tag != ValueTag::String as u8 && vd.tag != ValueTag::Bytes as u8) {
+    if (vs.tag != ValueTag::String as u8 && vs.tag != ValueTag::Bytes as u8)
+        || (vd.tag != ValueTag::String as u8 && vd.tag != ValueTag::Bytes as u8)
+    {
         return coral_make_list(std::ptr::null(), 0);
     }
     let s_bytes = string_to_bytes(vs);
     let d_bytes = string_to_bytes(vd);
-    
+
     let mut parts: Vec<ValueHandle> = Vec::new();
-    
+
     if d_bytes.is_empty() {
-        // Empty delimiter: split into individual characters
         for byte in &s_bytes {
             let part = coral_make_string(byte as *const u8, 1);
             parts.push(part);
@@ -118,32 +109,29 @@ pub extern "C" fn coral_string_split(s: ValueHandle, delimiter: ValueHandle) -> 
         let mut start = 0;
         let s_str = String::from_utf8_lossy(&s_bytes);
         let d_str = String::from_utf8_lossy(&d_bytes);
-        
+
         for (i, _) in s_str.match_indices(&*d_str) {
             if i > start {
                 let part_bytes = &s_bytes[start..i];
                 let part = coral_make_string(part_bytes.as_ptr(), part_bytes.len());
                 parts.push(part);
             } else if i == start {
-                // Empty part between delimiters
                 let part = coral_make_string(std::ptr::null(), 0);
                 parts.push(part);
             }
             start = i + d_bytes.len();
         }
-        // Add the remaining part
+
         if start <= s_bytes.len() {
             let part_bytes = &s_bytes[start..];
             let part = coral_make_string(part_bytes.as_ptr(), part_bytes.len());
             parts.push(part);
         }
     }
-    
+
     coral_make_list(parts.as_ptr(), parts.len())
 }
 
-
-/// Convert a string to a list of single-character strings.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_to_chars(s: ValueHandle) -> ValueHandle {
     if s.is_null() {
@@ -162,8 +150,6 @@ pub extern "C" fn coral_string_to_chars(s: ValueHandle) -> ValueHandle {
     coral_make_list(chars.as_ptr(), chars.len())
 }
 
-
-/// Check if a string starts with a given prefix.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_starts_with(s: ValueHandle, prefix: ValueHandle) -> ValueHandle {
     if s.is_null() || prefix.is_null() {
@@ -171,7 +157,9 @@ pub extern "C" fn coral_string_starts_with(s: ValueHandle, prefix: ValueHandle) 
     }
     let vs = unsafe { &*s };
     let vp = unsafe { &*prefix };
-    if (vs.tag != ValueTag::String as u8 && vs.tag != ValueTag::Bytes as u8) || (vp.tag != ValueTag::String as u8 && vp.tag != ValueTag::Bytes as u8) {
+    if (vs.tag != ValueTag::String as u8 && vs.tag != ValueTag::Bytes as u8)
+        || (vp.tag != ValueTag::String as u8 && vp.tag != ValueTag::Bytes as u8)
+    {
         return coral_make_bool(0);
     }
     let s_bytes = string_to_bytes(vs);
@@ -179,8 +167,6 @@ pub extern "C" fn coral_string_starts_with(s: ValueHandle, prefix: ValueHandle) 
     coral_make_bool(if s_bytes.starts_with(&p_bytes) { 1 } else { 0 })
 }
 
-
-/// Check if a string ends with a given suffix.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_ends_with(s: ValueHandle, suffix: ValueHandle) -> ValueHandle {
     if s.is_null() || suffix.is_null() {
@@ -188,7 +174,9 @@ pub extern "C" fn coral_string_ends_with(s: ValueHandle, suffix: ValueHandle) ->
     }
     let vs = unsafe { &*s };
     let vx = unsafe { &*suffix };
-    if (vs.tag != ValueTag::String as u8 && vs.tag != ValueTag::Bytes as u8) || (vx.tag != ValueTag::String as u8 && vx.tag != ValueTag::Bytes as u8) {
+    if (vs.tag != ValueTag::String as u8 && vs.tag != ValueTag::Bytes as u8)
+        || (vx.tag != ValueTag::String as u8 && vx.tag != ValueTag::Bytes as u8)
+    {
         return coral_make_bool(0);
     }
     let s_bytes = string_to_bytes(vs);
@@ -196,8 +184,6 @@ pub extern "C" fn coral_string_ends_with(s: ValueHandle, suffix: ValueHandle) ->
     coral_make_bool(if s_bytes.ends_with(&x_bytes) { 1 } else { 0 })
 }
 
-
-/// Trim whitespace from both ends of a string.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_trim(s: ValueHandle) -> ValueHandle {
     if s.is_null() {
@@ -213,8 +199,6 @@ pub extern "C" fn coral_string_trim(s: ValueHandle) -> ValueHandle {
     coral_make_string(trimmed.as_ptr(), trimmed.len())
 }
 
-
-/// Convert a string to uppercase.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_to_upper(s: ValueHandle) -> ValueHandle {
     if s.is_null() {
@@ -230,8 +214,6 @@ pub extern "C" fn coral_string_to_upper(s: ValueHandle) -> ValueHandle {
     coral_make_string(upper.as_ptr(), upper.len())
 }
 
-
-/// Convert a string to lowercase.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_to_lower(s: ValueHandle) -> ValueHandle {
     if s.is_null() {
@@ -247,33 +229,36 @@ pub extern "C" fn coral_string_to_lower(s: ValueHandle) -> ValueHandle {
     coral_make_string(lower.as_ptr(), lower.len())
 }
 
-
-/// Replace all occurrences of a substring with another string.
 #[unsafe(no_mangle)]
-pub extern "C" fn coral_string_replace(s: ValueHandle, old: ValueHandle, new: ValueHandle) -> ValueHandle {
+pub extern "C" fn coral_string_replace(
+    s: ValueHandle,
+    old: ValueHandle,
+    new: ValueHandle,
+) -> ValueHandle {
     if s.is_null() || old.is_null() || new.is_null() {
         return coral_make_unit();
     }
     let vs = unsafe { &*s };
     let vo = unsafe { &*old };
     let vn = unsafe { &*new };
-    if vs.tag != ValueTag::String as u8 || vo.tag != ValueTag::String as u8 || vn.tag != ValueTag::String as u8 {
+    if vs.tag != ValueTag::String as u8
+        || vo.tag != ValueTag::String as u8
+        || vn.tag != ValueTag::String as u8
+    {
         return coral_make_unit();
     }
     let s_bytes = string_to_bytes(vs);
     let o_bytes = string_to_bytes(vo);
     let n_bytes = string_to_bytes(vn);
-    
+
     let s_str = String::from_utf8_lossy(&s_bytes);
     let o_str = String::from_utf8_lossy(&o_bytes);
     let n_str = String::from_utf8_lossy(&n_bytes);
-    
+
     let result = s_str.replace(&*o_str, &*n_str);
     coral_make_string(result.as_ptr(), result.len())
 }
 
-
-/// Check if a string contains a substring.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_contains(haystack: ValueHandle, needle: ValueHandle) -> ValueHandle {
     if haystack.is_null() || needle.is_null() {
@@ -281,25 +266,24 @@ pub extern "C" fn coral_string_contains(haystack: ValueHandle, needle: ValueHand
     }
     let vh = unsafe { &*haystack };
     let vn = unsafe { &*needle };
-    if (vh.tag != ValueTag::String as u8 && vh.tag != ValueTag::Bytes as u8) || (vn.tag != ValueTag::String as u8 && vn.tag != ValueTag::Bytes as u8) {
+    if (vh.tag != ValueTag::String as u8 && vh.tag != ValueTag::Bytes as u8)
+        || (vn.tag != ValueTag::String as u8 && vn.tag != ValueTag::Bytes as u8)
+    {
         return coral_make_bool(0);
     }
     let h_bytes = string_to_bytes(vh);
     let n_bytes = string_to_bytes(vn);
-    
+
     if n_bytes.is_empty() {
         return coral_make_bool(1);
     }
-    
+
     let h_str = String::from_utf8_lossy(&h_bytes);
     let n_str = String::from_utf8_lossy(&n_bytes);
-    
+
     coral_make_bool(if h_str.contains(&*n_str) { 1 } else { 0 })
 }
 
-
-/// Parse a string as a number.
-/// Returns the parsed number or Unit on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_parse_number(s: ValueHandle) -> ValueHandle {
     if s.is_null() {
@@ -317,13 +301,11 @@ pub extern "C" fn coral_string_parse_number(s: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Convert any value to its Rust String representation (for string interpolation / coercion).
 pub(crate) fn value_to_display_string(v: &Value) -> String {
     match ValueTag::try_from(v.tag) {
         Ok(ValueTag::Number) => {
             let n = unsafe { v.payload.number };
-            // Print integers without decimal point
+
             if n.fract() == 0.0 && n.is_finite() && n.abs() < (i64::MAX as f64) {
                 format!("{}", n as i64)
             } else {
@@ -332,11 +314,13 @@ pub(crate) fn value_to_display_string(v: &Value) -> String {
         }
         Ok(ValueTag::Bool) => {
             let byte = unsafe { v.payload.inline[0] } & 1;
-            if byte != 0 { "true".to_string() } else { "false".to_string() }
+            if byte != 0 {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
         }
-        Ok(ValueTag::String) => {
-            value_to_rust_string(v)
-        }
+        Ok(ValueTag::String) => value_to_rust_string(v),
         Ok(ValueTag::Unit) => "()".to_string(),
         Ok(ValueTag::List) => "[list]".to_string(),
         Ok(ValueTag::Map) => "{map}".to_string(),
@@ -361,8 +345,6 @@ pub(crate) fn value_to_display_string(v: &Value) -> String {
     }
 }
 
-
-/// Convert any value to a Coral string Value.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_value_to_string(v: ValueHandle) -> ValueHandle {
     if v.is_null() {
@@ -370,17 +352,17 @@ pub extern "C" fn coral_value_to_string(v: ValueHandle) -> ValueHandle {
         return coral_make_string(s.as_ptr(), s.len());
     }
     let val = unsafe { &*v };
-    // If already a string, just retain and return
+
     if val.tag == ValueTag::String as u8 {
-        unsafe { coral_value_retain(v); }
+        unsafe {
+            coral_value_retain(v);
+        }
         return v;
     }
     let s = value_to_display_string(val);
     coral_make_string(s.as_ptr(), s.len())
 }
 
-
-/// Convert a number to a string.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_number_to_string(n: ValueHandle) -> ValueHandle {
     if n.is_null() {
@@ -395,20 +377,20 @@ pub extern "C" fn coral_number_to_string(n: ValueHandle) -> ValueHandle {
     coral_make_string(s.as_ptr(), s.len())
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_from_number(n: ValueHandle) -> ValueHandle {
     coral_number_to_string(n)
 }
 
-
-/// Get the Unicode code point of the first character in a string.
-/// Returns a number (0-1114111) or -1 if empty/not a string.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_ord(s: ValueHandle) -> ValueHandle {
-    if s.is_null() { return coral_make_number(-1.0); }
+    if s.is_null() {
+        return coral_make_number(-1.0);
+    }
     let v = unsafe { &*s };
-    if v.tag != ValueTag::String as u8 && v.tag != ValueTag::Bytes as u8 { return coral_make_number(-1.0); }
+    if v.tag != ValueTag::String as u8 && v.tag != ValueTag::Bytes as u8 {
+        return coral_make_number(-1.0);
+    }
     let rust_str = value_to_rust_string(v);
     match rust_str.chars().next() {
         Some(c) => coral_make_number(c as u32 as f64),
@@ -416,14 +398,15 @@ pub extern "C" fn coral_string_ord(s: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Create a single-character string from a Unicode code point number.
-/// Returns a 1-char string, or empty string if invalid.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_chr(code: ValueHandle) -> ValueHandle {
-    if code.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    if code.is_null() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
     let v = unsafe { &*code };
-    if v.tag != ValueTag::Number as u8 { return coral_make_string(std::ptr::null(), 0); }
+    if v.tag != ValueTag::Number as u8 {
+        return coral_make_string(std::ptr::null(), 0);
+    }
     let n = unsafe { v.payload.number } as u32;
     match char::from_u32(n) {
         Some(c) => {
@@ -435,12 +418,11 @@ pub extern "C" fn coral_string_chr(code: ValueHandle) -> ValueHandle {
     }
 }
 
-
-/// Compare two strings lexicographically.
-/// Returns -1 (a < b), 0 (a == b), or 1 (a > b).
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_compare(a: ValueHandle, b: ValueHandle) -> ValueHandle {
-    if a.is_null() || b.is_null() { return coral_make_number(0.0); }
+    if a.is_null() || b.is_null() {
+        return coral_make_number(0.0);
+    }
     let va = unsafe { &*a };
     let vb = unsafe { &*b };
     if va.tag != ValueTag::String as u8 || vb.tag != ValueTag::String as u8 {
@@ -456,60 +438,66 @@ pub extern "C" fn coral_string_compare(a: ValueHandle, b: ValueHandle) -> ValueH
     coral_make_number(result)
 }
 
-/// Split a string into a list of lines (splitting on '\n').
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_lines(value: ValueHandle) -> ValueHandle {
     if value.is_null() {
         return coral_make_list(std::ptr::null(), 0);
     }
     let s = value_to_rust_string(unsafe { &*value });
-    let lines: Vec<ValueHandle> = s.lines().map(|line| coral_make_string_from_rust(line)).collect();
+    let lines: Vec<ValueHandle> = s
+        .lines()
+        .map(|line| coral_make_string_from_rust(line))
+        .collect();
     coral_make_list(lines.as_ptr(), lines.len())
 }
-
-
-// ─── StringBuilder FFI ───────────────────────────────────────────────
-// Provides O(n) string building instead of O(n²) repeated concatenation.
 
 struct StringBuilderObject {
     buf: Vec<u8>,
 }
 
-/// Create a new StringBuilder. Returns a Bytes-tagged Value holding the builder.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_sb_new() -> ValueHandle {
-    let sb = Box::new(StringBuilderObject { buf: Vec::with_capacity(256) });
+    let sb = Box::new(StringBuilderObject {
+        buf: Vec::with_capacity(256),
+    });
     let handle = Box::into_raw(sb) as *mut std::ffi::c_void;
     alloc_value(Value::from_heap(ValueTag::Bytes, handle))
 }
 
-/// Append a string to the StringBuilder. Mutates the builder in-place.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_sb_push(sb: ValueHandle, s: ValueHandle) {
-    if sb.is_null() || s.is_null() { return; }
+    if sb.is_null() || s.is_null() {
+        return;
+    }
     let sb_val = unsafe { &*sb };
     let s_val = unsafe { &*s };
-    if sb_val.tag != ValueTag::Bytes as u8 { return; }
+    if sb_val.tag != ValueTag::Bytes as u8 {
+        return;
+    }
     let builder = unsafe { &mut *(sb_val.payload.ptr as *mut StringBuilderObject) };
     let bytes = string_to_bytes(s_val);
     builder.buf.extend_from_slice(&bytes);
 }
 
-/// Append raw bytes (from a string value) to the builder.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_sb_push_bytes(sb: ValueHandle, data: *const u8, len: usize) {
-    if sb.is_null() || data.is_null() { return; }
+    if sb.is_null() || data.is_null() {
+        return;
+    }
     let sb_val = unsafe { &*sb };
-    if sb_val.tag != ValueTag::Bytes as u8 { return; }
+    if sb_val.tag != ValueTag::Bytes as u8 {
+        return;
+    }
     let builder = unsafe { &mut *(sb_val.payload.ptr as *mut StringBuilderObject) };
     let slice = unsafe { std::slice::from_raw_parts(data, len) };
     builder.buf.extend_from_slice(slice);
 }
 
-/// Finalize the StringBuilder, returning a String value. Consumes the builder's buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_sb_finish(sb: ValueHandle) -> ValueHandle {
-    if sb.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    if sb.is_null() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
     let sb_val = unsafe { &*sb };
     if sb_val.tag != ValueTag::Bytes as u8 {
         return coral_make_string(std::ptr::null(), 0);
@@ -520,25 +508,24 @@ pub extern "C" fn coral_sb_finish(sb: ValueHandle) -> ValueHandle {
     result
 }
 
-/// Get the current accumulated length of the StringBuilder.
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_sb_len(sb: ValueHandle) -> ValueHandle {
-    if sb.is_null() { return coral_make_number(0.0); }
+    if sb.is_null() {
+        return coral_make_number(0.0);
+    }
     let sb_val = unsafe { &*sb };
-    if sb_val.tag != ValueTag::Bytes as u8 { return coral_make_number(0.0); }
+    if sb_val.tag != ValueTag::Bytes as u8 {
+        return coral_make_number(0.0);
+    }
     let builder = unsafe { &*(sb_val.payload.ptr as *const StringBuilderObject) };
     coral_make_number(builder.buf.len() as f64)
 }
 
-
-// ─── Optimized String Operations ─────────────────────────────────────
-// Direct FFI implementations that bypass O(n²) patterns in Coral stdlib.
-
-/// Join a list of strings with a separator. O(n) instead of O(n²).
-/// coral_string_join_list(list, separator) → String
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_join_list(list: ValueHandle, sep: ValueHandle) -> ValueHandle {
-    if list.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    if list.is_null() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
     let list_val = unsafe { &*list };
     if list_val.tag != ValueTag::List as u8 {
         return coral_make_string(std::ptr::null(), 0);
@@ -547,18 +534,17 @@ pub extern "C" fn coral_string_join_list(list: ValueHandle, sep: ValueHandle) ->
     if items.items.is_empty() {
         return coral_make_string(std::ptr::null(), 0);
     }
-    
+
     let sep_bytes = if !sep.is_null() {
         string_to_bytes(unsafe { &*sep })
     } else {
         Vec::new()
     };
-    
-    // Pre-calculate total size for single allocation
+
     let mut total_len = 0usize;
     let mut parts: Vec<Vec<u8>> = Vec::with_capacity(items.items.len());
     for elem in &items.items {
-        if elem.is_null() { 
+        if elem.is_null() {
             parts.push(Vec::new());
             continue;
         }
@@ -572,7 +558,7 @@ pub extern "C" fn coral_string_join_list(list: ValueHandle, sep: ValueHandle) ->
         parts.push(bytes);
     }
     total_len += sep_bytes.len() * parts.len().saturating_sub(1);
-    
+
     let mut buf = Vec::with_capacity(total_len);
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
@@ -580,12 +566,10 @@ pub extern "C" fn coral_string_join_list(list: ValueHandle, sep: ValueHandle) ->
         }
         buf.extend_from_slice(part);
     }
-    
+
     coral_make_string(buf.as_ptr(), buf.len())
 }
 
-/// Repeat a string N times. O(n) instead of O(n²).
-/// coral_string_repeat(str, count) → String
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_repeat(s: ValueHandle, count: ValueHandle) -> ValueHandle {
     if s.is_null() || count.is_null() {
@@ -593,11 +577,15 @@ pub extern "C" fn coral_string_repeat(s: ValueHandle, count: ValueHandle) -> Val
     }
     let s_val = unsafe { &*s };
     let n = unsafe { (*count).payload.number } as usize;
-    if n == 0 { return coral_make_string(std::ptr::null(), 0); }
-    
+    if n == 0 {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+
     let bytes = string_to_bytes(s_val);
-    if bytes.is_empty() { return coral_make_string(std::ptr::null(), 0); }
-    
+    if bytes.is_empty() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
+
     let total = bytes.len() * n;
     let mut buf = Vec::with_capacity(total);
     for _ in 0..n {
@@ -606,14 +594,14 @@ pub extern "C" fn coral_string_repeat(s: ValueHandle, count: ValueHandle) -> Val
     coral_make_string(buf.as_ptr(), buf.len())
 }
 
-/// Reverse a string. O(n) instead of O(n²).
-/// coral_string_reverse(str) → String
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_string_reverse(s: ValueHandle) -> ValueHandle {
-    if s.is_null() { return coral_make_string(std::ptr::null(), 0); }
+    if s.is_null() {
+        return coral_make_string(std::ptr::null(), 0);
+    }
     let s_val = unsafe { &*s };
     let s_str = value_to_rust_string(s_val);
-    // Reverse by Unicode grapheme clusters for correctness
+
     let reversed: String = s_str.chars().rev().collect();
     coral_make_string(reversed.as_ptr(), reversed.len())
 }

@@ -19,14 +19,29 @@ fn named_actor_registry_runtime_functions_declared() {
     log('test')
 "#;
     let ir = compile_ok(source);
-    
+
     // Check that the named actor functions are declared
-    assert!(ir.contains("coral_actor_spawn_named"), "Should declare spawn_named");
+    assert!(
+        ir.contains("coral_actor_spawn_named"),
+        "Should declare spawn_named"
+    );
     assert!(ir.contains("coral_actor_lookup"), "Should declare lookup");
-    assert!(ir.contains("coral_actor_register"), "Should declare register");
-    assert!(ir.contains("coral_actor_unregister"), "Should declare unregister");
-    assert!(ir.contains("coral_actor_send_named"), "Should declare send_named");
-    assert!(ir.contains("coral_actor_list_named"), "Should declare list_named");
+    assert!(
+        ir.contains("coral_actor_register"),
+        "Should declare register"
+    );
+    assert!(
+        ir.contains("coral_actor_unregister"),
+        "Should declare unregister"
+    );
+    assert!(
+        ir.contains("coral_actor_send_named"),
+        "Should declare send_named"
+    );
+    assert!(
+        ir.contains("coral_actor_list_named"),
+        "Should declare list_named"
+    );
 }
 
 #[test]
@@ -38,17 +53,23 @@ fn actor_spawn_still_works() {
     log(x)
 "#;
     let ir = compile_ok(source);
-    assert!(ir.contains("coral_actor_spawn"), "Should declare regular spawn");
+    assert!(
+        ir.contains("coral_actor_spawn"),
+        "Should declare regular spawn"
+    );
 }
 
 #[test]
 fn actor_send_still_works() {
-    // Ensure regular actor send still compiles  
+    // Ensure regular actor send still compiles
     let source = r#"
 *main()
     x is 42
     log(x)
 "#;
     let ir = compile_ok(source);
-    assert!(ir.contains("coral_actor_send"), "Should declare regular send");
+    assert!(
+        ir.contains("coral_actor_send"),
+        "Should declare regular send"
+    );
 }

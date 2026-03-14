@@ -12,7 +12,10 @@ const WORKSPACE: &str = env!("CARGO_MANIFEST_DIR");
 
 fn runtime_lib() -> PathBuf {
     let lib = PathBuf::from(WORKSPACE).join("target/debug/libruntime.so");
-    assert!(lib.exists(), "Runtime library not found. Run `cargo build -p runtime` first.");
+    assert!(
+        lib.exists(),
+        "Runtime library not found. Run `cargo build -p runtime` first."
+    );
     lib
 }
 
@@ -54,20 +57,25 @@ fn assert_output(source: &str, expected: &[&str]) {
 
 fn assert_compiles(source: &str) {
     let compiler = Compiler;
-    compiler.compile_to_ir(source)
+    compiler
+        .compile_to_ir(source)
         .unwrap_or_else(|e| panic!("Expected compilation to succeed, but got error: {:?}", e));
 }
 
 fn assert_compile_error(source: &str, expected_fragment: &str) {
     let compiler = Compiler;
     match compiler.compile_to_ir(source) {
-        Ok(_) => panic!("Expected compilation to fail with '{}', but it succeeded", expected_fragment),
+        Ok(_) => panic!(
+            "Expected compilation to fail with '{}', but it succeeded",
+            expected_fragment
+        ),
         Err(e) => {
             let msg = format!("{:?}", e);
             assert!(
                 msg.contains(expected_fragment),
                 "Error message '{}' does not contain expected fragment '{}'",
-                msg, expected_fragment
+                msg,
+                expected_fragment
             );
         }
     }
@@ -76,13 +84,17 @@ fn assert_compile_error(source: &str, expected_fragment: &str) {
 fn assert_compile_error_display(source: &str, expected_fragment: &str) {
     let compiler = Compiler;
     match compiler.compile_to_ir(source) {
-        Ok(_) => panic!("Expected compilation to fail with '{}', but it succeeded", expected_fragment),
+        Ok(_) => panic!(
+            "Expected compilation to fail with '{}', but it succeeded",
+            expected_fragment
+        ),
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
                 msg.contains(expected_fragment),
                 "Display output '{}' does not contain expected fragment '{}'",
-                msg, expected_fragment
+                msg,
+                expected_fragment
             );
         }
     }
@@ -109,35 +121,55 @@ fn compile_error_has_related(source: &str) -> bool {
 #[test]
 fn t4_2_type_error_includes_expected_and_found() {
     // The error message should include both the expected and found types.
-    let output = compile_error_display(r#"
+    let output = compile_error_display(
+        r#"
 x is 5
 x(3)
-"#);
-    assert!(output.contains("Int"), "Error should mention Int type: {}", output);
-    assert!(output.contains("callable"), "Error should mention callable: {}", output);
+"#,
+    );
+    assert!(
+        output.contains("Int"),
+        "Error should mention Int type: {}",
+        output
+    );
+    assert!(
+        output.contains("callable"),
+        "Error should mention callable: {}",
+        output
+    );
 }
 
 #[test]
 fn t4_2_boolean_error_mentions_expected_type() {
     // Boolean type errors should mention the expected Bool type.
-    let output = compile_error_display(r#"
+    let output = compile_error_display(
+        r#"
 *foo()
   42 and true
 foo()
-"#);
-    assert!(output.contains("Bool") || output.contains("bool"),
-        "Error should mention Bool: {}", output);
+"#,
+    );
+    assert!(
+        output.contains("Bool") || output.contains("bool"),
+        "Error should mention Bool: {}",
+        output
+    );
 }
 
 #[test]
 fn t4_2_error_has_type_inference_prefix() {
     // All type errors should start with "type inference failed:".
-    let output = compile_error_display(r#"
+    let output = compile_error_display(
+        r#"
 x is 5
 x(3)
-"#);
-    assert!(output.contains("type inference failed"),
-        "Error should contain 'type inference failed': {}", output);
+"#,
+    );
+    assert!(
+        output.contains("type inference failed"),
+        "Error should contain 'type inference failed': {}",
+        output
+    );
 }
 
 #[test]
@@ -184,31 +216,42 @@ foo()
 #[test]
 fn t4_1_multiple_independent_type_errors_both_reported() {
     // Two independent non-callable errors. The display should show both.
-    let output = compile_error_display(r#"
+    let output = compile_error_display(
+        r#"
 x is 5
 y is 10
 x(3)
 y(4)
-"#);
+"#,
+    );
     // The output should contain "is not callable" for at least the primary error
-    assert!(output.contains("is not callable"), "Output should contain 'is not callable': {}", output);
+    assert!(
+        output.contains("is not callable"),
+        "Output should contain 'is not callable': {}",
+        output
+    );
 }
 
 #[test]
 fn t4_1_related_diagnostics_struct_check() {
     // Verify the `related` field is present on the diagnostic.
     let compiler = Compiler;
-    let result = compiler.compile_to_ir(r#"
+    let result = compiler.compile_to_ir(
+        r#"
 x is 5
 y is 10
 x(3)
 y(4)
-"#);
+"#,
+    );
     assert!(result.is_err(), "Expected compilation to fail");
     let err = result.unwrap_err();
     // Primary error should mention "is not callable"
-    assert!(err.diagnostic.message.contains("is not callable"),
-        "Primary error should contain 'is not callable': {}", err.diagnostic.message);
+    assert!(
+        err.diagnostic.message.contains("is not callable"),
+        "Primary error should contain 'is not callable': {}",
+        err.diagnostic.message
+    );
 }
 
 // ─── T4.3: Ranked Unification ──────────────────────────────────────
@@ -279,7 +322,8 @@ fn analyze_warnings(source: &str) -> Vec<String> {
 
 #[test]
 fn cc52_s6_member_access_on_store_warns_unknown_field() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 store Point
     x ? 0
     y ? 0
@@ -287,14 +331,22 @@ store Point
 *main()
     p is make_Point()
     log(p.z)
-"#);
-    let has_field_warning = warnings.iter().any(|w| w.contains("has no field") && w.contains("z"));
-    assert!(has_field_warning, "expected warning about unknown field 'z'; got: {:?}", warnings);
+"#,
+    );
+    let has_field_warning = warnings
+        .iter()
+        .any(|w| w.contains("has no field") && w.contains("z"));
+    assert!(
+        has_field_warning,
+        "expected warning about unknown field 'z'; got: {:?}",
+        warnings
+    );
 }
 
 #[test]
 fn cc52_s6_member_access_on_store_valid_field_no_warning() {
-    let warnings = analyze_warnings(r#"
+    let warnings = analyze_warnings(
+        r#"
 store Point
     x ? 0
     y ? 0
@@ -302,9 +354,14 @@ store Point
 *main()
     p is make_Point()
     log(p.x)
-"#);
+"#,
+    );
     let has_field_warning = warnings.iter().any(|w| w.contains("has no field"));
-    assert!(!has_field_warning, "should not warn on valid field 'x'; got: {:?}", warnings);
+    assert!(
+        !has_field_warning,
+        "should not warn on valid field 'x'; got: {:?}",
+        warnings
+    );
 }
 
 // ─── CC5.2/S8: Pipeline type inference ──────────────────────────────
