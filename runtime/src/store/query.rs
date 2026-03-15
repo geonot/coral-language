@@ -63,12 +63,8 @@ impl QueryPlanner {
             FilterOp::Lt | FilterOp::Lte | FilterOp::Gt | FilterOp::Gte => {
                 if indexed.contains(&filter.field) {
                     let (low, high) = match filter.op {
-                        FilterOp::Lt | FilterOp::Lte => {
-                            (None, Some(filter.value.clone()))
-                        }
-                        FilterOp::Gt | FilterOp::Gte => {
-                            (Some(filter.value.clone()), None)
-                        }
+                        FilterOp::Lt | FilterOp::Lte => (None, Some(filter.value.clone())),
+                        FilterOp::Gt | FilterOp::Gte => (Some(filter.value.clone()), None),
                         _ => unreachable!(),
                     };
                     QueryPlan::IndexRange {
@@ -142,22 +138,12 @@ pub fn execute_plan(engine: &mut StoreEngine, plan: &QueryPlan) -> io::Result<Ve
         QueryPlan::IndexLookup { field, value } => engine.find_by_field(field, value),
         QueryPlan::IndexRange {
             field, low, high, ..
-        } => {
-            match (low, high) {
-                (Some(lo), Some(hi)) => engine.find_by_field_range(field, lo, hi),
-                (Some(lo), None) => engine.find_by_field_range(
-                    field,
-                    lo,
-                    &StoredValue::Int(i64::MAX),
-                ),
-                (None, Some(hi)) => engine.find_by_field_range(
-                    field,
-                    &StoredValue::Int(i64::MIN),
-                    hi,
-                ),
-                (None, None) => Ok(engine.all()),
-            }
-        }
+        } => match (low, high) {
+            (Some(lo), Some(hi)) => engine.find_by_field_range(field, lo, hi),
+            (Some(lo), None) => engine.find_by_field_range(field, lo, &StoredValue::Int(i64::MAX)),
+            (None, Some(hi)) => engine.find_by_field_range(field, &StoredValue::Int(i64::MIN), hi),
+            (None, None) => Ok(engine.all()),
+        },
     }
 }
 
@@ -295,7 +281,10 @@ mod tests {
             Some(std::cmp::Ordering::Less)
         );
         assert_eq!(
-            stored_value_cmp(&StoredValue::String("a".into()), &StoredValue::String("b".into())),
+            stored_value_cmp(
+                &StoredValue::String("a".into()),
+                &StoredValue::String("b".into())
+            ),
             Some(std::cmp::Ordering::Less)
         );
     }

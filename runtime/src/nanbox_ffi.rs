@@ -83,6 +83,44 @@ pub extern "C" fn coral_nb_tag(value: u64) -> u8 {
     }
 }
 
+/// Returns the type name as a NaN-boxed string, operating directly on the
+/// NaN-boxed representation. Avoids the nb_to_ptr / ptr_to_nb bridge overhead.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_nb_type_of(value: u64) -> u64 {
+    let v = NanBoxedValue::from_bits(value);
+    let name = if v.is_number() {
+        "number"
+    } else if v.is_bool() {
+        "bool"
+    } else if v.is_unit() || v.is_none() {
+        "none"
+    } else if v.is_heap_ptr() {
+        let ptr = v.as_heap_ptr();
+        if ptr.is_null() {
+            "none"
+        } else {
+            let val = unsafe { &*ptr };
+            match ValueTag::try_from(val.tag) {
+                Ok(ValueTag::Number) => "number",
+                Ok(ValueTag::Bool) => "bool",
+                Ok(ValueTag::String) => "string",
+                Ok(ValueTag::Bytes) => "bytes",
+                Ok(ValueTag::List) => "list",
+                Ok(ValueTag::Map) => "map",
+                Ok(ValueTag::Closure) => "function",
+                Ok(ValueTag::Unit) => "none",
+                Ok(ValueTag::Tagged) => "tagged",
+                Ok(ValueTag::Actor) => "actor",
+                Ok(ValueTag::Store) => "map",
+                _ => "unknown",
+            }
+        }
+    } else {
+        "unknown"
+    };
+    coral_nb_make_string(name.as_ptr(), name.len())
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_nb_is_truthy(value: u64) -> u8 {
     if NanBoxedValue::from_bits(value).is_truthy() {
@@ -312,6 +350,10 @@ pub extern "C" fn coral_nb_equals(a: u64, b: u64) -> u64 {
     if let Some(eq) = va.fast_equals(vb) {
         return NanBoxedValue::from_bool(eq).to_bits();
     }
+    // Same bits = same heap object = equal (safe: fast_equals already handled numbers/NaN)
+    if a == b {
+        return NanBoxedValue::from_bool(true).to_bits();
+    }
 
     let ha = nb_to_handle(a);
     let hb = nb_to_handle(b);
@@ -437,6 +479,123 @@ pub extern "C" fn coral_nb_value_get(collection: u64, key: u64) -> u64 {
         crate::coral_value_release(hk);
     }
     nb
+}
+
+/// Push a NaN-boxed value onto a NaN-boxed list.
+/// Returns the list as a NaN-boxed value (for chaining).
+/// Avoids the double nb_to_ptr/ptr_to_nb bridge overhead and cycle-detector
+/// pressure from the retain+release dance in the bridged path.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_nb_list_push(list: u64, value: u64) -> u64 {
+    let v = NanBoxedValue::from_bits(list);
+    if !v.is_heap_ptr() {
+        return NanBoxedValue::unit().to_bits();
+    }
+    let list_handle = v.as_heap_ptr();
+    if list_handle.is_null() {
+        return NanBoxedValue::unit().to_bits();
+    }
+    let list_value = unsafe { &*list_handle };
+    if list_value.tag != ValueTag::List as u8 {
+        return NanBoxedValue::unit().to_bits();
+    }
+    // Convert the NB value to a ValueHandle (allocates for numbers, retains for heap)
+    // nb_to_handle gives refcount=1 (new) or +1 (existing) — the list takes ownership
+    let value_handle = nb_to_handle(value);
+    if !value_handle.is_null() {
+        let ptr = list_value.heap_ptr();
+        if !ptr.is_null() {
+            let list_obj = unsafe { &mut *(ptr as *mut crate::ListObject) };
+            list_obj.items.push(value_handle);
+        }
+    }
+    // Return the same list as NB — no extra retain needed since the caller
+    // already holds a reference via the input NB value
+    list
+}
+
+/// Get a field from a NaN-boxed store value by index.
+/// Avoids the nb_to_handle/nb_from_handle bridge overhead —
+/// numbers are read directly without heap allocation.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_nb_struct_get(store_nb: u64, index: usize) -> u64 {
+    let v = NanBoxedValue::from_bits(store_nb);
+    if !v.is_heap_ptr() {
+        return NanBoxedValue::none().to_bits();
+    }
+    let store_ptr = v.as_heap_ptr();
+    if store_ptr.is_null() {
+        return NanBoxedValue::none().to_bits();
+    }
+    let val = unsafe { &*store_ptr };
+    let obj = unsafe { &*(val.payload.ptr as *const crate::StructObject) };
+    if index >= obj.fields.len() {
+        return NanBoxedValue::none().to_bits();
+    }
+    let field = obj.fields[index];
+    if field.is_null() {
+        return NanBoxedValue::none().to_bits();
+    }
+    let field_val = unsafe { &*field };
+    match ValueTag::try_from(field_val.tag) {
+        Ok(ValueTag::Number) => {
+            let n = unsafe { field_val.payload.number };
+            NanBoxedValue::from_number(n).to_bits()
+        }
+        Ok(ValueTag::Bool) => {
+            let b = unsafe { field_val.payload.inline[0] & 1 } != 0;
+            NanBoxedValue::from_bool(b).to_bits()
+        }
+        _ => {
+            unsafe { crate::coral_value_retain(field) };
+            NanBoxedValue::from_heap_ptr(field).to_bits()
+        }
+    }
+}
+
+/// Set a field on a NaN-boxed store value by index.
+/// Avoids the nb_to_handle allocation for number values.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_nb_struct_set(store_nb: u64, index: usize, value_nb: u64) {
+    let sv = NanBoxedValue::from_bits(store_nb);
+    if !sv.is_heap_ptr() {
+        return;
+    }
+    let store_ptr = sv.as_heap_ptr();
+    if store_ptr.is_null() {
+        return;
+    }
+    let val = unsafe { &mut *store_ptr };
+    let obj = unsafe { &mut *(val.payload.ptr as *mut crate::StructObject) };
+    if index >= obj.fields.len() {
+        return;
+    }
+    // Release old field
+    let old = obj.fields[index];
+    if !old.is_null() {
+        unsafe { crate::coral_value_release(old) };
+    }
+    // Convert new value to handle and store
+    let new_handle = nb_to_handle(value_nb);
+    obj.fields[index] = new_handle;
+}
+
+/// Create a struct from NaN-boxed field values.
+/// Avoids the nb_to_handle bridge per field by doing the conversion internally.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_nb_make_struct(nb_fields: *const u64, field_count: usize) -> u64 {
+    let mut fields_vec = Vec::with_capacity(field_count);
+    if field_count > 0 && !nb_fields.is_null() {
+        let slice = unsafe { std::slice::from_raw_parts(nb_fields, field_count) };
+        for &nb_val in slice {
+            let handle = nb_to_handle(nb_val);
+            fields_vec.push(handle);
+        }
+    }
+    let obj = Box::new(crate::StructObject { fields: fields_vec });
+    let handle = Box::into_raw(obj) as *mut std::ffi::c_void;
+    let value = crate::alloc_value(Value::from_heap(ValueTag::Store, handle));
+    NanBoxedValue::from_heap_ptr(value).to_bits()
 }
 
 #[cfg(test)]

@@ -315,7 +315,6 @@ impl TimerWheel {
 
                         match entry {
                             Some(entry) => {
-                                // Check cancelled AFTER pop to avoid TOCTOU race
                                 if entry.cancelled.load(Ordering::SeqCst) {
                                     continue;
                                 }

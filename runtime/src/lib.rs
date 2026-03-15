@@ -338,6 +338,15 @@ pub struct Value {
 unsafe impl Send for Value {}
 unsafe impl Sync for Value {}
 
+// ── Static assertions for layout stability ──
+// Codegen depends on these offsets. If any of these fail, codegen/runtime.rs
+// and the inline list/string/type operations must be updated to match.
+const _: () = {
+    assert!(std::mem::offset_of!(Value, tag) == 0, "Value.tag must be at offset 0");
+    assert!(std::mem::offset_of!(Value, flags) == 1, "Value.flags must be at offset 1");
+    assert!(std::mem::offset_of!(Value, payload) == 16, "Value.payload must be at offset 16");
+};
+
 impl Clone for Value {
     fn clone(&self) -> Self {
         Self {
@@ -1698,7 +1707,6 @@ pub(crate) fn coral_make_string_from_rust(s: &str) -> ValueHandle {
 #[unsafe(no_mangle)]
 pub extern "C" fn coral_make_string(ptr: *const u8, len: usize) -> ValueHandle {
     let bytes = read_bytes(ptr, len);
-    // Validate UTF-8 at FFI boundary — strings must be valid UTF-8
     debug_assert!(
         std::str::from_utf8(&bytes).is_ok(),
         "coral_make_string received invalid UTF-8"
@@ -1739,6 +1747,27 @@ pub extern "C" fn coral_value_length(value: ValueHandle) -> ValueHandle {
             coral_make_number(string_to_bytes(value_ref).len() as f64)
         }
         _ => coral_make_number(0.0),
+    }
+}
+
+/// Fast string length that returns usize without allocating a Value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_string_len(value: ValueHandle) -> usize {
+    if value.is_null() {
+        return 0;
+    }
+    let v = unsafe { &*value };
+    if v.tag != ValueTag::String as u8 {
+        return 0;
+    }
+    if v.is_inline_string() {
+        inline_string_len(v.flags)
+    } else {
+        let ptr = v.heap_ptr();
+        if ptr.is_null() {
+            return 0;
+        }
+        unsafe { (*(ptr as *const StringObject)).data.len() }
     }
 }
 
@@ -2131,6 +2160,7 @@ pub extern "C" fn coral_type_of(value: ValueHandle) -> ValueHandle {
         Ok(ValueTag::Unit) => "none",
         Ok(ValueTag::Tagged) => "tagged",
         Ok(ValueTag::Actor) => "actor",
+        Ok(ValueTag::Store) => "map",
         _ => "unknown",
     };
     coral_make_string(name.as_ptr(), name.len())
@@ -3024,17 +3054,11 @@ mod tests {
         let v2 = coral_make_number(2.0);
         let updated = coral_map_set(map, k2, v2);
 
-        let pair = coral_map_iter_next(iter);
-        assert_eq!(list_len(pair), 2);
-        let idx0 = coral_make_number(0.0);
-        let idx1 = coral_make_number(1.0);
-        let key = coral_list_get(pair, idx0);
-        let val = coral_list_get(pair, idx1);
+        let key = coral_map_iter_next(iter);
         let done = coral_map_iter_next(iter);
         assert_eq!(coral_value_tag(done), ValueTag::Unit as u8);
         let key_bytes = unsafe { string_to_bytes(&*key) };
         assert_eq!(key_bytes, b"k1");
-        assert_eq!(coral_value_as_number(val), 1.0);
 
         unsafe {
             coral_value_release(k1);
@@ -3044,12 +3068,8 @@ mod tests {
             coral_value_release(updated);
             coral_value_release(map);
             coral_value_release(iter);
-            coral_value_release(pair);
             coral_value_release(key);
-            coral_value_release(val);
             coral_value_release(done);
-            coral_value_release(idx0);
-            coral_value_release(idx1);
         }
     }
 

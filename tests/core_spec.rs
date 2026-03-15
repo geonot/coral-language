@@ -28,8 +28,8 @@ fn compiles_store_with_reference_fields() {
         .compile_to_ir(&source)
         .expect("failed to compile store with reference fields");
 
-    // Verify constructor creates map with null, 0 args
-    assert!(ir.contains("@coral_make_map(ptr null, i64 0)"));
+    // Verify constructor creates struct (non-persistent stores use indexed struct access)
+    assert!(ir.contains("@coral_make_struct("));
 
     // Verify reference field has retain/release
     assert!(ir.contains("@coral_value_retain"));

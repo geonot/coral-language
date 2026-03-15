@@ -322,10 +322,7 @@ mod tests {
         for (i, p) in ptrs.iter().enumerate() {
             assert!(!p.is_null());
             if i > 0 {
-                assert_eq!(
-                    (*p as usize) - (ptrs[i - 1] as usize),
-                    64
-                );
+                assert_eq!((*p as usize) - (ptrs[i - 1] as usize), 64);
             }
         }
         batch_dealloc_list(&ptrs, 10, 64);

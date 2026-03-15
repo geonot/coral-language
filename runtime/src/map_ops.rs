@@ -60,10 +60,8 @@ pub extern "C" fn coral_map_iter_next(iter: ValueHandle) -> ValueHandle {
         {
             unsafe {
                 coral_value_retain(bucket.key);
-                coral_value_retain(bucket.value);
             }
-            let pair = [bucket.key, bucket.value];
-            return coral_make_list(pair.as_ptr(), 2);
+            return bucket.key;
         }
     }
     coral_make_unit()

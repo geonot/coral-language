@@ -472,8 +472,6 @@ fn solve_callable(
             } else {
                 let mut inner_errors = Vec::new();
 
-                // Unify provided arguments (may be fewer than expected
-                // when the function has default parameter values)
                 for (expected, actual) in expected_args.iter().zip(args.iter()) {
                     if let Err(e) = unify(expected.clone(), actual.clone(), graph, span) {
                         inner_errors.push(e);
@@ -673,15 +671,22 @@ fn resolve_inner(ty: TypeId, graph: &mut TypeGraph, depth: usize) -> TypeId {
             }
         }
         TypeId::List(elem) => TypeId::List(Box::new(resolve_inner(*elem, graph, depth + 1))),
-        TypeId::Map(k, v) => {
-            TypeId::Map(Box::new(resolve_inner(*k, graph, depth + 1)), Box::new(resolve_inner(*v, graph, depth + 1)))
-        }
+        TypeId::Map(k, v) => TypeId::Map(
+            Box::new(resolve_inner(*k, graph, depth + 1)),
+            Box::new(resolve_inner(*v, graph, depth + 1)),
+        ),
         TypeId::Func(args, ret) => {
-            let args_r: Vec<TypeId> = args.into_iter().map(|a| resolve_inner(a, graph, depth + 1)).collect();
+            let args_r: Vec<TypeId> = args
+                .into_iter()
+                .map(|a| resolve_inner(a, graph, depth + 1))
+                .collect();
             TypeId::Func(args_r, Box::new(resolve_inner(*ret, graph, depth + 1)))
         }
         TypeId::Adt(name, args) => {
-            let args_r: Vec<TypeId> = args.into_iter().map(|a| resolve_inner(a, graph, depth + 1)).collect();
+            let args_r: Vec<TypeId> = args
+                .into_iter()
+                .map(|a| resolve_inner(a, graph, depth + 1))
+                .collect();
             TypeId::Adt(name, args_r)
         }
 

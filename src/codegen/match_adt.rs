@@ -87,9 +87,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let default_value = if let Some(default_block_ast) = &match_expr.default {
             self.emit_block(ctx, default_block_ast.as_ref())?
         } else {
-            self.wrap_number(self.f64_type.const_float(0.0))
+            self.runtime.value_i64_type.const_zero()
         };
-        // Use the actual current block (emit_block may have created new blocks)
         let default_end_bb = self.builder.get_insert_block().unwrap();
         if default_end_bb.get_terminator().is_none() {
             self.builder.build_unconditional_branch(cont_bb).unwrap();
@@ -98,7 +97,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.builder.position_at_end(cont_bb);
         if incoming.is_empty() {
-            Ok(self.wrap_number(self.f64_type.const_float(0.0)))
+            Ok(self.runtime.value_i64_type.const_zero())
         } else {
             let phi = self
                 .builder
@@ -120,7 +119,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         match pattern {
             MatchPattern::Integer(value) => {
-                let literal = self.wrap_number(self.f64_type.const_float(*value as f64));
+                let literal = self.wrap_number_unchecked(self.f64_type.const_float(*value as f64));
                 let eq = self.call_nb(
                     self.runtime.nb_equals,
                     &[match_value.into(), literal.into()],
@@ -155,7 +154,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 let len_nb =
                     self.call_bridged(self.runtime.list_length, &[match_value], "list_len");
-                let expected_len = self.wrap_number(self.f64_type.const_float(fixed_count as f64));
+                let expected_len = self.wrap_number_unchecked(self.f64_type.const_float(fixed_count as f64));
 
                 let len_ok = if has_rest {
                     let ge = self.call_nb(

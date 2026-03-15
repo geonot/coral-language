@@ -15,9 +15,7 @@ unsafe fn simd_contains_byte_avx2(haystack: &[u8], needle: u8) -> bool {
     let chunks = haystack.len() / 32;
 
     for i in 0..chunks {
-        let block = unsafe {
-            _mm256_loadu_si256(haystack.as_ptr().add(i * 32) as *const __m256i)
-        };
+        let block = unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i * 32) as *const __m256i) };
         let cmp = unsafe { _mm256_cmpeq_epi8(block, needle_vec) };
         let mask = unsafe { _mm256_movemask_epi8(cmp) };
         if mask != 0 {
@@ -47,9 +45,7 @@ unsafe fn simd_to_lowercase_avx2(input: &[u8]) -> Vec<u8> {
 
     let chunks = input.len() / 32;
     for i in 0..chunks {
-        let block = unsafe {
-            _mm256_loadu_si256(input.as_ptr().add(i * 32) as *const __m256i)
-        };
+        let block = unsafe { _mm256_loadu_si256(input.as_ptr().add(i * 32) as *const __m256i) };
         let ge_a = unsafe { _mm256_cmpgt_epi8(block, _mm256_sub_epi8(a_val, _mm256_set1_epi8(1))) };
         let le_z = unsafe { _mm256_cmpgt_epi8(_mm256_add_epi8(z_val, _mm256_set1_epi8(1)), block) };
         let is_upper = unsafe { _mm256_and_si256(ge_a, le_z) };
@@ -84,9 +80,7 @@ unsafe fn simd_to_uppercase_avx2(input: &[u8]) -> Vec<u8> {
 
     let chunks = input.len() / 32;
     for i in 0..chunks {
-        let block = unsafe {
-            _mm256_loadu_si256(input.as_ptr().add(i * 32) as *const __m256i)
-        };
+        let block = unsafe { _mm256_loadu_si256(input.as_ptr().add(i * 32) as *const __m256i) };
         let ge_a = unsafe { _mm256_cmpgt_epi8(block, _mm256_sub_epi8(a_val, _mm256_set1_epi8(1))) };
         let le_z = unsafe { _mm256_cmpgt_epi8(_mm256_add_epi8(z_val, _mm256_set1_epi8(1)), block) };
         let is_lower = unsafe { _mm256_and_si256(ge_a, le_z) };
@@ -119,9 +113,7 @@ unsafe fn simd_count_byte_avx2(haystack: &[u8], needle: u8) -> usize {
     let mut total: usize = 0;
 
     for i in 0..chunks {
-        let block = unsafe {
-            _mm256_loadu_si256(haystack.as_ptr().add(i * 32) as *const __m256i)
-        };
+        let block = unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i * 32) as *const __m256i) };
         let cmp = unsafe { _mm256_cmpeq_epi8(block, needle_vec) };
         let mask = unsafe { _mm256_movemask_epi8(cmp) } as u32;
         total += mask.count_ones() as usize;
@@ -187,7 +179,9 @@ mod tests {
 
     #[test]
     fn large_string_lowercase() {
-        let input: Vec<u8> = (0..256).map(|i| if i % 2 == 0 { b'A' } else { b'b' }).collect();
+        let input: Vec<u8> = (0..256)
+            .map(|i| if i % 2 == 0 { b'A' } else { b'b' })
+            .collect();
         let result = simd_to_lowercase(&input);
         for (i, &b) in result.iter().enumerate() {
             if i % 2 == 0 {

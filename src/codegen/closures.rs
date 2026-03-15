@@ -38,8 +38,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         {
             let stmt_count = body.statements.len() + if body.value.is_some() { 1 } else { 0 };
-            if stmt_count <= 5 {
+            if stmt_count <= 8 {
                 let kind_id = Attribute::get_named_enum_kind_id("alwaysinline");
+                let attr = self.context.create_enum_attribute(kind_id, 0);
+                invoke_fn.add_attribute(AttributeLoc::Function, attr);
+            } else if stmt_count <= 20 {
+                let kind_id = Attribute::get_named_enum_kind_id("inlinehint");
                 let attr = self.context.create_enum_attribute(kind_id, 0);
                 invoke_fn.add_attribute(AttributeLoc::Function, attr);
             }
@@ -308,9 +312,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .unwrap()
                     .into_array_value();
             }
-            // Place the alloca in the entry block so it isn't repeated
-            // on every loop iteration (LLVM allocas inside loops grow
-            // the stack each iteration and never reclaim).
             let current_bb = self.builder.get_insert_block().unwrap();
             let entry_bb = ctx.function.get_first_basic_block().unwrap();
             if let Some(first_instr) = entry_bb.get_first_instruction() {
@@ -623,6 +624,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: Some(out_param),
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: HashSet::new(),
+            specialized_return_type: None,
         };
 
         if let Some(struct_type) = env_struct {
@@ -654,10 +658,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         )
                         .unwrap()
                         .into_int_value();
-                    // Retain captured values so they survive the lambda body.
-                    // Without this, operations in the body can release the
-                    // capture below the env's own reference, causing
-                    // use-after-free on subsequent invocations.
                     self.call_nb_void(self.runtime.nb_retain, &[value.into()]);
                     self.store_variable(&mut lambda_ctx, name, value);
                 }

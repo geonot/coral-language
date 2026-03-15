@@ -86,8 +86,6 @@ pub unsafe extern "C" fn coral_value_retain(value: ValueHandle) {
         return;
     }
 
-    // Use atomic fetch_add unconditionally to prevent races when
-    // another thread (e.g. an actor) holds a reference to this value.
     let rc = value.refcount.load(Ordering::Relaxed);
     if rc == 0 {
         debug_assert!(false, "retain on freed value");
@@ -97,7 +95,12 @@ pub unsafe extern "C" fn coral_value_retain(value: ValueHandle) {
         RETAIN_SATURATED.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    value.refcount.fetch_add(1, Ordering::Relaxed);
+    // Fast path: non-frozen values use non-atomic increment (thread-local)
+    if (value.flags & FLAG_FROZEN) == 0 {
+        value.refcount.store(rc + 1, Ordering::Relaxed);
+    } else {
+        value.refcount.fetch_add(1, Ordering::Acquire);
+    }
     RETAIN_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -112,48 +115,62 @@ pub unsafe extern "C" fn coral_value_release(value: ValueHandle) {
         return;
     }
 
-    // Always use CAS loop for release to prevent races when values
-    // are shared across threads (e.g. via actor messages).
-    //
-    // The previous code had a fast path for owner-thread release
-    // using non-atomic load+store, which could race with another
-    // thread also decrementing the refcount, letting both observe
-    // rc==1 and both attempt deallocation.
-
-    loop {
+    // Fast path: non-frozen values use non-atomic decrement
+    if (value_ref.flags & FLAG_FROZEN) == 0 {
         let rc = value_ref.refcount.load(Ordering::Relaxed);
         if rc == 0 {
             RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
             debug_assert!(false, "release underflow on value tag {}", value_ref.tag);
             return;
         }
-
-        match value_ref.refcount.compare_exchange_weak(
-            rc,
-            rc - 1,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
-            Ok(prev) => {
-                RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
-                if prev > 1 {
-                    cycle_detector::possible_root(value);
-                    if cycle_detector::auto_cycle_collection_enabled() {
-                        let count = CYCLE_COLLECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        if count % CYCLE_COLLECTION_THRESHOLD == 0 {
-                            cycle_detector::collect_cycles();
-                        }
-                    }
-                    return;
+        RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if rc > 1 {
+            value_ref.refcount.store(rc - 1, Ordering::Relaxed);
+            cycle_detector::possible_root(value);
+            if cycle_detector::auto_cycle_collection_enabled() {
+                let count = CYCLE_COLLECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+                if count % CYCLE_COLLECTION_THRESHOLD == 0 {
+                    cycle_detector::collect_cycles();
                 }
-
-                break;
             }
-            Err(_) => continue,
+            return;
         }
-    }
+        value_ref.refcount.store(0, Ordering::Relaxed);
+    } else {
+        // Slow path: atomic CAS for frozen/shared values
+        loop {
+            let rc = value_ref.refcount.load(Ordering::Relaxed);
+            if rc == 0 {
+                RELEASE_UNDERFLOW.fetch_add(1, Ordering::Relaxed);
+                debug_assert!(false, "release underflow on value tag {}", value_ref.tag);
+                return;
+            }
 
-    std::sync::atomic::fence(Ordering::Acquire);
+            match value_ref.refcount.compare_exchange_weak(
+                rc,
+                rc - 1,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(prev) => {
+                    RELEASE_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if prev > 1 {
+                        cycle_detector::possible_root(value);
+                        if cycle_detector::auto_cycle_collection_enabled() {
+                            let count = CYCLE_COLLECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+                            if count % CYCLE_COLLECTION_THRESHOLD == 0 {
+                                cycle_detector::collect_cycles();
+                            }
+                        }
+                        return;
+                    }
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        std::sync::atomic::fence(Ordering::Acquire);
+    }
 
     weak_ref::notify_value_deallocated(value);
 
@@ -208,4 +225,24 @@ pub extern "C" fn coral_runtime_release_queue_flush() {
             }
         }
     });
+}
+
+/// Batch release: process multiple values in one call, amortizing function-call overhead.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_batch_release(ptrs: *const ValueHandle, count: usize) {
+    if ptrs.is_null() || count == 0 {
+        return;
+    }
+    let slice = unsafe { slice::from_raw_parts(ptrs, count) };
+    for &ptr in slice {
+        unsafe {
+            coral_value_release(ptr);
+        }
+    }
+}
+
+/// Flush deferred cycle-detection roots.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_cycle_flush() {
+    cycle_detector::flush_deferred_roots();
 }

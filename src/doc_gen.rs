@@ -69,7 +69,12 @@ pub fn extract_docs(source: &str, filename: &str) -> Vec<DocItem> {
     items
 }
 
-fn parse_declaration(line: &str, doc_lines: &[&str], filename: &str, line_num: usize) -> Option<DocItem> {
+fn parse_declaration(
+    line: &str,
+    doc_lines: &[&str],
+    filename: &str,
+    line_num: usize,
+) -> Option<DocItem> {
     if line.starts_with('*') {
         let rest = &line[1..];
         let (name, params) = if let Some(paren) = rest.find('(') {
@@ -108,7 +113,11 @@ fn parse_declaration(line: &str, doc_lines: &[&str], filename: &str, line_num: u
     }
 
     if line.starts_with("type ") && line.contains(" is ") {
-        let name = line["type ".len()..].split(" is ").next()?.trim().to_string();
+        let name = line["type ".len()..]
+            .split(" is ")
+            .next()?
+            .trim()
+            .to_string();
         return Some(DocItem {
             name,
             kind: DocKind::Enum,
@@ -138,7 +147,10 @@ pub fn generate_markdown(items: &[DocItem], module_name: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", module_name));
 
-    let functions: Vec<&DocItem> = items.iter().filter(|i| i.kind == DocKind::Function).collect();
+    let functions: Vec<&DocItem> = items
+        .iter()
+        .filter(|i| i.kind == DocKind::Function)
+        .collect();
     let stores: Vec<&DocItem> = items.iter().filter(|i| i.kind == DocKind::Store).collect();
     let enums: Vec<&DocItem> = items.iter().filter(|i| i.kind == DocKind::Enum).collect();
     let traits: Vec<&DocItem> = items.iter().filter(|i| i.kind == DocKind::Trait).collect();
@@ -196,7 +208,10 @@ pub fn generate_markdown(items: &[DocItem], module_name: &str) -> String {
     out
 }
 
-pub fn generate_docs_for_directory(input_dir: &Path, output_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub fn generate_docs_for_directory(
+    input_dir: &Path,
+    output_dir: &Path,
+) -> std::io::Result<Vec<PathBuf>> {
     fs::create_dir_all(output_dir)?;
     let mut generated = Vec::new();
 

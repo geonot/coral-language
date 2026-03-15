@@ -78,6 +78,16 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         if let Expression::Identifier(name, _) = target {
             if name == "self" {
+                if let Some(store_name) = &self.current_store_name.clone() {
+                    if let Some(&idx) = self
+                        .store_field_indices
+                        .get(&(store_name.clone(), property.to_string()))
+                    {
+                        let target_value = self.emit_expression(ctx, target)?;
+                        let result = self.inline_struct_get_nb(ctx, target_value, idx as u64);
+                        return Ok(result);
+                    }
+                }
                 let target_value = self.emit_expression(ctx, target)?;
                 let key_value = self.emit_string_literal(property);
                 return Ok(self.call_bridged(
@@ -85,6 +95,44 @@ impl<'ctx> CodeGenerator<'ctx> {
                     &[target_value, key_value],
                     "map_get_property",
                 ));
+            }
+        }
+        if let Expression::Identifier(target_name, _) = target {
+            // Check resolved_types (global type env) for store type
+            let store_name_for_field: Option<String> = self
+                .resolved_types
+                .get(target_name.as_str())
+                .and_then(|ty| {
+                    if let crate::types::core::TypeId::Store(s) = ty {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    // Check resolved_locals for store type (handles local variables)
+                    let key = (ctx.fn_name.clone(), target_name.clone());
+                    self.resolved_locals.get(&key).and_then(|ty| {
+                        if let crate::types::core::TypeId::Store(s) = ty {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .or_else(|| {
+                    // Inside a store method, if the property matches a field of the current store
+                    self.current_store_name.clone()
+                });
+            if let Some(store_name) = store_name_for_field {
+                if let Some(&idx) = self
+                    .store_field_indices
+                    .get(&(store_name, property.to_string()))
+                {
+                    let target_value = self.emit_expression(ctx, target)?;
+                    let result = self.inline_struct_get_nb(ctx, target_value, idx as u64);
+                    return Ok(result);
+                }
             }
         }
         let target_value = self.emit_expression(ctx, target)?;
@@ -177,10 +225,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Expression::Identifier(target_name, _) = target {
-            if let Some(crate::types::core::TypeId::Store(store_name)) =
-                self.resolved_types.get(target_name.as_str())
-            {
-                let store_name = store_name.clone();
+            // Try resolved_types, resolved_locals, and current_store_name for store type
+            let store_name_opt: Option<String> = self
+                .resolved_types
+                .get(target_name.as_str())
+                .and_then(|ty| {
+                    if let crate::types::core::TypeId::Store(s) = ty {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    let key = (ctx.fn_name.clone(), target_name.clone());
+                    self.resolved_locals.get(&key).and_then(|ty| {
+                        if let crate::types::core::TypeId::Store(s) = ty {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .or_else(|| self.current_store_name.clone());
+            if let Some(store_name) = store_name_opt {
                 let mangled = format!("{}_{}", store_name, property);
                 if self.functions.contains_key(&mangled) {
                     let expected_params = self.functions[&mangled].count_params() as usize - 1;
@@ -398,11 +465,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let arg_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(
-                    self.runtime.list_push,
-                    &[list_value, arg_value],
-                    "list_push",
-                ))
+                let is_known_list = self.expr_is_known_list(ctx, target);
+                if is_known_list {
+                    Ok(self.call_nb(
+                        self.runtime.nb_list_push,
+                        &[list_value.into(), arg_value.into()],
+                        "nb_list_push",
+                    ))
+                } else {
+                    Ok(self.call_bridged(self.runtime.list_push, &[list_value, arg_value], "list_push"))
+                }
             }
             "pop" => {
                 if !args.is_empty() {
@@ -415,13 +487,146 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(".get() expects exactly one argument", span));
                 }
-                let target_value = self.emit_expression(ctx, target)?;
-                let key_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(
-                    self.runtime.value_get,
-                    &[target_value, key_value],
-                    "value_get_method",
-                ))
+
+                // Check for chained .get().get() on list-of-lists FIRST (most specific)
+                if let Some((inner_target, inner_args)) = self.detect_chained_list_get(ctx, target) {
+                    // Chained .get().get() on list-of-lists: fully inline with LLVM pointer ops
+                    // inner_target.get(inner_idx).get(outer_idx)
+                    // Emit inner list pointer
+                    let inner_list_value = self.emit_expression(ctx, inner_target)?;
+                    let inner_list_ptr = self.nb_extract_heap_ptr(inner_list_value);
+                    // Emit inner index
+                    let inner_idx = if self.expr_is_int(ctx, &inner_args[0]) {
+                        self.emit_expression_as_native_int(ctx, &inner_args[0])?
+                    } else {
+                        let key_value = self.emit_expression(ctx, &inner_args[0])?;
+                        let idx_f64 = self.value_to_number_fast(key_value);
+                        self.builder
+                            .build_float_to_unsigned_int(idx_f64, self.usize_type, "inner_get_idx")
+                            .unwrap()
+                    };
+                    // Inline: load items data pointer from outer list, then index to get sublist
+                    let outer_items = self.inline_list_items_ptr(inner_list_ptr);
+                    let sublist_ptr = self.inline_list_get_ptr(outer_items, inner_idx);
+                    // Emit outer index
+                    let outer_idx = if self.expr_is_int(ctx, &args[0]) {
+                        self.emit_expression_as_native_int(ctx, &args[0])?
+                    } else {
+                        let key_value = self.emit_expression(ctx, &args[0])?;
+                        let idx_f64 = self.value_to_number_fast(key_value);
+                        self.builder
+                            .build_float_to_unsigned_int(idx_f64, self.usize_type, "outer_get_idx")
+                            .unwrap()
+                    };
+                    // Inline: load items data pointer from sublist, then load element's f64 payload
+                    let inner_items = self.inline_list_items_ptr(sublist_ptr);
+                    let elem_ptr = self.inline_list_get_ptr(inner_items, outer_idx);
+                    let raw_f64 = self.inline_load_number(elem_ptr);
+                    // Wrap as NaN-boxed i64 via bitcast
+                    Ok(self.builder.build_bitcast(raw_f64, self.runtime.value_i64_type, "nb_bits_raw").unwrap().into_int_value())
+                } else if self.expr_is_known_list(ctx, target) {
+                    // Fast path for list.get(index) — compile-time known list
+                    let target_value = self.emit_expression(ctx, target)?;
+                    let list_ptr = self.nb_extract_heap_ptr(target_value);
+
+                    // If index is a known integer, load native int directly (no float roundtrip)
+                    let idx_usize = if self.expr_is_int(ctx, &args[0]) {
+                        let native_int = self.emit_expression_as_native_int(ctx, &args[0])?;
+                        native_int
+                    } else {
+                        let key_value = self.emit_expression(ctx, &args[0])?;
+                        let idx_f64 = self.value_to_number_fast(key_value);
+                        self.builder
+                            .build_float_to_unsigned_int(idx_f64, self.usize_type, "get_idx")
+                            .unwrap()
+                    };
+                    // Combined get+NaN-box: single FFI call instead of get_fast + nb_from_handle
+                    Ok(self.call_nb(
+                        self.runtime.list_get_nb,
+                        &[list_ptr.into(), idx_usize.into()],
+                        "list_get_nb",
+                    ))
+                } else {
+                    let target_value = self.emit_expression(ctx, target)?;
+                    let key_value = self.emit_expression(ctx, &args[0])?;
+                    // Runtime tag check: inline NaN-box bit extraction (zero allocation)
+                    let is_heap = self.nb_is_heap_ptr(target_value);
+
+                    let function = ctx.function;
+                    let heap_bb = self.context.append_basic_block(function, "get.heap");
+                    let fallback_bb = self.context.append_basic_block(function, "get.fallback");
+                    let list_bb = self.context.append_basic_block(function, "get.list");
+                    let other_bb = self.context.append_basic_block(function, "get.other");
+                    let merge_bb = self.context.append_basic_block(function, "get.merge");
+                    self.builder
+                        .build_conditional_branch(is_heap, heap_bb, fallback_bb)
+                        .unwrap();
+
+                    // Heap path: extract pointer, check tag
+                    self.builder.position_at_end(heap_bb);
+                    let heap_ptr = self.nb_extract_heap_ptr(target_value);
+                    let tag_val = self.nb_heap_tag(heap_ptr);
+                    let list_tag = self.i8_type.const_int(3, false);
+                    let is_list = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, tag_val, list_tag, "get_is_list")
+                        .unwrap();
+                    self.builder
+                        .build_conditional_branch(is_list, list_bb, other_bb)
+                        .unwrap();
+
+                    // List fast path: combined get+NaN-box in single FFI call
+                    self.builder.position_at_end(list_bb);
+                    let idx_f64 = self.value_to_number_fast(key_value);
+                    let idx_usize = self
+                        .builder
+                        .build_float_to_unsigned_int(idx_f64, self.usize_type, "get_idx")
+                        .unwrap();
+                    let fast_nb = self.call_nb(
+                        self.runtime.list_get_nb,
+                        &[heap_ptr.into(), idx_usize.into()],
+                        "list_get_nb",
+                    );
+                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                    let list_end = self.builder.get_insert_block().unwrap();
+
+                    // Non-list heap object fallback (maps, stores, etc.)
+                    self.builder.position_at_end(other_bb);
+                    let key_ptr = self.nb_to_ptr(key_value);
+                    let fallback_ptr = self.call_runtime_ptr(
+                        self.runtime.value_get,
+                        &[heap_ptr.into(), key_ptr.into()],
+                        "value_get_method",
+                    );
+                    let other_nb = self.ptr_to_nb(fallback_ptr);
+                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                    let other_end = self.builder.get_insert_block().unwrap();
+
+                    // Non-heap fallback (numbers, bools — shouldn't normally .get())
+                    self.builder.position_at_end(fallback_bb);
+                    let target_ptr_fb = self.nb_to_ptr(target_value);
+                    let key_ptr_fb = self.nb_to_ptr(key_value);
+                    let fb_ptr = self.call_runtime_ptr(
+                        self.runtime.value_get,
+                        &[target_ptr_fb.into(), key_ptr_fb.into()],
+                        "value_get_fb",
+                    );
+                    let fb_nb = self.ptr_to_nb(fb_ptr);
+                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                    let fb_end = self.builder.get_insert_block().unwrap();
+
+                    self.builder.position_at_end(merge_bb);
+                    let phi = self
+                        .builder
+                        .build_phi(self.usize_type, "get_result")
+                        .unwrap();
+                    phi.add_incoming(&[
+                        (&fast_nb, list_end),
+                        (&other_nb, other_end),
+                        (&fb_nb, fb_end),
+                    ]);
+                    Ok(phi.as_basic_value().into_int_value())
+                }
             }
             "set" => {
                 if args.len() != 2 {
@@ -486,18 +691,139 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 let list_value = self.emit_expression(ctx, target)?;
                 let index_value = self.emit_expression(ctx, &args[0])?;
-                Ok(self.call_bridged(
-                    self.runtime.list_get,
-                    &[list_value, index_value],
-                    "list_get",
-                ))
+                // Fast path: convert NaN-boxed index to usize, call coral_list_get_fast
+                let list_ptr = self.nb_to_ptr(list_value);
+                let idx_f64 = self.value_to_number_fast(index_value);
+                let idx_usize = self
+                    .builder
+                    .build_float_to_unsigned_int(idx_f64, self.usize_type, "idx_usize")
+                    .unwrap();
+                let result_ptr = self.call_runtime_ptr(
+                    self.runtime.list_get_fast,
+                    &[list_ptr.into(), idx_usize.into()],
+                    "list_get_fast",
+                );
+                Ok(self.ptr_to_nb(result_ptr))
             }
             "length" => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new("length does not take arguments", span));
                 }
                 let target_value = self.emit_expression(ctx, target)?;
-                Ok(self.call_bridged(self.runtime.value_length, &[target_value], "value_length"))
+                // Inline NaN-box bit extraction: zero-allocation heap check + tag read
+                let is_heap = self.nb_is_heap_ptr(target_value);
+
+                let function = ctx.function;
+                let heap_bb = self.context.append_basic_block(function, "len.heap");
+                let fallback_bb = self.context.append_basic_block(function, "len.fallback");
+                let list_bb = self.context.append_basic_block(function, "len.list");
+                let string_bb = self.context.append_basic_block(function, "len.string");
+                let other_bb = self.context.append_basic_block(function, "len.other");
+                let merge_bb = self.context.append_basic_block(function, "len.merge");
+                self.builder
+                    .build_conditional_branch(is_heap, heap_bb, fallback_bb)
+                    .unwrap();
+
+                // Heap path: extract pointer, check tag
+                self.builder.position_at_end(heap_bb);
+                let heap_ptr = self.nb_extract_heap_ptr(target_value);
+                let tag_val = self.nb_heap_tag(heap_ptr);
+                let list_tag = self.i8_type.const_int(3, false);
+                let is_list = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, tag_val, list_tag, "is_list")
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(is_list, list_bb, string_bb)
+                    .unwrap();
+
+                // List fast path: coral_list_len returns usize directly
+                self.builder.position_at_end(list_bb);
+                let len_usize = self
+                    .builder
+                    .build_call(
+                        self.runtime.list_len,
+                        &[heap_ptr.into()],
+                        "list_len_raw",
+                    )
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let len_f64 = self
+                    .builder
+                    .build_unsigned_int_to_float(len_usize, self.f64_type, "len_f64")
+                    .unwrap();
+                let len_nb = self.wrap_number_fast(len_f64);
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                let list_end = self.builder.get_insert_block().unwrap();
+
+                // String fast path: coral_string_len returns usize directly
+                self.builder.position_at_end(string_bb);
+                let string_tag = self.i8_type.const_int(2, false);
+                let is_string = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, tag_val, string_tag, "is_string")
+                    .unwrap();
+                let str_len_bb = self.context.append_basic_block(function, "len.str_fast");
+                self.builder
+                    .build_conditional_branch(is_string, str_len_bb, other_bb)
+                    .unwrap();
+
+                self.builder.position_at_end(str_len_bb);
+                let str_len_usize = self
+                    .builder
+                    .build_call(
+                        self.runtime.string_len,
+                        &[heap_ptr.into()],
+                        "string_len_raw",
+                    )
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let str_len_f64 = self
+                    .builder
+                    .build_unsigned_int_to_float(str_len_usize, self.f64_type, "str_len_f64")
+                    .unwrap();
+                let str_len_nb = self.wrap_number_fast(str_len_f64);
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                let str_end = self.builder.get_insert_block().unwrap();
+
+                // Non-list/non-string heap object: use bridged value_length
+                self.builder.position_at_end(other_bb);
+                let other_result = self.call_bridged(
+                    self.runtime.value_length,
+                    &[target_value],
+                    "value_length",
+                );
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                let other_end = self.builder.get_insert_block().unwrap();
+
+                // Non-heap fallback (strings use value_length via bridge)
+                self.builder.position_at_end(fallback_bb);
+                let fb_result = self.call_bridged(
+                    self.runtime.value_length,
+                    &[target_value],
+                    "value_length_fb",
+                );
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                let fb_end = self.builder.get_insert_block().unwrap();
+
+                self.builder.position_at_end(merge_bb);
+                let phi = self
+                    .builder
+                    .build_phi(self.usize_type, "len_result")
+                    .unwrap();
+                phi.add_incoming(&[
+                    (&len_nb, list_end),
+                    (&str_len_nb, str_end),
+                    (&other_result, other_end),
+                    (&fb_result, fb_end),
+                ]);
+                Ok(phi.as_basic_value().into_int_value())
             }
 
             "split" => {
@@ -1087,78 +1413,148 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("abs expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_abs,
-                    &[n],
-                    "math_abs_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.fabs.f64",
+                        "fabs",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_abs,
+                        &[n],
+                        "math_abs_call",
+                    )))
+                }
             }
             "sqrt" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sqrt expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_sqrt,
-                    &[n],
-                    "math_sqrt_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.sqrt.f64",
+                        "sqrt",
+                        true,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_sqrt,
+                        &[n],
+                        "math_sqrt_call",
+                    )))
+                }
             }
             "floor" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("floor expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_floor,
-                    &[n],
-                    "math_floor_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.floor.f64",
+                        "floor",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_floor,
+                        &[n],
+                        "math_floor_call",
+                    )))
+                }
             }
             "ceil" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ceil expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_ceil,
-                    &[n],
-                    "math_ceil_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.ceil.f64",
+                        "ceil",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_ceil,
+                        &[n],
+                        "math_ceil_call",
+                    )))
+                }
             }
             "round" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("round expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_round,
-                    &[n],
-                    "math_round_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.round.f64",
+                        "round",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_round,
+                        &[n],
+                        "math_round_call",
+                    )))
+                }
             }
             "sin" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("sin expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_sin,
-                    &[n],
-                    "math_sin_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.sin.f64",
+                        "sin",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_sin,
+                        &[n],
+                        "math_sin_call",
+                    )))
+                }
             }
             "cos" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("cos expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_cos,
-                    &[n],
-                    "math_cos_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.cos.f64",
+                        "cos",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_cos,
+                        &[n],
+                        "math_cos_call",
+                    )))
+                }
             }
             "tan" => {
                 if args.len() != 1 {
@@ -1175,34 +1571,64 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("ln expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_ln,
-                    &[n],
-                    "math_ln_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.log.f64",
+                        "ln",
+                        true,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_ln,
+                        &[n],
+                        "math_ln_call",
+                    )))
+                }
             }
             "log10" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("log10 expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_log10,
-                    &[n],
-                    "math_log10_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.log10.f64",
+                        "log10",
+                        true,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_log10,
+                        &[n],
+                        "math_log10_call",
+                    )))
+                }
             }
             "exp" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("exp expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_exp,
-                    &[n],
-                    "math_exp_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.exp.f64",
+                        "exp",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_exp,
+                        &[n],
+                        "math_exp_call",
+                    )))
+                }
             }
             "asin" => {
                 if args.len() != 1 {
@@ -1274,12 +1700,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if args.len() != 1 {
                     return Err(Diagnostic::new("trunc expects one argument", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]);
                 let n = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_trunc,
-                    &[n],
-                    "math_trunc_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_unary(
+                        n,
+                        "llvm.trunc.f64",
+                        "trunc",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_trunc,
+                        &[n],
+                        "math_trunc_call",
+                    )))
+                }
             }
             "sign" | "signum" => {
                 if args.len() != 1 {
@@ -1300,37 +1736,70 @@ impl<'ctx> CodeGenerator<'ctx> {
                         span,
                     ));
                 }
+                let is_num = self.expr_is_numeric(&args[0]) && self.expr_is_numeric(&args[1]);
                 let base = self.emit_expression(ctx, &args[0])?;
                 let exp = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_pow,
-                    &[base, exp],
-                    "math_pow_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_binary(
+                        base,
+                        exp,
+                        "llvm.pow.f64",
+                        "pow",
+                        true,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_pow,
+                        &[base, exp],
+                        "math_pow_call",
+                    )))
+                }
             }
             "min" => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new("min expects two arguments", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]) && self.expr_is_numeric(&args[1]);
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_min,
-                    &[a, b],
-                    "math_min_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_binary(
+                        a,
+                        b,
+                        "llvm.minnum.f64",
+                        "min",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_min,
+                        &[a, b],
+                        "math_min_call",
+                    )))
+                }
             }
             "max" => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new("max expects two arguments", span));
                 }
+                let is_num = self.expr_is_numeric(&args[0]) && self.expr_is_numeric(&args[1]);
                 let a = self.emit_expression(ctx, &args[0])?;
                 let b = self.emit_expression(ctx, &args[1])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.math_max,
-                    &[a, b],
-                    "math_max_call",
-                )))
+                if is_num {
+                    Ok(Some(self.emit_math_intrinsic_binary(
+                        a,
+                        b,
+                        "llvm.maxnum.f64",
+                        "max",
+                        false,
+                    )))
+                } else {
+                    Ok(Some(self.call_bridged(
+                        self.runtime.math_max,
+                        &[a, b],
+                        "math_max_call",
+                    )))
+                }
             }
             "atan2" => {
                 if args.len() != 2 {
@@ -1872,9 +2341,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     return Err(Diagnostic::new("type_of expects one argument", span));
                 }
                 let v = self.emit_expression(ctx, &args[0])?;
-                Ok(Some(self.call_bridged(
-                    self.runtime.type_of,
-                    &[v],
+                // Direct NaN-box type_of: avoids nb_to_ptr/ptr_to_nb bridge overhead
+                Ok(Some(self.call_nb(
+                    self.runtime.nb_type_of,
+                    &[v.into()],
                     "type_of_call",
                 )))
             }

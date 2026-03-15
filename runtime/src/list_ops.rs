@@ -862,3 +862,318 @@ pub extern "C" fn coral_range(start: ValueHandle, end: ValueHandle) -> ValueHand
     }
     result
 }
+
+// ── Fast-path list accessors for inline codegen ──
+// These expose raw data pointers so the compiler can emit getelementptr+load
+// instead of full FFI calls for list get/set/length.
+
+/// Returns the raw data pointer for the list's items array.
+/// The caller can index this directly as `*mut ValueHandle` (i.e., `*mut *mut Value`).
+/// Returns null if the handle is invalid.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_data_ptr(list: ValueHandle) -> *mut ValueHandle {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return std::ptr::null_mut();
+    }
+    let ptr = list_value.heap_ptr();
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let list_obj = unsafe { &mut *(ptr as *mut ListObject) };
+    list_obj.items.as_mut_ptr()
+}
+
+/// Fast list get with usize index. Returns the element at the given index,
+/// or null if out of bounds. Retains the returned value.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_get_fast(list: ValueHandle, index: usize) -> ValueHandle {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return std::ptr::null_mut();
+    }
+    let Some(list_obj) = list_from_value(list_value) else {
+        return std::ptr::null_mut();
+    };
+    match list_obj.items.get(index) {
+        Some(&handle) if !handle.is_null() => {
+            unsafe { coral_value_retain(handle); }
+            handle
+        }
+        _ => coral_make_unit(),
+    }
+}
+
+/// Combined list get + NaN-box conversion in a single FFI call.
+/// Returns the element at `index` as a NaN-boxed u64 value.
+/// Refcount semantics match list_get_fast + nb_from_handle:
+///   - Number items: returned as NaN-boxed f64, no net refcount change
+///   - Heap items: returned as NaN-boxed heap ptr with +1 refcount (caller must release)
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_get_nb(list: ValueHandle, index: usize) -> u64 {
+    use crate::nanbox::NanBoxedValue;
+    if list.is_null() {
+        return NanBoxedValue::none().to_bits();
+    }
+    let list_value = unsafe { &*list };
+    if list_value.tag != ValueTag::List as u8 {
+        return NanBoxedValue::none().to_bits();
+    }
+    let ptr = list_value.heap_ptr();
+    if ptr.is_null() {
+        return NanBoxedValue::none().to_bits();
+    }
+    let list_obj = unsafe { &*(ptr as *const ListObject) };
+    match list_obj.items.get(index) {
+        Some(&handle) if !handle.is_null() => {
+            let value = unsafe { &*handle };
+            match ValueTag::try_from(value.tag) {
+                Ok(ValueTag::Number) => {
+                    // Number: extract f64, no retain/release needed
+                    NanBoxedValue::from_number(unsafe { value.payload.number }).to_bits()
+                }
+                Ok(ValueTag::Bool) => {
+                    NanBoxedValue::from_bool(unsafe { value.payload.inline[0] & 1 } != 0).to_bits()
+                }
+                Ok(ValueTag::Unit) => {
+                    if value.flags & crate::FLAG_ABSENT != 0 {
+                        NanBoxedValue::none().to_bits()
+                    } else {
+                        NanBoxedValue::unit().to_bits()
+                    }
+                }
+                _ => {
+                    // Heap object (List, Map, Store, etc.): retain + wrap
+                    unsafe { coral_value_retain(handle); }
+                    NanBoxedValue::from_heap_ptr(handle).to_bits()
+                }
+            }
+        }
+        _ => NanBoxedValue::unit().to_bits(),
+    }
+}
+
+/// Ultra-fast list element access returning raw f64.
+/// For use when the compiler knows the element is a number.
+/// Skips all NaN-boxing overhead — returns the f64 directly from payload.number.
+/// Returns 0.0 on any error (null list, out of bounds, etc.).
+/// No refcount changes.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn coral_list_get_raw_f64(list: ValueHandle, index: usize) -> f64 {
+    if list.is_null() {
+        return 0.0;
+    }
+    let list_obj = unsafe {
+        let ptr = (*list).payload.ptr;
+        &*(ptr as *const ListObject)
+    };
+    if let Some(&handle) = list_obj.items.get(index) {
+        unsafe { (*handle).payload.number }
+    } else {
+        0.0
+    }
+}
+
+/// Ultra-fast sublist pointer access.
+/// Returns the raw *mut Value pointer for a list element that is itself a list/heap object.
+/// NO retain is performed — the caller must ensure the parent list stays alive.
+/// Returns null on any error (null list, out of bounds, non-list element).
+/// This is used for chained indexing like a.get(i).get(k) where the intermediate
+/// .get(i) result is only used transiently.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn coral_list_get_sublist_ptr(list: ValueHandle, index: usize) -> ValueHandle {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    let list_obj = unsafe {
+        let ptr = (*list).payload.ptr;
+        &*(ptr as *const ListObject)
+    };
+    match list_obj.items.get(index) {
+        Some(&handle) if !handle.is_null() => handle,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Returns the items data pointer and length from a list *Value in a single call.
+/// This allows the codegen to do inline pointer indexing without knowing Vec layout.
+/// `out_len` receives the length. Returns the items data pointer.
+/// Returns null if not a valid list.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_items_raw(list: ValueHandle, out_len: *mut usize) -> *mut ValueHandle {
+    if list.is_null() {
+        if !out_len.is_null() { unsafe { *out_len = 0; } }
+        return std::ptr::null_mut();
+    }
+    let list_value = unsafe { &*list };
+    let Some(list_obj) = list_from_value(list_value) else {
+        if !out_len.is_null() { unsafe { *out_len = 0; } }
+        return std::ptr::null_mut();
+    };
+    if !out_len.is_null() {
+        unsafe { *out_len = list_obj.items.len(); }
+    }
+    list_obj.items.as_ptr() as *mut ValueHandle
+}
+
+/// Fast list set with usize index. Replaces the element at the given index.
+/// Handles retain/release of old and new values.
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_list_set_fast(list: ValueHandle, index: usize, value: ValueHandle) {
+    if list.is_null() {
+        return;
+    }
+    let list_value = unsafe { &mut *list };
+    if list_value.tag != ValueTag::List as u8 {
+        return;
+    }
+    let ptr = list_value.heap_ptr();
+    if ptr.is_null() {
+        return;
+    }
+    let list_obj = unsafe { &mut *(ptr as *mut ListObject) };
+    if index < list_obj.items.len() {
+        let old = list_obj.items[index];
+        if !value.is_null() {
+            unsafe { coral_value_retain(value); }
+        }
+        list_obj.items[index] = value;
+        if !old.is_null() {
+            unsafe { coral_value_release(old); }
+        }
+    }
+}
+
+// ── Typed list operations for known-homogeneous numeric lists ──
+
+/// A typed list storing raw i64 values (not NaN-boxed).
+/// Used when semantic analysis determines a list contains only Int values.
+pub struct TypedListI64 {
+    pub data: Vec<i64>,
+}
+
+/// A typed list storing raw f64 values.
+/// Used when semantic analysis determines a list contains only Float values.  
+pub struct TypedListF64 {
+    pub data: Vec<f64>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_typed_list_i64_new(capacity: usize) -> *mut TypedListI64 {
+    Box::into_raw(Box::new(TypedListI64 {
+        data: Vec::with_capacity(capacity),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_i64_push(list: *mut TypedListI64, value: i64) {
+    if !list.is_null() {
+        unsafe { (*list).data.push(value); }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_i64_get(list: *const TypedListI64, index: usize) -> i64 {
+    if list.is_null() {
+        return 0;
+    }
+    let list_ref = unsafe { &*list };
+    if index < list_ref.data.len() {
+        list_ref.data[index]
+    } else {
+        0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_i64_set(list: *mut TypedListI64, index: usize, value: i64) {
+    if !list.is_null() {
+        let list_ref = unsafe { &mut *list };
+        if index < list_ref.data.len() {
+            list_ref.data[index] = value;
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_i64_len(list: *const TypedListI64) -> usize {
+    if list.is_null() {
+        return 0;
+    }
+    unsafe { (*list).data.len() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_i64_data_ptr(list: *mut TypedListI64) -> *mut i64 {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { (*list).data.as_mut_ptr() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_i64_free(list: *mut TypedListI64) {
+    if !list.is_null() {
+        unsafe { drop(Box::from_raw(list)); }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn coral_typed_list_f64_new(capacity: usize) -> *mut TypedListF64 {
+    Box::into_raw(Box::new(TypedListF64 {
+        data: Vec::with_capacity(capacity),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_f64_push(list: *mut TypedListF64, value: f64) {
+    if !list.is_null() {
+        unsafe { (*list).data.push(value); }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_f64_get(list: *const TypedListF64, index: usize) -> f64 {
+    if list.is_null() {
+        return 0.0;
+    }
+    let list_ref = unsafe { &*list };
+    if index < list_ref.data.len() {
+        list_ref.data[index]
+    } else {
+        0.0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_f64_set(list: *mut TypedListF64, index: usize, value: f64) {
+    if !list.is_null() {
+        let list_ref = unsafe { &mut *list };
+        if index < list_ref.data.len() {
+            list_ref.data[index] = value;
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_f64_len(list: *const TypedListF64) -> usize {
+    if list.is_null() {
+        return 0;
+    }
+    unsafe { (*list).data.len() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coral_typed_list_f64_free(list: *mut TypedListF64) {
+    if !list.is_null() {
+        unsafe { drop(Box::from_raw(list)); }
+    }
+}

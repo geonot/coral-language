@@ -273,7 +273,9 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                 ));
                             }
                             let value = i64::from_str_radix(&digits, 16).map_err(|e| {
-                                let msg = if e.kind() == &std::num::IntErrorKind::PosOverflow || e.kind() == &std::num::IntErrorKind::NegOverflow {
+                                let msg = if e.kind() == &std::num::IntErrorKind::PosOverflow
+                                    || e.kind() == &std::num::IntErrorKind::NegOverflow
+                                {
                                     "hex literal overflows 64-bit integer"
                                 } else {
                                     "invalid hex literal"
@@ -309,15 +311,15 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                         ));
                                     }
                                     let value = i64::from_str_radix(&digits, 2).map_err(|e| {
-                                        let msg = if e.kind() == &std::num::IntErrorKind::PosOverflow || e.kind() == &std::num::IntErrorKind::NegOverflow {
+                                        let msg = if e.kind()
+                                            == &std::num::IntErrorKind::PosOverflow
+                                            || e.kind() == &std::num::IntErrorKind::NegOverflow
+                                        {
                                             "binary literal overflows 64-bit integer"
                                         } else {
                                             "invalid binary literal"
                                         };
-                                        Diagnostic::new(
-                                            msg,
-                                            Span::new(start, pos),
-                                        )
+                                        Diagnostic::new(msg, Span::new(start, pos))
                                     })?;
                                     tokens.push(Token::new(
                                         TokenKind::Integer(value),
@@ -349,7 +351,9 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                 ));
                             }
                             let value = i64::from_str_radix(&digits, 8).map_err(|e| {
-                                let msg = if e.kind() == &std::num::IntErrorKind::PosOverflow || e.kind() == &std::num::IntErrorKind::NegOverflow {
+                                let msg = if e.kind() == &std::num::IntErrorKind::PosOverflow
+                                    || e.kind() == &std::num::IntErrorKind::NegOverflow
+                                {
                                     "octal literal overflows 64-bit integer"
                                 } else {
                                     "invalid octal literal"
@@ -611,7 +615,7 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                 pos += 1;
                             }
                             'u' => {
-                                pos += 1; // skip 'u'
+                                pos += 1;
                                 if pos >= len {
                                     return Err(Diagnostic::new(
                                         "unterminated unicode escape",
@@ -620,14 +624,18 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                 }
                                 let next_c = source[pos..].chars().next().unwrap();
                                 if next_c == '{' {
-                                    pos += 1; // skip '{'
+                                    pos += 1;
                                     let hex_start = pos;
                                     while pos < len {
                                         let hc = source[pos..].chars().next().unwrap();
-                                        if hc == '}' { break; }
+                                        if hc == '}' {
+                                            break;
+                                        }
                                         if !hc.is_ascii_hexdigit() {
                                             return Err(Diagnostic::new(
-                                                format!("invalid character `{hc}` in unicode escape"),
+                                                format!(
+                                                    "invalid character `{hc}` in unicode escape"
+                                                ),
                                                 Span::new(hex_start, pos + hc.len_utf8()),
                                             ));
                                         }
@@ -640,24 +648,28 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                         ));
                                     }
                                     let hex_str = &source[hex_start..pos];
-                                    pos += 1; // skip '}'
+                                    pos += 1;
                                     if hex_str.is_empty() || hex_str.len() > 6 {
                                         return Err(Diagnostic::new(
                                             "unicode escape must have 1-6 hex digits",
                                             Span::new(hex_start, pos),
                                         ));
                                     }
-                                    let codepoint = u32::from_str_radix(hex_str, 16).map_err(|_| {
-                                        Diagnostic::new(
-                                            "invalid unicode escape value",
-                                            Span::new(hex_start, pos),
-                                        )
-                                    })?;
+                                    let codepoint =
+                                        u32::from_str_radix(hex_str, 16).map_err(|_| {
+                                            Diagnostic::new(
+                                                "invalid unicode escape value",
+                                                Span::new(hex_start, pos),
+                                            )
+                                        })?;
                                     match char::from_u32(codepoint) {
                                         Some(ch) => literal.push(ch),
                                         None => {
                                             return Err(Diagnostic::new(
-                                                format!("invalid unicode codepoint U+{:04X}", codepoint),
+                                                format!(
+                                                    "invalid unicode codepoint U+{:04X}",
+                                                    codepoint
+                                                ),
                                                 Span::new(hex_start, pos),
                                             ));
                                         }
@@ -666,7 +678,8 @@ pub fn lex(source: &str) -> LexResult<Vec<Token>> {
                                     return Err(Diagnostic::new(
                                         "expected `{` after `\\u`",
                                         Span::new(pos - 1, pos + next_c.len_utf8()),
-                                    ).with_help("Use \\u{HHHH} for unicode escapes."));
+                                    )
+                                    .with_help("Use \\u{HHHH} for unicode escapes."));
                                 }
                             }
                             other => {

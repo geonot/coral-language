@@ -34,10 +34,11 @@ check:
 
 # ─── Test ─────────────────────────────────────────────────────
 test:
-	cargo test
+	cargo test --all
+	cargo test -p runtime --lib
 
 test-runtime:
-	cargo test -p runtime
+	cargo test -p runtime --lib
 
 # ─── Install & Distribute ────────────────────────────────────
 install: release

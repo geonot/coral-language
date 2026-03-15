@@ -22,12 +22,17 @@ pub struct RuntimeBindings<'ctx> {
     pub nb_as_number: FunctionValue<'ctx>,
     pub nb_as_bool: FunctionValue<'ctx>,
     pub nb_tag: FunctionValue<'ctx>,
+    pub nb_type_of: FunctionValue<'ctx>,
+    pub nb_list_push: FunctionValue<'ctx>,
     pub nb_is_truthy: FunctionValue<'ctx>,
     pub nb_is_err: FunctionValue<'ctx>,
     pub nb_is_absent: FunctionValue<'ctx>,
 
     pub nb_retain: FunctionValue<'ctx>,
     pub nb_release: FunctionValue<'ctx>,
+
+    pub batch_release: FunctionValue<'ctx>,
+    pub cycle_flush: FunctionValue<'ctx>,
 
     pub nb_add: FunctionValue<'ctx>,
     pub nb_sub: FunctionValue<'ctx>,
@@ -55,6 +60,12 @@ pub struct RuntimeBindings<'ctx> {
     pub make_list_hinted: FunctionValue<'ctx>,
     pub make_map: FunctionValue<'ctx>,
     pub make_map_hinted: FunctionValue<'ctx>,
+    pub make_struct: FunctionValue<'ctx>,
+    pub struct_get: FunctionValue<'ctx>,
+    pub struct_set: FunctionValue<'ctx>,
+    pub nb_struct_get: FunctionValue<'ctx>,
+    pub nb_struct_set: FunctionValue<'ctx>,
+    pub nb_make_struct: FunctionValue<'ctx>,
     pub value_as_number: FunctionValue<'ctx>,
     pub value_as_bool: FunctionValue<'ctx>,
     pub value_add: FunctionValue<'ctx>,
@@ -339,6 +350,34 @@ pub struct RuntimeBindings<'ctx> {
     pub regex_find_all: FunctionValue<'ctx>,
     pub regex_replace: FunctionValue<'ctx>,
     pub regex_split: FunctionValue<'ctx>,
+
+    // ── Fast-path FFI for inline codegen ──
+    pub list_get_fast: FunctionValue<'ctx>,
+    pub list_get_nb: FunctionValue<'ctx>,
+    pub list_get_raw_f64: FunctionValue<'ctx>,
+    pub list_get_sublist_ptr: FunctionValue<'ctx>,
+    pub list_items_raw: FunctionValue<'ctx>,
+    pub list_set_fast: FunctionValue<'ctx>,
+    pub list_data_ptr: FunctionValue<'ctx>,
+    pub list_len: FunctionValue<'ctx>,
+    pub string_len: FunctionValue<'ctx>,
+
+    // ── Typed list FFI (i64) ──
+    pub typed_list_i64_new: FunctionValue<'ctx>,
+    pub typed_list_i64_push: FunctionValue<'ctx>,
+    pub typed_list_i64_get: FunctionValue<'ctx>,
+    pub typed_list_i64_set: FunctionValue<'ctx>,
+    pub typed_list_i64_len: FunctionValue<'ctx>,
+    pub typed_list_i64_data_ptr: FunctionValue<'ctx>,
+    pub typed_list_i64_free: FunctionValue<'ctx>,
+
+    // ── Typed list FFI (f64) ──
+    pub typed_list_f64_new: FunctionValue<'ctx>,
+    pub typed_list_f64_push: FunctionValue<'ctx>,
+    pub typed_list_f64_get: FunctionValue<'ctx>,
+    pub typed_list_f64_set: FunctionValue<'ctx>,
+    pub typed_list_f64_len: FunctionValue<'ctx>,
+    pub typed_list_f64_free: FunctionValue<'ctx>,
 }
 
 impl<'ctx> RuntimeBindings<'ctx> {
@@ -428,6 +467,16 @@ impl<'ctx> RuntimeBindings<'ctx> {
             i8_type.fn_type(&[i64_type.into()], false),
             None,
         );
+        let nb_type_of = module.add_function(
+            "coral_nb_type_of",
+            i64_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        let nb_list_push = module.add_function(
+            "coral_nb_list_push",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
         let nb_is_truthy = module.add_function(
             "coral_nb_is_truthy",
             i8_type.fn_type(&[i64_type.into()], false),
@@ -452,6 +501,19 @@ impl<'ctx> RuntimeBindings<'ctx> {
         let nb_release = module.add_function(
             "coral_nb_release",
             context.void_type().fn_type(&[i64_type.into()], false),
+            None,
+        );
+
+        let batch_release = module.add_function(
+            "coral_batch_release",
+            context
+                .void_type()
+                .fn_type(&[value_ptr_ptr_type.into(), usize_type.into()], false),
+            None,
+        );
+        let cycle_flush = module.add_function(
+            "coral_cycle_flush",
+            context.void_type().fn_type(&[], false),
             None,
         );
 
@@ -572,6 +634,57 @@ impl<'ctx> RuntimeBindings<'ctx> {
             "coral_make_map_hinted",
             value_ptr_type.fn_type(
                 &[map_entry_ptr_type.into(), usize_type.into(), i8_type.into()],
+                false,
+            ),
+            None,
+        );
+
+        let make_struct = module.add_function(
+            "coral_make_struct",
+            value_ptr_type.fn_type(
+                &[
+                    value_ptr_type.ptr_type(AddressSpace::default()).into(),
+                    usize_type.into(),
+                ],
+                false,
+            ),
+            None,
+        );
+        let struct_get = module.add_function(
+            "coral_struct_get",
+            value_ptr_type.fn_type(&[value_ptr_type.into(), usize_type.into()], false),
+            None,
+        );
+        let struct_set = module.add_function(
+            "coral_struct_set",
+            context.void_type().fn_type(
+                &[
+                    value_ptr_type.into(),
+                    usize_type.into(),
+                    value_ptr_type.into(),
+                ],
+                false,
+            ),
+            None,
+        );
+
+        let nb_struct_get = module.add_function(
+            "coral_nb_struct_get",
+            i64_type.fn_type(&[i64_type.into(), usize_type.into()], false),
+            None,
+        );
+        let nb_struct_set = module.add_function(
+            "coral_nb_struct_set",
+            context.void_type().fn_type(
+                &[i64_type.into(), usize_type.into(), i64_type.into()],
+                false,
+            ),
+            None,
+        );
+        let nb_make_struct = module.add_function(
+            "coral_nb_make_struct",
+            i64_type.fn_type(
+                &[i64_type.ptr_type(AddressSpace::default()).into(), usize_type.into()],
                 false,
             ),
             None,
@@ -1995,6 +2108,156 @@ impl<'ctx> RuntimeBindings<'ctx> {
             None,
         );
 
+        // ── Fast-path list FFI ──
+        let list_get_fast = module.add_function(
+            "coral_list_get_fast",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), usize_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_get_nb = module.add_function(
+            "coral_list_get_nb",
+            i64_type.fn_type(
+                &[value_ptr_type.into(), usize_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_get_raw_f64 = module.add_function(
+            "coral_list_get_raw_f64",
+            context.f64_type().fn_type(
+                &[value_ptr_type.into(), usize_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_get_sublist_ptr = module.add_function(
+            "coral_list_get_sublist_ptr",
+            value_ptr_type.fn_type(
+                &[value_ptr_type.into(), usize_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_items_raw = module.add_function(
+            "coral_list_items_raw",
+            value_ptr_type.ptr_type(AddressSpace::default()).fn_type(
+                &[value_ptr_type.into(), usize_type.ptr_type(AddressSpace::default()).into()],
+                false,
+            ),
+            None,
+        );
+        let list_set_fast = module.add_function(
+            "coral_list_set_fast",
+            context.void_type().fn_type(
+                &[value_ptr_type.into(), usize_type.into(), value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_data_ptr = module.add_function(
+            "coral_list_data_ptr",
+            value_ptr_type.ptr_type(AddressSpace::default()).fn_type(
+                &[value_ptr_type.into()],
+                false,
+            ),
+            None,
+        );
+        let list_len = module.add_function(
+            "coral_list_len",
+            usize_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+        let string_len = module.add_function(
+            "coral_string_len",
+            usize_type.fn_type(&[value_ptr_type.into()], false),
+            None,
+        );
+
+        // ── Typed list i64 FFI ──
+        let opaque_ptr = i8_type.ptr_type(AddressSpace::default());
+        let typed_list_i64_new = module.add_function(
+            "coral_typed_list_i64_new",
+            opaque_ptr.fn_type(&[usize_type.into()], false),
+            None,
+        );
+        let typed_list_i64_push = module.add_function(
+            "coral_typed_list_i64_push",
+            context.void_type().fn_type(
+                &[opaque_ptr.into(), i64_type.into()],
+                false,
+            ),
+            None,
+        );
+        let typed_list_i64_get = module.add_function(
+            "coral_typed_list_i64_get",
+            i64_type.fn_type(&[opaque_ptr.into(), usize_type.into()], false),
+            None,
+        );
+        let typed_list_i64_set = module.add_function(
+            "coral_typed_list_i64_set",
+            context.void_type().fn_type(
+                &[opaque_ptr.into(), usize_type.into(), i64_type.into()],
+                false,
+            ),
+            None,
+        );
+        let typed_list_i64_len = module.add_function(
+            "coral_typed_list_i64_len",
+            usize_type.fn_type(&[opaque_ptr.into()], false),
+            None,
+        );
+        let typed_list_i64_data_ptr = module.add_function(
+            "coral_typed_list_i64_data_ptr",
+            opaque_ptr.fn_type(&[opaque_ptr.into()], false),
+            None,
+        );
+        let typed_list_i64_free = module.add_function(
+            "coral_typed_list_i64_free",
+            context.void_type().fn_type(&[opaque_ptr.into()], false),
+            None,
+        );
+
+        // ── Typed list f64 FFI ──
+        let typed_list_f64_new = module.add_function(
+            "coral_typed_list_f64_new",
+            opaque_ptr.fn_type(&[usize_type.into()], false),
+            None,
+        );
+        let typed_list_f64_push = module.add_function(
+            "coral_typed_list_f64_push",
+            context.void_type().fn_type(
+                &[opaque_ptr.into(), f64_type.into()],
+                false,
+            ),
+            None,
+        );
+        let typed_list_f64_get = module.add_function(
+            "coral_typed_list_f64_get",
+            f64_type.fn_type(&[opaque_ptr.into(), usize_type.into()], false),
+            None,
+        );
+        let typed_list_f64_set = module.add_function(
+            "coral_typed_list_f64_set",
+            context.void_type().fn_type(
+                &[opaque_ptr.into(), usize_type.into(), f64_type.into()],
+                false,
+            ),
+            None,
+        );
+        let typed_list_f64_len = module.add_function(
+            "coral_typed_list_f64_len",
+            usize_type.fn_type(&[opaque_ptr.into()], false),
+            None,
+        );
+        let typed_list_f64_free = module.add_function(
+            "coral_typed_list_f64_free",
+            context.void_type().fn_type(&[opaque_ptr.into()], false),
+            None,
+        );
+
         Self {
             value_ptr_type,
             value_i64_type: i64_type,
@@ -2008,11 +2271,15 @@ impl<'ctx> RuntimeBindings<'ctx> {
             nb_as_number,
             nb_as_bool,
             nb_tag,
+            nb_type_of,
+            nb_list_push,
             nb_is_truthy,
             nb_is_err,
             nb_is_absent,
             nb_retain,
             nb_release,
+            batch_release,
+            cycle_flush,
             nb_add,
             nb_sub,
             nb_mul,
@@ -2070,6 +2337,12 @@ impl<'ctx> RuntimeBindings<'ctx> {
             field_or_length,
             make_map,
             make_map_hinted,
+            make_struct,
+            struct_get,
+            struct_set,
+            nb_struct_get,
+            nb_struct_set,
+            nb_make_struct,
             map_entry_type,
             make_closure,
             closure_invoke,
@@ -2278,6 +2551,28 @@ impl<'ctx> RuntimeBindings<'ctx> {
             regex_find_all,
             regex_replace,
             regex_split,
+            list_get_fast,
+            list_get_nb,
+            list_get_raw_f64,
+            list_get_sublist_ptr,
+            list_items_raw,
+            list_set_fast,
+            list_data_ptr,
+            list_len,
+            string_len,
+            typed_list_i64_new,
+            typed_list_i64_push,
+            typed_list_i64_get,
+            typed_list_i64_set,
+            typed_list_i64_len,
+            typed_list_i64_data_ptr,
+            typed_list_i64_free,
+            typed_list_f64_new,
+            typed_list_f64_push,
+            typed_list_f64_get,
+            typed_list_f64_set,
+            typed_list_f64_len,
+            typed_list_f64_free,
         }
     }
 }

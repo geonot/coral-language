@@ -83,8 +83,7 @@ fn deserialize_to_handle(data: &[u8]) -> Option<(ValueHandle, usize)> {
             if data.len() < 5 {
                 return None;
             }
-            let len =
-                u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+            let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
             if data.len() < 5 + len {
                 return None;
             }
@@ -159,19 +158,11 @@ impl RemoteNode {
 
     pub fn connect_peer(&self, addr: &str) -> std::io::Result<()> {
         let stream = TcpStream::connect(addr)?;
-        self.peers
-            .lock()
-            .unwrap()
-            .insert(addr.to_string(), stream);
+        self.peers.lock().unwrap().insert(addr.to_string(), stream);
         Ok(())
     }
 
-    pub fn send_remote(
-        &self,
-        peer_addr: &str,
-        actor_name: &str,
-        nb_value: NanBoxedValue,
-    ) -> bool {
+    pub fn send_remote(&self, peer_addr: &str, actor_name: &str, nb_value: NanBoxedValue) -> bool {
         let mut peers = self.peers.lock().unwrap();
         if let Some(stream) = peers.get_mut(peer_addr) {
             let mut payload = Vec::new();
@@ -279,8 +270,7 @@ mod tests {
         buf.extend_from_slice(payload);
 
         assert_eq!(buf[0], MSG_TYPE_SEND);
-        let recovered_len =
-            u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        let recovered_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
         assert_eq!(recovered_len, payload.len());
         assert_eq!(&buf[5..], payload);
     }

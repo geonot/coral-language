@@ -571,38 +571,72 @@ Unused imports, variables, constants, and functions in `src/compiler.rs`,
 
 ## 6. Performance Observations
 
-### Benchmark Results (Release Binary, 3 runs, median)
+### Benchmark Results — Post-Optimization (March 2026)
 
-| Benchmark | Time (ms) | Notes |
-|-----------|-----------|-------|
-| fibonacci(30) | 249 | Recursive — ~200μs per call |
-| tight_loop (10M) | 1,217 | ~122ns per NaN-boxed add |
-| list_ops (100K) | 593 | map/filter/reduce pipeline |
-| string_ops (10K) | 33 | Concat/split/replace |
-| matrix_mul (50K×3×3) | 4,945 | Heavy nested indexing |
-| map_ops (10K) | 82 | HashMap insert/lookup |
-| closures (500K calls) | 251 | Lambda + HOF pipeline |
-| pattern_matching (500K) | 6,766 | If/elif + match + ternary |
-| for_iteration (50K) | 443 | For-in loops |
-| recursion (Ackermann+) | 633 | Deep recursion |
-| store_ops (100K) | 7,153 | Store create/method/field |
-| math_compute (1M) | 1,508 | Float + trig + sqrt |
-| **TOTAL** | **23,873** | |
+| Benchmark | Before (ms) | After (ms) | Speedup | Notes |
+|-----------|-------------|-----------|---------|-------|
+| fibonacci(30) | 249 | 26 | **9.6x** | Native CPU + aggressive inlining |
+| tight_loop (10M) | 1,217 | 49 | **24.8x** | Unchecked NaN wrap + direct i1 cmp |
+| list_ops (100K) | 593 | 283 | **2.1x** | Improved inlining |
+| string_ops (10K) | 33 | 21 | **1.6x** | Target triple optimization |
+| matrix_mul (50K×3×3) | 4,945 | 2,965 | **1.7x** | Inlining + native CPU |
+| map_ops (10K) | 82 | 44 | **1.9x** | Inlining + native CPU |
+| closures (500K calls) | 251 | 43 | **5.8x** | Actor yield removal + inlining |
+| pattern_matching (500K) | 6,766 | 4,208 | **1.6x** | Ternary fast-path |
+| for_iteration (50K) | 443 | 210 | **2.1x** | Range counter optimization |
+| recursion (Ackermann+) | 633 | 53 | **11.9x** | Inlining + native CPU |
+| store_ops (100K) | 7,153 | 1,834 | **3.9x** | Indexed struct access |
+| math_compute (1M) | 1,508 | 18 | **83.8x** | LLVM intrinsics for math |
+| **TOTAL** | **23,873** | **9,754** | **2.4x** | |
 
-### Performance Concerns
+### Optimizations Applied (March 2026)
 
-1. **NaN-boxing overhead**: ~122ns per integer add in tight loop is ~100x slower
-   than native. The boxing/unboxing on every operation dominates.
+1. **Native CPU targeting**: Replaced `"generic"` CPU with host-native CPU using
+   `TargetMachine::get_host_cpu_name()` and `get_host_cpu_features()`. Enables
+   AVX2, BMI, FMA, and all available CPU extensions.
 
-2. **Store operations very slow**: 7s for 300K store operations. Each `make_Store()`
-   allocates a heap object + map for fields. Consider struct-of-arrays or
-   fixed-layout optimization.
+2. **NaN-box unchecked wrapping**: Added `wrap_number_unchecked` that skips NaN
+   canonicalization for operations where NaN is mathematically impossible (add,
+   sub, mul on finite values). Saves a branch per arithmetic operation.
 
-3. **Pattern matching slow**: 6.7s for 500K classifications. String comparison in
-   match arms is expensive. Consider string interning or tag-based dispatch.
+3. **Direct i1 condition emission**: While-loop and if-statement conditions that
+   are simple comparisons (`a < b`, `a is b`) now emit an LLVM `i1` directly
+   instead of boxing to NaN-box bool then immediately unboxing. Eliminates
+   a select + truncate + and per loop iteration.
 
-4. **Matrix multiply**: 5s for 50K 3×3 multiplies. Nested `.get()` calls go through
-   the NaN-boxing layer each time. Consider unboxed array optimization.
+4. **Actor yield elimination**: Programs without actors skip the `actor_yield_check`
+   call in loop bodies — previously a thread-local access on every iteration.
+
+5. **Aggressive inlining**: Functions ≤10 statements get `alwaysinline`, ≤20 get
+   `inlinehint`. Lambdas get `alwaysinline` up to 8 captured variables.
+
+6. **LLVM math intrinsics**: `sqrt`, `sin`, `cos`, `floor`, `ceil`, `abs`, `round`,
+   `trunc`, `ln`, `log10`, `exp` now emit LLVM intrinsics directly instead of
+   calling runtime FFI functions. 83x improvement on math-heavy workloads.
+
+7. **Indexed struct stores**: Non-persistent stores now use `StructObject` (vector-
+   indexed fields) instead of `MapObject` (hash-map fields). O(1) array index
+   instead of hash-table lookup. 3.9x improvement on store-heavy workloads.
+
+8. **LTO pass improvements**: Added `set_loop_interleaving(true)` and
+   `set_loop_slp_vectorization(true)` to the LTO pass pipeline.
+
+9. **Target triple in IR**: Module now sets the target triple so lli and llc
+   can leverage architecture-specific optimizations.
+
+### Remaining Performance Concerns
+
+1. **Pattern matching still slow**: 4.2s for 500K classifications. String comparison
+   in match arms is expensive. Needs string interning or tag-based dispatch.
+
+2. **Matrix multiply**: 3s for 50K 3×3 multiplies. Nested `.get()` calls still go
+   through runtime FFI. Needs unboxed array optimization or inline list access.
+
+3. **NaN-boxing fundamental overhead**: All values are f64 — no integer specialization.
+   Integer arithmetic (loop counters, array indices) still pays f64 bitcast cost.
+
+4. **No escape analysis**: All closures heap-allocate their environment. Stack
+   allocation for non-escaping closures would eliminate allocation overhead.
 
 5. **No JIT tiering**: Binary compilation is one-shot. No adaptive optimization
    for hot loops.

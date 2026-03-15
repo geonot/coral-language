@@ -33,6 +33,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: HashSet::new(),
+            specialized_return_type: None,
         };
         for field in &store.fields {
             let key = self.emit_string_literal(&field.name);
@@ -299,18 +302,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(entry);
         self.ensure_globals_initialized();
 
-        let null_entries = self
-            .runtime
-            .map_entry_type
-            .ptr_type(AddressSpace::default())
-            .const_null();
-        let zero_len = self.usize_type.const_zero();
-        let store_map = self.call_runtime_ptr(
-            self.runtime.make_map,
-            &[null_entries.into(), zero_len.into()],
-            "store_data",
-        );
-
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
             variable_allocas: HashMap::new(),
@@ -321,44 +312,58 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: HashSet::new(),
+            specialized_return_type: None,
         };
 
-        let type_key = self.emit_string_literal("__type__");
-        let type_key_ptr = self.nb_to_ptr(type_key);
-        let type_value = self.emit_string_literal(&store.name);
-        let type_value_ptr = self.nb_to_ptr(type_value);
-        self.call_runtime_ptr(
-            self.runtime.map_set,
-            &[store_map.into(), type_key_ptr.into(), type_value_ptr.into()],
-            "set_type",
-        );
+        if store.is_persistent {
+            let null_entries = self
+                .runtime
+                .map_entry_type
+                .ptr_type(AddressSpace::default())
+                .const_null();
+            let zero_len = self.usize_type.const_zero();
+            let store_map = self.call_runtime_ptr(
+                self.runtime.make_map,
+                &[null_entries.into(), zero_len.into()],
+                "store_data",
+            );
 
-        for field in &store.fields {
-            let key = self.emit_string_literal(&field.name);
-            let key_ptr = self.nb_to_ptr(key);
-            let value = if let Some(default) = &field.default {
-                let val = self.emit_expression(&mut ctx, default)?;
-
-                if field.is_reference {
-                    self.call_nb_void(self.runtime.nb_retain, &[val.into()]);
-                }
-                val
-            } else if field.is_reference {
-                let unit_ptr = self.call_runtime_ptr(self.runtime.make_unit, &[], "null_ref");
-                self.ptr_to_nb(unit_ptr)
-            } else {
-                self.wrap_number(self.f64_type.const_float(0.0))
-            };
-
-            let value_ptr = self.nb_to_ptr(value);
+            let type_key = self.emit_string_literal("__type__");
+            let type_key_ptr = self.nb_to_ptr(type_key);
+            let type_value = self.emit_string_literal(&store.name);
+            let type_value_ptr = self.nb_to_ptr(type_value);
             self.call_runtime_ptr(
                 self.runtime.map_set,
-                &[store_map.into(), key_ptr.into(), value_ptr.into()],
-                "set_field",
+                &[store_map.into(), type_key_ptr.into(), type_value_ptr.into()],
+                "set_type",
             );
-        }
 
-        if store.is_persistent {
+            for field in &store.fields {
+                let key = self.emit_string_literal(&field.name);
+                let key_ptr = self.nb_to_ptr(key);
+                let value = if let Some(default) = &field.default {
+                    let val = self.emit_expression(&mut ctx, default)?;
+                    if field.is_reference {
+                        self.call_nb_void(self.runtime.nb_retain, &[val.into()]);
+                    }
+                    val
+                } else if field.is_reference {
+                    let unit_ptr = self.call_runtime_ptr(self.runtime.make_unit, &[], "null_ref");
+                    self.ptr_to_nb(unit_ptr)
+                } else {
+                    self.wrap_number(self.f64_type.const_float(0.0))
+                };
+
+                let value_ptr = self.nb_to_ptr(value);
+                self.call_runtime_ptr(
+                    self.runtime.map_set,
+                    &[store_map.into(), key_ptr.into(), value_ptr.into()],
+                    "set_field",
+                );
+            }
+
             let i8_ptr_type = self.i8_type.ptr_type(AddressSpace::default());
 
             let type_global = self.get_or_create_string_constant(&store.name);
@@ -429,7 +434,63 @@ impl<'ctx> CodeGenerator<'ctx> {
             let created_nb = self.ptr_to_nb(created);
             self.builder.build_return(Some(&created_nb)).unwrap();
         } else {
-            let store_nb = self.ptr_to_nb(store_map);
+            let field_count = store.fields.len() + 1;
+            let field_count_val = self.usize_type.const_int(field_count as u64, false);
+
+            let nb_fields_array = self
+                .builder
+                .build_array_alloca(
+                    self.runtime.value_i64_type,
+                    self.context.i32_type().const_int(field_count as u64, false),
+                    "nb_struct_fields",
+                )
+                .unwrap();
+
+            let type_value = self.emit_string_literal(&store.name);
+            let idx0_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        self.runtime.value_i64_type,
+                        nb_fields_array,
+                        &[self.context.i32_type().const_zero()],
+                        "type_slot",
+                    )
+                    .unwrap()
+            };
+            self.builder.build_store(idx0_ptr, type_value).unwrap();
+
+            for (i, field) in store.fields.iter().enumerate() {
+                let value = if let Some(default) = &field.default {
+                    let val = self.emit_expression(&mut ctx, default)?;
+                    if field.is_reference {
+                        self.call_nb_void(self.runtime.nb_retain, &[val.into()]);
+                    }
+                    val
+                } else if field.is_reference {
+                    let unit_ptr = self.call_runtime_ptr(self.runtime.make_unit, &[], "null_ref");
+                    self.ptr_to_nb(unit_ptr)
+                } else {
+                    self.wrap_number(self.f64_type.const_float(0.0))
+                };
+
+                let idx_ptr = unsafe {
+                    self.builder
+                        .build_gep(
+                            self.runtime.value_i64_type,
+                            nb_fields_array,
+                            &[self.context.i32_type().const_int((i + 1) as u64, false)],
+                            &format!("field_{}_slot", field.name),
+                        )
+                        .unwrap()
+                };
+                self.builder.build_store(idx_ptr, value).unwrap();
+            }
+
+            let store_nb = self.call_nb(
+                self.runtime.nb_make_struct,
+                &[nb_fields_array.into(), field_count_val.into()],
+                "struct_obj",
+            );
             self.builder.build_return(Some(&store_nb)).unwrap();
         }
         Ok(())
@@ -449,10 +510,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             function: llvm_fn,
             loop_stack: Vec::new(),
             di_scope: None,
-            fn_name: String::new(),
+            fn_name: llvm_fn.get_name().to_str().unwrap_or("").to_string(),
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: HashSet::new(),
+            specialized_return_type: None,
         };
 
         let store_val = llvm_fn.get_nth_param(0).unwrap().into_int_value();

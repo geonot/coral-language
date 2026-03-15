@@ -96,10 +96,7 @@ pub fn parse_manifest(content: &str) -> Result<Package, String> {
                     git: t.get("git").and_then(|v| v.as_str()).map(String::from),
                 },
                 _ => {
-                    return Err(format!(
-                        "dependency '{}' has invalid format",
-                        dep_name
-                    ));
+                    return Err(format!("dependency '{}' has invalid format", dep_name));
                 }
             };
             dependencies.insert(dep_name.clone(), spec);
@@ -119,13 +116,10 @@ pub fn parse_manifest(content: &str) -> Result<Package, String> {
 pub fn load_manifest(project_dir: &Path) -> Result<Package, String> {
     let manifest_path = project_dir.join("coral.toml");
     if !manifest_path.exists() {
-        return Err(format!(
-            "no coral.toml found in {}",
-            project_dir.display()
-        ));
+        return Err(format!("no coral.toml found in {}", project_dir.display()));
     }
-    let content =
-        fs::read_to_string(&manifest_path).map_err(|e| format!("failed to read coral.toml: {}", e))?;
+    let content = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("failed to read coral.toml: {}", e))?;
     parse_manifest(&content)
 }
 
@@ -151,17 +145,18 @@ pub fn resolve_dependencies(
                     name, local_path
                 ));
             }
-            // Validate that the dependency path doesn't escape the project root
-            let canonical_dep = dep_dir.canonicalize().map_err(|e| {
-                format!("dependency '{}' path could not be resolved: {}", name, e)
-            })?;
-            let canonical_project = project_dir.canonicalize().map_err(|e| {
-                format!("project directory could not be resolved: {}", e)
-            })?;
+            let canonical_dep = dep_dir
+                .canonicalize()
+                .map_err(|e| format!("dependency '{}' path could not be resolved: {}", name, e))?;
+            let canonical_project = project_dir
+                .canonicalize()
+                .map_err(|e| format!("project directory could not be resolved: {}", e))?;
             if !canonical_dep.starts_with(&canonical_project) {
                 return Err(format!(
                     "dependency '{}' path '{}' resolves to '{}' which is outside the project root",
-                    name, local_path, canonical_dep.display()
+                    name,
+                    local_path,
+                    canonical_dep.display()
                 ));
             }
             resolved.push(ResolvedDep {
@@ -356,11 +351,7 @@ mylib = { path = "../mylib", version = "0.1.0" }
         let dir = std::env::temp_dir().join("coral_pkg_test_resolve");
         let _ = std::fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("libs/mylib")).unwrap();
-        fs::write(
-            dir.join("libs/mylib/main.coral"),
-            "*helper()\n    42\n",
-        )
-        .unwrap();
+        fs::write(dir.join("libs/mylib/main.coral"), "*helper()\n    42\n").unwrap();
 
         let pkg = Package {
             name: "app".to_string(),

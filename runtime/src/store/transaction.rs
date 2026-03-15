@@ -73,11 +73,7 @@ impl Transaction {
         Ok(index)
     }
 
-    pub fn update(
-        &mut self,
-        index: u64,
-        fields: Vec<(String, StoredValue)>,
-    ) -> io::Result<()> {
+    pub fn update(&mut self, index: u64, fields: Vec<(String, StoredValue)>) -> io::Result<()> {
         self.check_active()?;
         if !self.snapshots.contains_key(&index) {
             if let Some(obj) = self.engine.get(index)? {

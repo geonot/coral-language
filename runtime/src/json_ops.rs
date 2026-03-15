@@ -43,7 +43,6 @@ fn json_parse_number(s: &str) -> Option<ValueHandle> {
 }
 
 fn json_parse_string(s: &str) -> Option<ValueHandle> {
-    // s starts with '"'
     let inner = extract_json_string(s)?;
     Some(coral_make_string_from_rust(&inner))
 }
@@ -104,7 +103,6 @@ fn skip_json_value(s: &str, start: usize) -> usize {
     }
     match bytes[i] {
         b'"' => {
-            // skip string
             i += 1;
             while i < bytes.len() {
                 if bytes[i] == b'\\' {
@@ -128,7 +126,6 @@ fn skip_json_value(s: &str, start: usize) -> usize {
             i += 1;
             while i < bytes.len() && depth > 0 {
                 if bytes[i] == b'"' {
-                    // skip string
                     i += 1;
                     while i < bytes.len() {
                         if bytes[i] == b'\\' {
@@ -218,14 +215,12 @@ fn json_parse_object(s: &str) -> Option<ValueHandle> {
         let key_str = extract_json_string(&s[i..])?;
         let key_end = skip_json_value(s, i);
         i = key_end;
-        // skip colon
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
         if i < bytes.len() && bytes[i] == b':' {
             i += 1;
         }
-        // parse value
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
@@ -241,10 +236,6 @@ fn json_parse_object(s: &str) -> Option<ValueHandle> {
     }
     Some(coral_make_map(entries.as_ptr(), entries.len()))
 }
-
-// ---------------------------------------------------------------------------
-// Internal JSON serializer
-// ---------------------------------------------------------------------------
 
 fn value_to_json(value: ValueHandle) -> String {
     if value.is_null() {
@@ -353,7 +344,7 @@ fn value_to_json_pretty(value: ValueHandle, indent: usize) -> String {
             }
             format!("{{\n{}\n{}}}", parts.join(",\n"), pad)
         }
-        _ => value_to_json(value), // primitives don't need special indentation
+        _ => value_to_json(value),
     }
 }
 

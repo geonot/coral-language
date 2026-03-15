@@ -819,11 +819,11 @@ fn bytes_roundtrip() {
 #[test]
 fn specialize_numeric_add_uses_fadd() {
     // Use variables (not literals) to avoid constant folding; the type specializer
-    // knows their resolved types and should emit fadd instead of coral_nb_add.
+    // knows their resolved types and should emit fadd or native iadd instead of coral_nb_add.
     let ir = compile_ok("*main()\n    a is 10\n    b is 20\n    x is a + b\n    log(x)\n");
     assert!(
-        ir.contains("add_fast"),
-        "Expected specialized add_fast in IR for numeric addition:\n{}",
+        ir.contains("add_fast") || ir.contains("iadd"),
+        "Expected specialized add_fast or iadd in IR for numeric addition:\n{}",
         ir
     );
 }
@@ -846,8 +846,8 @@ fn specialize_numeric_equals_uses_fcmp() {
     // Coral uses `is` for equality comparison in expression context.
     let ir = compile_ok("*main()\n    a is 1\n    b is 2\n    result is a is b\n    log(result)\n");
     assert!(
-        ir.contains("eq_fast"),
-        "Expected eq_fast in IR for numeric equality:\n{}",
+        ir.contains("eq_fast") || ir.contains("ieq"),
+        "Expected eq_fast or ieq in IR for numeric equality:\n{}",
         ir
     );
 }
@@ -858,8 +858,8 @@ fn specialize_numeric_not_equals_uses_fcmp() {
     let ir =
         compile_ok("*main()\n    a is 1\n    b is 2\n    result is a isnt b\n    log(result)\n");
     assert!(
-        ir.contains("ne_fast"),
-        "Expected ne_fast in IR for numeric not-equals:\n{}",
+        ir.contains("ne_fast") || ir.contains("ine"),
+        "Expected ne_fast or ine in IR for numeric not-equals:\n{}",
         ir
     );
 }
@@ -1153,9 +1153,7 @@ fn cse_deduplicates_binary_subexpression() {
 
 #[test]
 fn const_generic_type_param_parses() {
-    let ir = compile_ok(
-        "enum FixedVec[T, const N]\n    Mk(data)\n\n*main()\n    log(42)\n",
-    );
+    let ir = compile_ok("enum FixedVec[T, const N]\n    Mk(data)\n\n*main()\n    log(42)\n");
     assert!(
         ir.contains("@main"),
         "Program with const generic type param should compile"

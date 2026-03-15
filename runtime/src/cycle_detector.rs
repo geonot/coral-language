@@ -5,7 +5,7 @@ use std::sync::{Mutex, atomic::Ordering};
 
 use crate::{Value, ValueHandle, ValueTag};
 
-const LOCAL_BUFFER_THRESHOLD: usize = 64;
+const LOCAL_BUFFER_THRESHOLD: usize = 256;
 
 static COLLECTION_PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -52,6 +52,11 @@ fn flush_local_roots() {
 fn flush_all_thread_local_roots() {
     COLLECTION_PENDING.store(true, Ordering::Release);
 
+    flush_local_roots();
+}
+
+/// Public entry point for flushing deferred roots from the thread-local buffer.
+pub fn flush_deferred_roots() {
     flush_local_roots();
 }
 

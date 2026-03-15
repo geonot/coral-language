@@ -168,7 +168,10 @@ mod tests {
         assert_eq!(reader.len(), 256);
         assert_eq!(reader.as_slice()[0], 0);
         assert_eq!(reader.as_slice()[255], 255);
-        assert_eq!(reader.read_u32_le(0), Some(u32::from_le_bytes([0, 1, 2, 3])));
+        assert_eq!(
+            reader.read_u32_le(0),
+            Some(u32::from_le_bytes([0, 1, 2, 3]))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

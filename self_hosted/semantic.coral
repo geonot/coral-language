@@ -498,13 +498,14 @@
 			type_defs.push(item)
 
 	# ── Pass 3: Constraint Collection ────────────────────────────
+	var_type_vars is map()
 	for g in globals
 		result is collect_binding_constraints(g, constraints, types, graph)
 		if result.get("ok") is false
 			return result
 
 	for func in functions
-		result is collect_function_constraints(func, constraints, types, graph)
+		result is collect_function_constraints(func, constraints, types, graph, var_type_vars)
 		if result.get("ok") is false
 			return result
 
@@ -512,6 +513,18 @@
 	solve_result is solve_constraints(constraints, graph)
 	if solve_result.get("ok") is false
 		return solve_result
+
+	# ── Pass 4b: Resolve variable types for specialization ────────
+	var_types is map()
+	for key in var_type_vars.keys()
+		tv is var_type_vars.get(key)
+		resolved is graph_resolve(graph, tv)
+		tag is resolved.get("tag")
+		if tag is "Int" or tag is "Float" or tag is "Bool"
+			var_types.set(key, tag)
+
+	# ── Pass 4c: Monomorphization Candidate Collection ────────────
+	monomorph_candidates is collect_monomorph_candidates(functions, types, graph)
 
 	# ── Pass 5: Type Resolution ──────────────────────────────────
 	# Resolve all type vars in the environment to concrete types
@@ -550,7 +563,9 @@
 		"graph" is graph,
 		"warnings" is warnings,
 		"field_types" is field_types,
-		"store_field_names" is store_field_names
+		"store_field_names" is store_field_names,
+		"var_types" is var_types,
+		"monomorph_candidates" is monomorph_candidates
 	)
 	return sem_ok(model)
 
@@ -883,7 +898,7 @@
 	env_insert(types, binding.get("name"), ty)
 	return sem_ok(ty)
 
-*collect_function_constraints(func, constraints, types, graph)
+*collect_function_constraints(func, constraints, types, graph, var_type_vars)
 	name is func.get("name")
 	params is func.get("params")
 	param_tys is []
@@ -894,6 +909,7 @@
 			tv is type_var(graph_fresh(graph))
 			param_tys.push(tv)
 			env_insert(types, p.get("name"), tv)
+			var_type_vars.set('{name}.{p.get("name")}', tv)
 
 	# Create return type var
 	return_tv is type_var(graph_fresh(graph))
@@ -902,7 +918,7 @@
 	body is func.get("body")
 	body_ty is type_unit()
 	if body isnt none
-		result is collect_block_constraints(body, constraints, types, graph, return_tv)
+		result is collect_block_constraints_tracked(body, constraints, types, graph, return_tv, name, var_type_vars)
 		if result.get("ok") is false
 			return result
 		body_ty is result.get("value")
@@ -967,6 +983,145 @@
 		block_ty is result.get("value")
 	env_pop_scope(types)
 	return sem_ok(block_ty)
+
+# ─── Tracked variants (record variable type vars for specialization) ──
+
+*collect_block_constraints_tracked(block, constraints, types, graph, return_ty, fn_name, vtv)
+	if block is none
+		return sem_ok(type_unit())
+	env_push_scope(types)
+	stmts is block.get("statements")
+	if stmts isnt none
+		for stmt in stmts
+			result is collect_stmt_constraints_tracked(stmt, constraints, types, graph, return_ty, fn_name, vtv)
+			if result.get("ok") is false
+				env_pop_scope(types)
+				return result
+	block_ty is type_unit()
+	val is block.get("value")
+	if val isnt none
+		result is collect_constraints_expr(val, constraints, types, graph)
+		if result.get("ok") is false
+			env_pop_scope(types)
+			return result
+		block_ty is result.get("value")
+	env_pop_scope(types)
+	return sem_ok(block_ty)
+
+*collect_stmt_constraints_tracked(stmt, constraints, types, graph, return_ty, fn_name, vtv)
+	kind is stmt.get("kind")
+	if kind is "binding"
+		result is collect_constraints_expr(stmt.get("value"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		val_ty is result.get("value")
+		env_insert(types, stmt.get("name"), val_ty)
+		vtv.set('{fn_name}.{stmt.get("name")}', val_ty)
+		return sem_ok(type_unit())
+	if kind is "expression_stmt"
+		result is collect_constraints_expr(stmt.get("expr"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		return sem_ok(type_unit())
+	if kind is "return"
+		result is collect_constraints_expr(stmt.get("expr"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		if return_ty isnt none
+			span is stmt.get("span")
+			if span is none
+				span is map("start" is 0, "end" is 0)
+			constraints.push(constraint_equal(result.get("value"), return_ty, span))
+		return sem_ok(type_unit())
+	if kind is "if"
+		result is collect_constraints_expr(stmt.get("condition"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		span is stmt.get("span")
+		if span is none
+			span is map("start" is 0, "end" is 0)
+		constraints.push(constraint_boolean(result.get("value"), span))
+		result is collect_block_constraints_tracked(stmt.get("body"), constraints, types, graph, return_ty, fn_name, vtv)
+		if result.get("ok") is false
+			return result
+		elifs is stmt.get("elif_branches")
+		if elifs isnt none
+			for eb in elifs
+				result is collect_constraints_expr(eb.get("condition"), constraints, types, graph)
+				if result.get("ok") is false
+					return result
+				constraints.push(constraint_boolean(result.get("value"), span))
+				result is collect_block_constraints_tracked(eb.get("body"), constraints, types, graph, return_ty, fn_name, vtv)
+				if result.get("ok") is false
+					return result
+		else_body is stmt.get("else_body")
+		if else_body isnt none
+			result is collect_block_constraints_tracked(else_body, constraints, types, graph, return_ty, fn_name, vtv)
+			if result.get("ok") is false
+				return result
+		return sem_ok(type_unit())
+	if kind is "while"
+		result is collect_constraints_expr(stmt.get("condition"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		span is stmt.get("span")
+		if span is none
+			span is map("start" is 0, "end" is 0)
+		constraints.push(constraint_boolean(result.get("value"), span))
+		return collect_block_constraints_tracked(stmt.get("body"), constraints, types, graph, return_ty, fn_name, vtv)
+	if kind is "for"
+		result is collect_constraints_expr(stmt.get("iterable"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		elem_tv is type_var(graph_fresh(graph))
+		span is stmt.get("span")
+		if span is none
+			span is map("start" is 0, "end" is 0)
+		constraints.push(constraint_iterable(result.get("value"), elem_tv, span))
+		env_insert(types, stmt.get("variable"), elem_tv)
+		vtv.set('{fn_name}.{stmt.get("variable")}', elem_tv)
+		return collect_block_constraints_tracked(stmt.get("body"), constraints, types, graph, return_ty, fn_name, vtv)
+	if kind is "for_range"
+		# For-range variable is always Int
+		env_insert(types, stmt.get("variable"), type_int())
+		vtv.set('{fn_name}.{stmt.get("variable")}', type_int())
+		start_r is collect_constraints_expr(stmt.get("start"), constraints, types, graph)
+		if start_r.get("ok") is false
+			return start_r
+		end_r is collect_constraints_expr(stmt.get("end"), constraints, types, graph)
+		if end_r.get("ok") is false
+			return end_r
+		step_val is stmt.get("step")
+		if step_val isnt none
+			step_r is collect_constraints_expr(step_val, constraints, types, graph)
+			if step_r.get("ok") is false
+				return step_r
+		return collect_block_constraints_tracked(stmt.get("body"), constraints, types, graph, return_ty, fn_name, vtv)
+	if kind is "field_assign"
+		result is collect_constraints_expr(stmt.get("target"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		result is collect_constraints_expr(stmt.get("value"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		return sem_ok(type_unit())
+	if kind is "break" or kind is "continue"
+		return sem_ok(type_unit())
+	if kind is "guard"
+		result is collect_constraints_expr(stmt.get("condition"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		span is stmt.get("span")
+		if span is none
+			span is map("start" is 0, "end" is 0)
+		constraints.push(constraint_boolean(result.get("value"), span))
+		return collect_block_constraints_tracked(stmt.get("body"), constraints, types, graph, return_ty, fn_name, vtv)
+	if kind is "pattern_binding"
+		result is collect_constraints_expr(stmt.get("value"), constraints, types, graph)
+		if result.get("ok") is false
+			return result
+		return sem_ok(type_unit())
+	return sem_ok(type_unit())
 
 *collect_stmt_constraints(stmt, constraints, types, graph, return_ty)
 	kind is stmt.get("kind")
@@ -1847,3 +2002,368 @@
 	if missing.length() > 0
 		msg is 'non-exhaustive match: missing pattern(s) for {join(missing, ", ")}'
 		warnings.push(map("message" is msg, "span" is expr.get("span")))
+
+# ─── Monomorphization Candidate Collection ─────────────────────────
+
+*collect_monomorph_candidates(functions, types, graph)
+	# Build set of user function names for lookup
+	fn_names is map()
+	for func in functions
+		fn_names.set(func.get("name"), true)
+
+	# Walk all function bodies and collect call-site type profiles
+	profiles is map()
+	for func in functions
+		fn_name is func.get("name")
+		body is func.get("body")
+		if body isnt none
+			collect_call_profiles_block(body, fn_name, fn_names, types, graph, profiles)
+
+	# Filter candidates: ≤4 distinct profiles, non-recursive, profile param count matches function
+	candidates is map()
+	for func in functions
+		name is func.get("name")
+		fn_profiles is profiles.get(name)
+		if fn_profiles is none
+			continue
+		# Check not recursive
+		if function_is_recursive(func)
+			continue
+		param_count is 0
+		params is func.get("params")
+		if params isnt none
+			param_count is params.length()
+		# Collect unique signatures (as string keys)
+		sig_map is map()
+		for profile in fn_profiles
+			if profile.length() is param_count
+				sig_key is join(profile, ",")
+				count is sig_map.get(sig_key)
+				if count is none
+					count is 0
+				sig_map.set(sig_key, count + 1)
+		# Only if ≤4 distinct and at least 1
+		sig_keys is sig_map.keys()
+		if sig_keys.length() > 0 and sig_keys.length() <= 4
+			variants is []
+			for sk in sig_keys
+				param_types is split(sk, ",")
+				variants.push(map(
+					"param_types" is param_types,
+					"call_count" is sig_map.get(sk)
+				))
+			candidates.set(name, variants)
+
+	return candidates
+
+*collect_call_profiles_block(block, current_fn, fn_names, types, graph, profiles)
+	stmts is block.get("statements")
+	if stmts is none
+		return none
+	for stmt in stmts
+		collect_call_profiles_stmt(stmt, current_fn, fn_names, types, graph, profiles)
+
+*collect_call_profiles_stmt(stmt, current_fn, fn_names, types, graph, profiles)
+	kind is stmt.get("kind")
+	if kind is "expression"
+		collect_call_profiles_expr(stmt.get("expression"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "let" or kind is "assignment" or kind is "binding"
+		val is stmt.get("value")
+		if val isnt none
+			collect_call_profiles_expr(val, current_fn, fn_names, types, graph, profiles)
+	elif kind is "return"
+		val is stmt.get("value")
+		if val isnt none
+			collect_call_profiles_expr(val, current_fn, fn_names, types, graph, profiles)
+	elif kind is "if"
+		cond is stmt.get("condition")
+		if cond isnt none
+			collect_call_profiles_expr(cond, current_fn, fn_names, types, graph, profiles)
+		body is stmt.get("body")
+		if body isnt none
+			collect_call_profiles_block(body, current_fn, fn_names, types, graph, profiles)
+		elifs is stmt.get("elif_branches")
+		if elifs isnt none
+			for eb in elifs
+				eb_cond is eb.get("condition")
+				if eb_cond isnt none
+					collect_call_profiles_expr(eb_cond, current_fn, fn_names, types, graph, profiles)
+				eb_body is eb.get("body")
+				if eb_body isnt none
+					collect_call_profiles_block(eb_body, current_fn, fn_names, types, graph, profiles)
+		else_body is stmt.get("else_body")
+		if else_body isnt none
+			collect_call_profiles_block(else_body, current_fn, fn_names, types, graph, profiles)
+	elif kind is "while"
+		cond is stmt.get("condition")
+		if cond isnt none
+			collect_call_profiles_expr(cond, current_fn, fn_names, types, graph, profiles)
+		body is stmt.get("body")
+		if body isnt none
+			collect_call_profiles_block(body, current_fn, fn_names, types, graph, profiles)
+	elif kind is "for"
+		iter_expr is stmt.get("iterable")
+		if iter_expr isnt none
+			collect_call_profiles_expr(iter_expr, current_fn, fn_names, types, graph, profiles)
+		body is stmt.get("body")
+		if body isnt none
+			collect_call_profiles_block(body, current_fn, fn_names, types, graph, profiles)
+	elif kind is "match"
+		val is stmt.get("value")
+		if val isnt none
+			collect_call_profiles_expr(val, current_fn, fn_names, types, graph, profiles)
+		arms is stmt.get("arms")
+		if arms isnt none
+			for arm in arms
+				arm_body is arm.get("body")
+				if arm_body isnt none
+					collect_call_profiles_block(arm_body, current_fn, fn_names, types, graph, profiles)
+
+*collect_call_profiles_expr(expr, current_fn, fn_names, types, graph, profiles)
+	if expr is none
+		return none
+	kind is expr.get("kind")
+	if kind is "call"
+		callee is expr.get("callee")
+		if callee isnt none and callee.get("kind") is "identifier"
+			callee_name is callee.get("name")
+			if fn_names.get(callee_name) is true
+				# Resolve arg types
+				arg_types is []
+				args is expr.get("args")
+				if args isnt none
+					for arg in args
+						arg_types.push(infer_expr_type_tag(arg, types, graph))
+				# Record this profile
+				existing is profiles.get(callee_name)
+				if existing is none
+					existing is []
+					profiles.set(callee_name, existing)
+				existing.push(arg_types)
+		# Also recurse into args
+		args is expr.get("args")
+		if args isnt none
+			for arg in args
+				collect_call_profiles_expr(arg, current_fn, fn_names, types, graph, profiles)
+		# Recurse into callee if not simple identifier
+		if callee isnt none and callee.get("kind") isnt "identifier"
+			collect_call_profiles_expr(callee, current_fn, fn_names, types, graph, profiles)
+	elif kind is "binary"
+		collect_call_profiles_expr(expr.get("left"), current_fn, fn_names, types, graph, profiles)
+		collect_call_profiles_expr(expr.get("right"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "unary"
+		collect_call_profiles_expr(expr.get("operand"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "member"
+		collect_call_profiles_expr(expr.get("target"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "index"
+		collect_call_profiles_expr(expr.get("target"), current_fn, fn_names, types, graph, profiles)
+		collect_call_profiles_expr(expr.get("index"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "lambda"
+		body is expr.get("body")
+		if body isnt none
+			collect_call_profiles_block(body, current_fn, fn_names, types, graph, profiles)
+	elif kind is "ternary"
+		collect_call_profiles_expr(expr.get("condition"), current_fn, fn_names, types, graph, profiles)
+		collect_call_profiles_expr(expr.get("then_branch"), current_fn, fn_names, types, graph, profiles)
+		collect_call_profiles_expr(expr.get("else_branch"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "list"
+		elems is expr.get("elements")
+		if elems isnt none
+			for e in elems
+				collect_call_profiles_expr(e, current_fn, fn_names, types, graph, profiles)
+	elif kind is "map"
+		entries is expr.get("entries")
+		if entries isnt none
+			for ent in entries
+				collect_call_profiles_expr(ent.get("key"), current_fn, fn_names, types, graph, profiles)
+				collect_call_profiles_expr(ent.get("value"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "pipeline"
+		collect_call_profiles_expr(expr.get("left"), current_fn, fn_names, types, graph, profiles)
+		collect_call_profiles_expr(expr.get("right"), current_fn, fn_names, types, graph, profiles)
+	elif kind is "string_interpolation"
+		parts is expr.get("parts")
+		if parts isnt none
+			for p in parts
+				collect_call_profiles_expr(p, current_fn, fn_names, types, graph, profiles)
+
+*infer_expr_type_tag(expr, types, graph)
+	# Infer a simple type tag string for an expression
+	if expr is none
+		return "Unknown"
+	kind is expr.get("kind")
+	if kind is "integer"
+		return "Int"
+	if kind is "float"
+		return "Float"
+	if kind is "boolean"
+		return "Bool"
+	if kind is "string" or kind is "string_interpolation"
+		return "String"
+	if kind is "identifier"
+		name is expr.get("name")
+		looked_up is tenv_get(types, name)
+		if looked_up isnt none
+			resolved is graph_resolve(graph, looked_up)
+			tag is resolved.get("tag")
+			if tag is "Int" or tag is "Float" or tag is "Bool" or tag is "String"
+				return tag
+		return "Unknown"
+	if kind is "binary"
+		left_tag is infer_expr_type_tag(expr.get("left"), types, graph)
+		right_tag is infer_expr_type_tag(expr.get("right"), types, graph)
+		op is expr.get("op")
+		if op is "==" or op is "!=" or op is "<" or op is ">" or op is "<=" or op is ">=" or op is "and" or op is "or"
+			return "Bool"
+		if left_tag is "Float" or right_tag is "Float"
+			return "Float"
+		if left_tag is "Int" and right_tag is "Int"
+			return "Int"
+		return "Unknown"
+	if kind is "unary"
+		operand_tag is infer_expr_type_tag(expr.get("operand"), types, graph)
+		op is expr.get("op")
+		if op is "not" or op is "!"
+			return "Bool"
+		return operand_tag
+	if kind is "call"
+		callee is expr.get("callee")
+		if callee isnt none and callee.get("kind") is "identifier"
+			fn_name is callee.get("name")
+			fn_ty is tenv_get(types, fn_name)
+			if fn_ty isnt none
+				resolved is graph_resolve(graph, fn_ty)
+				if resolved.get("tag") is "Func"
+					ret_resolved is graph_resolve(graph, resolved.get("ret"))
+					tag is ret_resolved.get("tag")
+					if tag is "Int" or tag is "Float" or tag is "Bool" or tag is "String"
+						return tag
+		return "Unknown"
+	return "Unknown"
+
+*function_is_recursive(func)
+	name is func.get("name")
+	body is func.get("body")
+	if body is none
+		return false
+	return block_calls_function(body, name)
+
+*block_calls_function(block, fn_name)
+	stmts is block.get("statements")
+	if stmts is none
+		return false
+	for stmt in stmts
+		if stmt_calls_function(stmt, fn_name)
+			return true
+	return false
+
+*stmt_calls_function(stmt, fn_name)
+	kind is stmt.get("kind")
+	if kind is "expression"
+		return expr_calls_function(stmt.get("expression"), fn_name)
+	if kind is "let" or kind is "assignment" or kind is "binding"
+		val is stmt.get("value")
+		if val isnt none
+			return expr_calls_function(val, fn_name)
+	if kind is "return"
+		val is stmt.get("value")
+		if val isnt none
+			return expr_calls_function(val, fn_name)
+	if kind is "if"
+		cond is stmt.get("condition")
+		if cond isnt none and expr_calls_function(cond, fn_name)
+			return true
+		body is stmt.get("body")
+		if body isnt none and block_calls_function(body, fn_name)
+			return true
+		elifs is stmt.get("elif_branches")
+		if elifs isnt none
+			for eb in elifs
+				eb_body is eb.get("body")
+				if eb_body isnt none and block_calls_function(eb_body, fn_name)
+					return true
+		else_body is stmt.get("else_body")
+		if else_body isnt none and block_calls_function(else_body, fn_name)
+			return true
+	if kind is "while"
+		cond is stmt.get("condition")
+		if cond isnt none and expr_calls_function(cond, fn_name)
+			return true
+		body is stmt.get("body")
+		if body isnt none and block_calls_function(body, fn_name)
+			return true
+	if kind is "for"
+		iter_expr is stmt.get("iterable")
+		if iter_expr isnt none and expr_calls_function(iter_expr, fn_name)
+			return true
+		body is stmt.get("body")
+		if body isnt none and block_calls_function(body, fn_name)
+			return true
+	if kind is "match"
+		val is stmt.get("value")
+		if val isnt none and expr_calls_function(val, fn_name)
+			return true
+		arms is stmt.get("arms")
+		if arms isnt none
+			for arm in arms
+				arm_body is arm.get("body")
+				if arm_body isnt none and block_calls_function(arm_body, fn_name)
+					return true
+	return false
+
+*expr_calls_function(expr, fn_name)
+	if expr is none
+		return false
+	kind is expr.get("kind")
+	if kind is "call"
+		callee is expr.get("callee")
+		if callee isnt none and callee.get("kind") is "identifier"
+			if callee.get("name") is fn_name
+				return true
+		args is expr.get("args")
+		if args isnt none
+			for arg in args
+				if expr_calls_function(arg, fn_name)
+					return true
+		if callee isnt none
+			return expr_calls_function(callee, fn_name)
+	if kind is "binary"
+		if expr_calls_function(expr.get("left"), fn_name)
+			return true
+		return expr_calls_function(expr.get("right"), fn_name)
+	if kind is "unary"
+		return expr_calls_function(expr.get("operand"), fn_name)
+	if kind is "member"
+		return expr_calls_function(expr.get("target"), fn_name)
+	if kind is "index"
+		if expr_calls_function(expr.get("target"), fn_name)
+			return true
+		return expr_calls_function(expr.get("index"), fn_name)
+	if kind is "lambda"
+		body is expr.get("body")
+		if body isnt none
+			return block_calls_function(body, fn_name)
+	if kind is "ternary"
+		if expr_calls_function(expr.get("condition"), fn_name)
+			return true
+		if expr_calls_function(expr.get("then_branch"), fn_name)
+			return true
+		return expr_calls_function(expr.get("else_branch"), fn_name)
+	if kind is "list"
+		elems is expr.get("elements")
+		if elems isnt none
+			for e in elems
+				if expr_calls_function(e, fn_name)
+					return true
+	if kind is "map"
+		entries is expr.get("entries")
+		if entries isnt none
+			for ent in entries
+				if expr_calls_function(ent.get("key"), fn_name)
+					return true
+				if expr_calls_function(ent.get("value"), fn_name)
+					return true
+	if kind is "pipeline"
+		if expr_calls_function(expr.get("left"), fn_name)
+			return true
+		return expr_calls_function(expr.get("right"), fn_name)
+	return false

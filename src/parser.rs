@@ -489,13 +489,10 @@ impl Parser {
             }
         }
 
-        // Detect duplicate type parameter names
         let mut seen = std::collections::HashSet::new();
         for p in &params {
             if !seen.insert(&p.name) {
-                return Err(self.error_here(&format!(
-                    "duplicate type parameter `{}`", p.name
-                )));
+                return Err(self.error_here(&format!("duplicate type parameter `{}`", p.name)));
             }
         }
 
@@ -2088,14 +2085,11 @@ impl Parser {
             }
             TokenKind::LBracket => self.parse_list_literal(),
             TokenKind::At => self.parse_ptr_load(),
-            other => {
-                Err(self.error_here(&format!("unexpected token in expression: {:?}", other)))
-            }
+            other => Err(self.error_here(&format!("unexpected token in expression: {:?}", other))),
         }
     }
 
     fn parse_error_name(&mut self) -> ParseResult<Vec<String>> {
-        // Accept either identifiers (err Name:Sub) or a string literal (err "Name")
         if let TokenKind::String(s) = self.peek_kind() {
             let name = s.clone();
             self.advance();
@@ -2681,9 +2675,6 @@ impl Parser {
                     });
                 }
 
-                // `from` is a contextual keyword: only special when it appears
-                // after an identifier in pattern position, forming a range binding
-                // (e.g., `x from 1 to 10`). Standalone `from` is a valid identifier.
                 if matches!(self.tokens.get(self.index), Some(token) if matches!(&token.kind, TokenKind::Identifier(s) if s == "from"))
                 {
                     self.advance();
@@ -2945,7 +2936,6 @@ impl Parser {
 
     fn report_missing_dedent(&mut self, start_span: Span, context: &str) {
         let end = self.previous_span();
-        // At EOF, use a point-span at the end rather than spanning the entire block
         let span = if self.check(TokenKind::Eof) {
             Span::with_file(end.end, end.end, end.file_id)
         } else {

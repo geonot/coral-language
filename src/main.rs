@@ -87,7 +87,6 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Install a panic hook that presents codegen panics as internal compiler errors
     std::panic::set_hook(Box::new(|info| {
         let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
             s.to_string()
@@ -108,7 +107,10 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(level) = args.opt_level {
         if level > 3 {
-            anyhow::bail!("invalid optimization level -O{}: must be 0, 1, 2, or 3", level);
+            anyhow::bail!(
+                "invalid optimization level -O{}: must be 0, 1, 2, or 3",
+                level
+            );
         }
     }
 
@@ -125,12 +127,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(output_dir) = &args.docs {
-        let input_path = args.input.as_ref()
+        let input_path = args
+            .input
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("--docs requires an input file or directory"))?;
         if input_path.is_dir() {
-            let generated =
-                coralc::doc_gen::generate_docs_for_directory(input_path, output_dir)?;
-            eprintln!("Generated {} doc files in {}", generated.len(), output_dir.display());
+            let generated = coralc::doc_gen::generate_docs_for_directory(input_path, output_dir)?;
+            eprintln!(
+                "Generated {} doc files in {}",
+                generated.len(),
+                output_dir.display()
+            );
         } else {
             let source = fs::read_to_string(input_path)?;
             let filename = input_path.to_string_lossy();
@@ -148,10 +155,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let input = args.input.as_ref()
+    let input = args
+        .input
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no input file specified"))?;
 
-    // Test mode: discover test functions and generate a runner
     if args.test {
         return run_tests(&args, input);
     }
@@ -312,10 +320,9 @@ fn main() -> anyhow::Result<()> {
 /// Test functions are any top-level functions whose name starts with `test_`.
 /// A synthetic `*main()` is generated that calls each test and reports results.
 fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
-    let source = fs::read_to_string(input)
-        .with_context(|| format!("failed to read {}", input.display()))?;
+    let source =
+        fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
 
-    // Parse to find test function names (functions starting with *test_)
     let test_names: Vec<String> = source
         .lines()
         .filter_map(|line| {
@@ -339,7 +346,6 @@ fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Apply filter if provided
     let test_names: Vec<String> = if let Some(ref filter) = args.test_filter {
         test_names
             .into_iter()
@@ -357,17 +363,18 @@ fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    eprintln!("Running {} test(s) from {}", test_names.len(), input.display());
+    eprintln!(
+        "Running {} test(s) from {}",
+        test_names.len(),
+        input.display()
+    );
 
-    // Generate a test runner *main() that calls each test and reports results
     let mut runner = String::new();
     runner.push_str("*main()\n");
     runner.push_str(&format!("    _passed is 0\n"));
     runner.push_str(&format!("    _failed is 0\n"));
     for name in &test_names {
-        // Each test is called in a try-catch style using Coral's error model
         runner.push_str(&format!("    _result is {}()\n", name));
-        // TODO: When error catching is available, wrap in error handling
         runner.push_str(&format!("    log('PASS: {}')\n", name));
         runner.push_str(&format!("    _passed is _passed + 1\n"));
     }
@@ -375,7 +382,6 @@ fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
         "    log('\\n' + to_string(_passed) + ' passed, ' + to_string(_failed) + ' failed')\n"
     ));
 
-    // Append runner to the source (removing any existing *main())
     let mut test_source = String::new();
     let mut skip_main = false;
     let mut main_indent = 0;
@@ -388,7 +394,7 @@ fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
         }
         if skip_main {
             let current_indent = if trimmed.is_empty() {
-                main_indent + 1 // blank lines inside main
+                main_indent + 1
             } else {
                 line.len() - line.trim_start().len()
             };
@@ -403,9 +409,8 @@ fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
     test_source.push('\n');
     test_source.push_str(&runner);
 
-    // Write to a temp file and compile+run with JIT
-    let mut tmp = NamedTempFile::with_suffix(".coral")
-        .context("failed to create temporary test file")?;
+    let mut tmp =
+        NamedTempFile::with_suffix(".coral").context("failed to create temporary test file")?;
     tmp.write_all(test_source.as_bytes())
         .context("failed to write test source")?;
     let tmp_path = tmp.into_temp_path();
@@ -420,8 +425,8 @@ fn run_tests(args: &Args, input: &Path) -> anyhow::Result<()> {
     match compiler.compile_modules_to_ir(&module_sources) {
         Ok((ir, _warnings)) => {
             let runtime_lib = resolve_runtime_library(args.runtime_lib.clone())?;
-            let mut ir_file = NamedTempFile::with_suffix(".ll")
-                .context("failed to create temporary IR file")?;
+            let mut ir_file =
+                NamedTempFile::with_suffix(".ll").context("failed to create temporary IR file")?;
             ir_file
                 .write_all(ir.as_bytes())
                 .context("failed to write IR")?;
@@ -569,9 +574,27 @@ fn link_native_binary(
     let obj_path = obj.path().to_path_buf();
 
     let opt_flag = format!("-O{}", opt_level.min(3));
+
+    // Run opt to apply IR-level optimizations (LICM, SROA, mem2reg, etc.)
+    let mut opt_ir = NamedTempFile::with_suffix(".ll").context("failed to create temp opt file")?;
+    let opt_ir_path = opt_ir.path().to_path_buf();
+    if opt_level > 0 {
+        let opt_status = Command::new("opt")
+            .arg(ir_path)
+            .arg(&opt_flag)
+            .arg("-S")
+            .arg("-o")
+            .arg(&opt_ir_path)
+            .status()
+            .with_context(|| "failed to invoke opt")?;
+        ensure!(opt_status.success(), "opt failed to optimize IR");
+    }
+
+    let llc_input: &Path = if opt_level > 0 { &opt_ir_path } else { ir_path };
     let llc_status = Command::new(llc)
-        .arg(ir_path)
+        .arg(&llc_input)
         .arg("-filetype=obj")
+        .arg("-mcpu=native")
         .arg(&opt_flag)
         .arg("-o")
         .arg(&obj_path)
@@ -587,7 +610,7 @@ fn link_native_binary(
         .context("runtime library path must have a parent directory")?;
 
     let mut clang_cmd = Command::new(clang);
-    clang_cmd.arg(&obj_path).arg(&opt_flag);
+    clang_cmd.arg(&obj_path).arg(&opt_flag).arg("-march=native");
 
     if link_static {
         let static_lib = runtime_dir.join("libruntime.a");

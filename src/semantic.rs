@@ -1,7 +1,6 @@
 use crate::ast::{
-    Binding, Block, ErrorDefinition, Expression, Field, Function,
-    FunctionKind, Item, MatchExpression, MatchPattern, Parameter, Program, Statement,
-    TraitDefinition,
+    BinaryOp, Binding, Block, ErrorDefinition, Expression, Field, Function, FunctionKind, Item,
+    MatchExpression, MatchPattern, Parameter, Program, Statement, TraitDefinition, UnaryOp,
 };
 use crate::diagnostics::{Diagnostic, WarningCategory};
 use crate::span::Span;
@@ -10,6 +9,30 @@ use crate::types::{
     Primitive, SymbolUsage, TraitRegistry, TypeEnv, TypeGraph, TypeId, UsageMetrics,
 };
 use std::collections::{HashMap, HashSet};
+
+/// Escape analysis results for a function's local variables.
+#[derive(Debug, Clone, Default)]
+pub struct EscapeInfo {
+    /// Set of (fn_name, var_name) for locals that do NOT escape the function.
+    pub non_escaping: HashSet<(String, String)>,
+    /// Subset of non_escaping that are eligible for stack allocation.
+    pub stack_eligible: HashSet<(String, String)>,
+}
+
+/// Information about functions eligible for monomorphization.
+#[derive(Debug, Clone, Default)]
+pub struct MonomorphInfo {
+    /// Maps function name → list of specialized type variants
+    pub candidates: HashMap<String, Vec<MonomorphVariant>>,
+}
+
+/// A specific type-specialization variant of a function.
+#[derive(Debug, Clone)]
+pub struct MonomorphVariant {
+    pub param_types: Vec<TypeId>,
+    pub return_type: TypeId,
+    pub call_count: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct SemanticModel {
@@ -43,9 +66,27 @@ pub struct SemanticModel {
 
     pub unboxed_number_lists: HashSet<String>,
 
+    /// Maps (fn_name, var_name) → element TypeId for lists with uniform element types
+    pub typed_lists: HashMap<(String, String), TypeId>,
+
     pub store_field_indices: HashMap<(String, String), u32>,
 
     pub specialized_stores: HashSet<String>,
+
+    /// Maps (fn_name, var_name) → resolved TypeId for local bindings
+    pub resolved_locals: HashMap<(String, String), TypeId>,
+
+    /// Maps (fn_name, param_index) → resolved TypeId for function parameters
+    pub resolved_params: HashMap<(String, usize), TypeId>,
+
+    /// Maps fn_name → resolved return TypeId for functions
+    pub resolved_returns: HashMap<String, TypeId>,
+
+    /// Escape analysis: which locals don't escape their function
+    pub escape_info: EscapeInfo,
+
+    /// Monomorphization candidates: functions with consistent type profiles
+    pub monomorph_info: MonomorphInfo,
 }
 
 fn register_error_definitions(
@@ -564,6 +605,7 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
     }
 
     let mut unboxed_number_lists = HashSet::new();
+    let mut typed_lists: HashMap<(String, String), TypeId> = HashMap::new();
     for (name, ty) in resolved.iter_all() {
         if let TypeId::List(elem) = &ty {
             if matches!(
@@ -576,6 +618,42 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         }
     }
 
+    // Collect typed list info per function
+    for func in &functions {
+        for (name, ty) in resolved.iter_all() {
+            if let TypeId::List(elem) = &ty {
+                match elem.as_ref() {
+                    TypeId::Primitive(crate::types::core::Primitive::Int)
+                    | TypeId::Primitive(crate::types::core::Primitive::Float) => {
+                        typed_lists.insert(
+                            (func.name.clone(), name.clone()),
+                            *elem.clone(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Also detect typed lists from resolved_locals
+    let (resolved_locals, resolved_params, resolved_returns) =
+        collect_resolved_variable_types(&functions, &resolved);
+    for ((fn_name, var_name), ty) in &resolved_locals {
+        if let TypeId::List(elem) = ty {
+            match elem.as_ref() {
+                TypeId::Primitive(crate::types::core::Primitive::Int)
+                | TypeId::Primitive(crate::types::core::Primitive::Float) => {
+                    typed_lists.insert(
+                        (fn_name.clone(), var_name.clone()),
+                        *elem.clone(),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     let mut store_field_indices = HashMap::new();
     let mut specialized_stores = HashSet::new();
     for (store_name, fields) in &store_field_names {
@@ -584,6 +662,10 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
             store_field_indices.insert((store_name.clone(), field_name.clone()), idx as u32);
         }
     }
+
+    let escape_info = analyze_escape_info(&functions);
+
+    let monomorph_info = collect_monomorph_info(&functions, &globals, &resolved);
 
     Ok(SemanticModel {
         globals,
@@ -607,9 +689,382 @@ pub fn analyze(program: Program) -> Result<SemanticModel, Diagnostic> {
         trait_registry,
         monomorphizations,
         unboxed_number_lists,
+        typed_lists,
         store_field_indices,
         specialized_stores,
+        resolved_locals,
+        resolved_params,
+        resolved_returns,
+        escape_info,
+        monomorph_info,
     })
+}
+
+/// Analyze which local bindings escape each function.
+/// A local escapes if it is: returned, captured by a closure, passed to a function call,
+/// stored in a container field assignment, or used in a spread expression.
+fn analyze_escape_info(functions: &[Function]) -> EscapeInfo {
+    let mut info = EscapeInfo::default();
+    for func in functions {
+        // Collect all local binding names
+        let locals = collect_local_bindings(&func.body);
+        // Collect names that escape
+        let mut escaping = HashSet::new();
+        collect_escaping_names(&func.body, &mut escaping);
+        for local in &locals {
+            if !escaping.contains(local) {
+                info.non_escaping
+                    .insert((func.name.clone(), local.clone()));
+                // Stack eligible: non-escaping locals that are bound to heap-creating expressions
+                // (the codegen will check if the value is actually a heap type)
+                info.stack_eligible
+                    .insert((func.name.clone(), local.clone()));
+            }
+        }
+    }
+    info
+}
+
+/// Collect all local binding names in a block.
+fn collect_local_bindings(block: &Block) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in &block.statements {
+        if let Statement::Binding(b) = stmt {
+            names.push(b.name.clone());
+        }
+    }
+    names
+}
+
+/// Walk a function body and collect all variable names that "escape":
+/// - Returned from the function (in Return statements or block tail value)
+/// - Captured by a lambda/closure
+/// - Passed as an argument to a function call
+/// - Stored in a field assignment
+/// - Used in a spread expression
+fn collect_escaping_names(block: &Block, escaping: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        collect_escaping_from_stmt(stmt, escaping);
+    }
+    // The block's tail value is the return value
+    if let Some(val) = &block.value {
+        collect_identifiers_from_expr(val, escaping);
+    }
+}
+
+fn collect_escaping_from_stmt(stmt: &Statement, escaping: &mut HashSet<String>) {
+    match stmt {
+        Statement::Return(expr, _) => {
+            collect_identifiers_from_expr(expr, escaping);
+        }
+        Statement::Binding(b) => {
+            // The binding value itself doesn't make the var escape,
+            // but if the value is a call/lambda we need to check if the bound
+            // variable is used in escaping contexts (handled by other stmt walks).
+            // However, if the initializer passes other locals to function calls or
+            // captures them in lambdas, those locals escape.
+            collect_escaping_from_expr_rhs(&b.value, escaping);
+        }
+        Statement::Expression(expr) => {
+            collect_escaping_from_expr_rhs(expr, escaping);
+        }
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
+            collect_escaping_from_expr_rhs(condition, escaping);
+            collect_escaping_names(body, escaping);
+            for (cond, blk) in elif_branches {
+                collect_escaping_from_expr_rhs(cond, escaping);
+                collect_escaping_names(blk, escaping);
+            }
+            if let Some(eb) = else_body {
+                collect_escaping_names(eb, escaping);
+            }
+        }
+        Statement::While {
+            condition, body, ..
+        } => {
+            collect_escaping_from_expr_rhs(condition, escaping);
+            collect_escaping_names(body, escaping);
+        }
+        Statement::For {
+            iterable, body, ..
+        } => {
+            collect_escaping_from_expr_rhs(iterable, escaping);
+            collect_escaping_names(body, escaping);
+        }
+        Statement::ForKV {
+            iterable, body, ..
+        } => {
+            collect_escaping_from_expr_rhs(iterable, escaping);
+            collect_escaping_names(body, escaping);
+        }
+        Statement::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            collect_escaping_from_expr_rhs(start, escaping);
+            collect_escaping_from_expr_rhs(end, escaping);
+            if let Some(s) = step {
+                collect_escaping_from_expr_rhs(s, escaping);
+            }
+            collect_escaping_names(body, escaping);
+        }
+        Statement::FieldAssign { target, value, .. } => {
+            // Both target and value identifiers escape (stored into a container)
+            collect_identifiers_from_expr(target, escaping);
+            collect_identifiers_from_expr(value, escaping);
+        }
+        Statement::PatternBinding { value, .. } => {
+            collect_escaping_from_expr_rhs(value, escaping);
+        }
+        Statement::Break(_) | Statement::Continue(_) => {}
+    }
+}
+
+/// From an expression used as an rvalue, collect names that escape through:
+/// - Being passed as a call argument
+/// - Being captured by a lambda
+/// - Being used in a spread
+fn collect_escaping_from_expr_rhs(expr: &Expression, escaping: &mut HashSet<String>) {
+    match expr {
+        Expression::Call { args, callee, .. } => {
+            // All arguments to function calls are considered escaping
+            for arg in args {
+                collect_identifiers_from_expr(arg, escaping);
+            }
+            collect_escaping_from_expr_rhs(callee, escaping);
+        }
+        Expression::Lambda { body, .. } => {
+            // All identifiers referenced in the lambda body are captures and escape
+            collect_all_identifiers_in_block(body, escaping);
+        }
+        Expression::Pipeline { left, right, .. } => {
+            // Left is passed to right (a function call)
+            collect_identifiers_from_expr(left, escaping);
+            collect_escaping_from_expr_rhs(right, escaping);
+        }
+        Expression::Spread(inner, _) => {
+            collect_identifiers_from_expr(inner, escaping);
+        }
+        // List/Map literals: elements don't escape unless the container itself escapes
+        // (which is handled at the statement level)
+        Expression::List(elems, _) => {
+            for e in elems {
+                collect_escaping_from_expr_rhs(e, escaping);
+            }
+        }
+        Expression::Map(entries, _) => {
+            for (k, v) in entries {
+                collect_escaping_from_expr_rhs(k, escaping);
+                collect_escaping_from_expr_rhs(v, escaping);
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_escaping_from_expr_rhs(left, escaping);
+            collect_escaping_from_expr_rhs(right, escaping);
+        }
+        Expression::Unary { expr, .. } => {
+            collect_escaping_from_expr_rhs(expr, escaping);
+        }
+        Expression::Member { target, .. } => {
+            collect_escaping_from_expr_rhs(target, escaping);
+        }
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_escaping_from_expr_rhs(condition, escaping);
+            collect_escaping_from_expr_rhs(then_branch, escaping);
+            collect_escaping_from_expr_rhs(else_branch, escaping);
+        }
+        Expression::Match(m) => {
+            collect_escaping_from_expr_rhs(&m.value, escaping);
+            for arm in &m.arms {
+                collect_escaping_names(&arm.body, escaping);
+                if let Some(g) = &arm.guard {
+                    collect_escaping_from_expr_rhs(g, escaping);
+                }
+            }
+            if let Some(default_block) = &m.default {
+                collect_escaping_names(default_block, escaping);
+            }
+        }
+        Expression::ListComprehension {
+            body,
+            iterable,
+            condition,
+            ..
+        } => {
+            collect_escaping_from_expr_rhs(body, escaping);
+            collect_escaping_from_expr_rhs(iterable, escaping);
+            if let Some(c) = condition {
+                collect_escaping_from_expr_rhs(c, escaping);
+            }
+        }
+        Expression::MapComprehension {
+            key,
+            value,
+            iterable,
+            condition,
+            ..
+        } => {
+            collect_escaping_from_expr_rhs(key, escaping);
+            collect_escaping_from_expr_rhs(value, escaping);
+            collect_escaping_from_expr_rhs(iterable, escaping);
+            if let Some(c) = condition {
+                collect_escaping_from_expr_rhs(c, escaping);
+            }
+        }
+        Expression::Throw { value, .. } => {
+            collect_identifiers_from_expr(value, escaping);
+        }
+        Expression::ErrorPropagate { expr, .. } => {
+            collect_escaping_from_expr_rhs(expr, escaping);
+        }
+        // Leaf expressions: no sub-expressions to recurse into
+        _ => {}
+    }
+}
+
+/// Collect all direct Identifier names from an expression (shallow — one level).
+fn collect_identifiers_from_expr(expr: &Expression, names: &mut HashSet<String>) {
+    match expr {
+        Expression::Identifier(name, _) => {
+            names.insert(name.clone());
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_identifiers_from_expr(left, names);
+            collect_identifiers_from_expr(right, names);
+        }
+        Expression::Unary { expr, .. } => {
+            collect_identifiers_from_expr(expr, names);
+        }
+        Expression::Member { target, .. } => {
+            collect_identifiers_from_expr(target, names);
+        }
+        Expression::Call { callee, args, .. } => {
+            collect_identifiers_from_expr(callee, names);
+            for a in args {
+                collect_identifiers_from_expr(a, names);
+            }
+        }
+        Expression::List(elems, _) => {
+            for e in elems {
+                collect_identifiers_from_expr(e, names);
+            }
+        }
+        Expression::Map(entries, _) => {
+            for (k, v) in entries {
+                collect_identifiers_from_expr(k, names);
+                collect_identifiers_from_expr(v, names);
+            }
+        }
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_identifiers_from_expr(condition, names);
+            collect_identifiers_from_expr(then_branch, names);
+            collect_identifiers_from_expr(else_branch, names);
+        }
+        Expression::Pipeline { left, right, .. } => {
+            collect_identifiers_from_expr(left, names);
+            collect_identifiers_from_expr(right, names);
+        }
+        Expression::Spread(inner, _) => {
+            collect_identifiers_from_expr(inner, names);
+        }
+        _ => {}
+    }
+}
+
+/// Collect all identifiers in a block recursively (for lambda capture analysis).
+fn collect_all_identifiers_in_block(block: &Block, names: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        collect_all_identifiers_in_stmt(stmt, names);
+    }
+    if let Some(val) = &block.value {
+        collect_identifiers_from_expr(val, names);
+    }
+}
+
+fn collect_all_identifiers_in_stmt(stmt: &Statement, names: &mut HashSet<String>) {
+    match stmt {
+        Statement::Binding(b) => {
+            collect_identifiers_from_expr(&b.value, names);
+        }
+        Statement::Expression(expr) | Statement::Return(expr, _) => {
+            collect_identifiers_from_expr(expr, names);
+        }
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
+            collect_identifiers_from_expr(condition, names);
+            collect_all_identifiers_in_block(body, names);
+            for (cond, blk) in elif_branches {
+                collect_identifiers_from_expr(cond, names);
+                collect_all_identifiers_in_block(blk, names);
+            }
+            if let Some(eb) = else_body {
+                collect_all_identifiers_in_block(eb, names);
+            }
+        }
+        Statement::While {
+            condition, body, ..
+        } => {
+            collect_identifiers_from_expr(condition, names);
+            collect_all_identifiers_in_block(body, names);
+        }
+        Statement::For {
+            iterable, body, ..
+        }
+        | Statement::ForKV {
+            iterable, body, ..
+        } => {
+            collect_identifiers_from_expr(iterable, names);
+            collect_all_identifiers_in_block(body, names);
+        }
+        Statement::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            collect_identifiers_from_expr(start, names);
+            collect_identifiers_from_expr(end, names);
+            if let Some(s) = step {
+                collect_identifiers_from_expr(s, names);
+            }
+            collect_all_identifiers_in_block(body, names);
+        }
+        Statement::FieldAssign {
+            target, value, ..
+        } => {
+            collect_identifiers_from_expr(target, names);
+            collect_identifiers_from_expr(value, names);
+        }
+        Statement::PatternBinding { value, .. } => {
+            collect_identifiers_from_expr(value, names);
+        }
+        Statement::Break(_) | Statement::Continue(_) => {}
+    }
 }
 
 fn collect_monomorphizations(ty: &TypeId, table: &mut HashMap<String, Vec<Vec<TypeId>>>) {
@@ -892,6 +1347,10 @@ fn collect_function_constraints(
     );
 
     let fn_return = if function.body.value.is_some() {
+        // If there are also return statements, unify body value type with return type
+        if has_return_statements(&function.body) {
+            constraints.push(ConstraintKind::Equal(body_ty.clone(), return_ty));
+        }
         body_ty
     } else if has_return_statements(&function.body) {
         return_ty
@@ -2232,64 +2691,240 @@ fn check_expression(
 
 /// All built-in names recognized by the Coral runtime.
 const BUILTIN_NAMES: &[&str] = &[
-    "log", "io", "self", "true", "false",
-    "bit_and", "bit_or", "bit_xor", "bit_not", "bit_shl", "bit_shr",
-    "length", "push", "pop", "get", "set", "keys", "values",
-    "abs", "sqrt", "floor", "ceil", "round",
-    "sin", "cos", "tan", "ln", "log10", "exp",
-    "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
-    "trunc", "sign", "signum", "deg_to_rad", "rad_to_deg",
-    "min", "max", "pow",
-    "is_number", "is_string", "is_bool", "is_list", "is_map",
-    "concat", "split", "join", "trim", "to_string",
-    "string_slice", "slice", "string_char_at", "char_at",
-    "string_index_of", "index_of", "string_split", "string_to_chars", "chars",
-    "string_starts_with", "starts_with", "string_ends_with", "ends_with",
-    "string_trim", "string_to_upper", "to_upper", "string_to_lower", "to_lower",
-    "string_replace", "replace", "string_contains", "contains",
-    "string_parse_number", "parse_number", "number_to_string", "string_length",
-    "bytes_length", "bytes_get", "bytes_set", "bytes_from_string", "to_bytes",
-    "bytes_to_string", "bytes_slice",
-    "fs_read", "fs_write", "fs_exists", "fs_append",
-    "fs_read_dir", "read_dir", "fs_mkdir", "mkdir",
-    "fs_delete", "delete", "fs_is_dir", "is_dir",
-    "process_args", "args", "process_exit", "exit",
-    "env_get", "env_set", "stdin_read_line", "read_line",
-    "list_contains", "list_index_of", "list_reverse", "list_slice",
-    "list_sort", "list_join", "list_concat",
-    "map_remove", "map_values", "map_keys", "map_entries", "entries",
-    "map_has_key", "has_key", "map_merge", "merge",
-    "type_of", "is_err", "is_ok", "is_absent",
-    "error_name", "error_code",
-    "ord", "string_ord", "chr", "string_chr", "string_compare", "strcmp",
-    "actor_spawn", "actor_send", "actor_stop", "actor_self",
-    "actor_monitor", "monitor", "actor_demonitor", "demonitor",
-    "actor_graceful_stop", "graceful_stop",
-    "json_parse", "json_serialize", "json_stringify", "json_serialize_pretty",
-    "time_now", "time_timestamp", "time_format_iso",
-    "time_year", "time_month", "time_day",
-    "time_hour", "time_minute", "time_second", "time_sleep",
-    "random", "random_int", "random_seed",
-    "string_lines", "sort_natural", "list_sort_natural",
-    "bytes_from_hex", "bytes_contains", "bytes_find",
-    "base64_encode", "base64_decode", "hex_encode", "hex_decode",
-    "tcp_listen", "tcp_accept", "tcp_connect", "tcp_read", "tcp_write", "tcp_close",
-    "http_get", "http_post", "http_request",
-    "value_retain", "value_release", "heap_alloc", "heap_free",
+    "log",
+    "io",
+    "self",
+    "true",
+    "false",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "bit_not",
+    "bit_shl",
+    "bit_shr",
+    "length",
+    "push",
+    "pop",
+    "get",
+    "set",
+    "keys",
+    "values",
+    "abs",
+    "sqrt",
+    "floor",
+    "ceil",
+    "round",
+    "sin",
+    "cos",
+    "tan",
+    "ln",
+    "log10",
+    "exp",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "trunc",
+    "sign",
+    "signum",
+    "deg_to_rad",
+    "rad_to_deg",
+    "min",
+    "max",
+    "pow",
+    "is_number",
+    "is_string",
+    "is_bool",
+    "is_list",
+    "is_map",
+    "concat",
+    "split",
+    "join",
+    "trim",
+    "to_string",
+    "string_slice",
+    "slice",
+    "string_char_at",
+    "char_at",
+    "string_index_of",
+    "index_of",
+    "string_split",
+    "string_to_chars",
+    "chars",
+    "string_starts_with",
+    "starts_with",
+    "string_ends_with",
+    "ends_with",
+    "string_trim",
+    "string_to_upper",
+    "to_upper",
+    "string_to_lower",
+    "to_lower",
+    "string_replace",
+    "replace",
+    "string_contains",
+    "contains",
+    "string_parse_number",
+    "parse_number",
+    "number_to_string",
+    "string_length",
+    "bytes_length",
+    "bytes_get",
+    "bytes_set",
+    "bytes_from_string",
+    "to_bytes",
+    "bytes_to_string",
+    "bytes_slice",
+    "fs_read",
+    "fs_write",
+    "fs_exists",
+    "fs_append",
+    "fs_read_dir",
+    "read_dir",
+    "fs_mkdir",
+    "mkdir",
+    "fs_delete",
+    "delete",
+    "fs_is_dir",
+    "is_dir",
+    "process_args",
+    "args",
+    "process_exit",
+    "exit",
+    "env_get",
+    "env_set",
+    "stdin_read_line",
+    "read_line",
+    "list_contains",
+    "list_index_of",
+    "list_reverse",
+    "list_slice",
+    "list_sort",
+    "list_join",
+    "list_concat",
+    "map_remove",
+    "map_values",
+    "map_keys",
+    "map_entries",
+    "entries",
+    "map_has_key",
+    "has_key",
+    "map_merge",
+    "merge",
+    "type_of",
+    "is_err",
+    "is_ok",
+    "is_absent",
+    "error_name",
+    "error_code",
+    "ord",
+    "string_ord",
+    "chr",
+    "string_chr",
+    "string_compare",
+    "strcmp",
+    "actor_spawn",
+    "actor_send",
+    "actor_stop",
+    "actor_self",
+    "actor_monitor",
+    "monitor",
+    "actor_demonitor",
+    "demonitor",
+    "actor_graceful_stop",
+    "graceful_stop",
+    "json_parse",
+    "json_serialize",
+    "json_stringify",
+    "json_serialize_pretty",
+    "time_now",
+    "time_timestamp",
+    "time_format_iso",
+    "time_year",
+    "time_month",
+    "time_day",
+    "time_hour",
+    "time_minute",
+    "time_second",
+    "time_sleep",
+    "random",
+    "random_int",
+    "random_seed",
+    "string_lines",
+    "sort_natural",
+    "list_sort_natural",
+    "bytes_from_hex",
+    "bytes_contains",
+    "bytes_find",
+    "base64_encode",
+    "base64_decode",
+    "hex_encode",
+    "hex_decode",
+    "tcp_listen",
+    "tcp_accept",
+    "tcp_connect",
+    "tcp_read",
+    "tcp_write",
+    "tcp_close",
+    "http_get",
+    "http_post",
+    "http_request",
+    "value_retain",
+    "value_release",
+    "heap_alloc",
+    "heap_free",
     "range",
-    "sb_new", "sb_push", "sb_finish", "sb_len",
-    "string_join_list", "join_list", "string_repeat", "repeat_string",
-    "string_reverse", "reverse_string", "value_to_string",
-    "stderr_write", "eprint",
-    "fs_size", "file_size", "fs_rename", "fs_copy",
-    "fs_mkdirs", "make_dirs", "fs_temp_dir", "temp_dir",
-    "process_exec", "exec", "process_cwd", "cwd",
-    "process_chdir", "chdir", "process_pid",
-    "process_hostname", "hostname",
-    "path_normalize", "normalize", "path_resolve", "resolve",
-    "path_is_absolute", "is_absolute", "path_parent", "path_stem", "stem",
-    "regex_match", "regex_find", "regex_find_all", "regex_replace", "regex_split",
-    "inspect", "debug_inspect", "time_ns", "debug_time_ns",
+    "sb_new",
+    "sb_push",
+    "sb_finish",
+    "sb_len",
+    "string_join_list",
+    "join_list",
+    "string_repeat",
+    "repeat_string",
+    "string_reverse",
+    "reverse_string",
+    "value_to_string",
+    "stderr_write",
+    "eprint",
+    "fs_size",
+    "file_size",
+    "fs_rename",
+    "fs_copy",
+    "fs_mkdirs",
+    "make_dirs",
+    "fs_temp_dir",
+    "temp_dir",
+    "process_exec",
+    "exec",
+    "process_cwd",
+    "cwd",
+    "process_chdir",
+    "chdir",
+    "process_pid",
+    "process_hostname",
+    "hostname",
+    "path_normalize",
+    "normalize",
+    "path_resolve",
+    "resolve",
+    "path_is_absolute",
+    "is_absolute",
+    "path_parent",
+    "path_stem",
+    "stem",
+    "regex_match",
+    "regex_find",
+    "regex_find_all",
+    "regex_replace",
+    "regex_split",
+    "inspect",
+    "debug_inspect",
+    "time_ns",
+    "debug_time_ns",
 ];
 
 fn is_builtin_name(name: &str) -> bool {
@@ -2653,16 +3288,12 @@ fn pattern_key(pattern: &crate::ast::MatchPattern) -> Option<String> {
     }
 }
 
-fn check_overlapping_patterns(
-    match_expr: &MatchExpression,
-    warnings: &mut Vec<Diagnostic>,
-) {
+fn check_overlapping_patterns(match_expr: &MatchExpression, warnings: &mut Vec<Diagnostic>) {
     let mut seen: HashSet<String> = HashSet::new();
     for (i, arm) in match_expr.arms.iter().enumerate() {
         let keys = collect_pattern_keys(&arm.pattern);
         for key in keys {
             if !seen.insert(key.clone()) {
-                // Found a duplicate pattern in a later arm
                 warnings.push(
                     Diagnostic::warning(
                         format!("unreachable pattern in match arm {}: pattern already matched by a previous arm", i + 1),
@@ -2670,7 +3301,7 @@ fn check_overlapping_patterns(
                     )
                     .with_help("Remove the duplicate arm or use a guard to distinguish it."),
                 );
-                break; // One warning per arm is enough
+                break;
             }
         }
     }
@@ -2700,7 +3331,6 @@ fn check_single_match_exhaustiveness(
     let mut has_identifier_catch_all = false;
 
     for arm in &match_expr.arms {
-        // Arms with guards are not guaranteed to match, skip for exhaustiveness
         if arm.guard.is_some() {
             continue;
         }
@@ -5144,4 +5774,567 @@ fn trace_actor_type_from_expr(expr: &Expression) -> Option<String> {
         }
     }
     None
+}
+
+/// Walk all functions to collect per-variable and per-parameter resolved types.
+/// Returns (resolved_locals, resolved_params).
+fn collect_resolved_variable_types(
+    functions: &[Function],
+    resolved: &TypeEnv,
+) -> (
+    HashMap<(String, String), TypeId>,
+    HashMap<(String, usize), TypeId>,
+    HashMap<String, TypeId>,
+) {
+    let mut resolved_locals: HashMap<(String, String), TypeId> = HashMap::new();
+    let mut resolved_params: HashMap<(String, usize), TypeId> = HashMap::new();
+    let mut resolved_returns: HashMap<String, TypeId> = HashMap::new();
+
+    for function in functions {
+        // Collect parameter types
+        for (idx, param) in function.params.iter().enumerate() {
+            if let Some(ty) = resolved.get(&param.name) {
+                if is_specializable_type(ty) {
+                    resolved_params.insert((function.name.clone(), idx), ty.clone());
+                    // Also store by name in resolved_locals for easier lookup in codegen
+                    resolved_locals.insert((function.name.clone(), param.name.clone()), ty.clone());
+                }
+            }
+        }
+        // Collect function return type from resolved Func type
+        if let Some(TypeId::Func(_, ret_ty)) = resolved.get(&function.name) {
+            if is_specializable_type(ret_ty) {
+                resolved_returns.insert(function.name.clone(), *ret_ty.clone());
+            }
+        }
+        // Walk body to collect local binding types
+        collect_block_variable_types(&function.name, &function.body, resolved, &mut resolved_locals);
+    }
+
+    (resolved_locals, resolved_params, resolved_returns)
+}
+
+fn is_specializable_type(ty: &TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::Primitive(Primitive::Int)
+            | TypeId::Primitive(Primitive::Float)
+            | TypeId::Primitive(Primitive::Bool)
+            | TypeId::Store(_)
+            | TypeId::List(_)
+    )
+}
+
+fn collect_block_variable_types(
+    fn_name: &str,
+    block: &Block,
+    resolved: &TypeEnv,
+    locals: &mut HashMap<(String, String), TypeId>,
+) {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::Binding(binding) => {
+                if let Some(ty) = resolved.get(&binding.name) {
+                    if is_specializable_type(ty) {
+                        locals.insert(
+                            (fn_name.to_string(), binding.name.clone()),
+                            ty.clone(),
+                        );
+                    }
+                }
+            }
+            Statement::If {
+                body,
+                elif_branches,
+                else_body,
+                ..
+            } => {
+                collect_block_variable_types(fn_name, body, resolved, locals);
+                for (_, blk) in elif_branches {
+                    collect_block_variable_types(fn_name, blk, resolved, locals);
+                }
+                if let Some(eb) = else_body {
+                    collect_block_variable_types(fn_name, eb, resolved, locals);
+                }
+            }
+            Statement::While { body, .. } => {
+                collect_block_variable_types(fn_name, body, resolved, locals);
+            }
+            Statement::For {
+                variable, body, ..
+            } => {
+                if let Some(ty) = resolved.get(variable) {
+                    if is_specializable_type(ty) {
+                        locals.insert((fn_name.to_string(), variable.clone()), ty.clone());
+                    }
+                }
+                collect_block_variable_types(fn_name, body, resolved, locals);
+            }
+            Statement::ForRange {
+                variable, body, ..
+            } => {
+                // ForRange loop variables are always Int
+                locals.insert(
+                    (fn_name.to_string(), variable.clone()),
+                    TypeId::Primitive(Primitive::Int),
+                );
+                collect_block_variable_types(fn_name, body, resolved, locals);
+            }
+            Statement::ForKV {
+                key_var,
+                value_var,
+                body,
+                ..
+            } => {
+                if let Some(ty) = resolved.get(key_var) {
+                    if is_specializable_type(ty) {
+                        locals.insert((fn_name.to_string(), key_var.clone()), ty.clone());
+                    }
+                }
+                if let Some(ty) = resolved.get(value_var) {
+                    if is_specializable_type(ty) {
+                        locals.insert((fn_name.to_string(), value_var.clone()), ty.clone());
+                    }
+                }
+                collect_block_variable_types(fn_name, body, resolved, locals);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ─── Monomorphization: Call-Site Type Profile Collection ──────────────────────
+
+/// Infer the static type of an expression from the resolved TypeEnv.
+fn infer_expr_type(expr: &Expression, resolved: &TypeEnv) -> TypeId {
+    match expr {
+        Expression::Integer(_, _) => TypeId::Primitive(Primitive::Int),
+        Expression::Float(_, _) => TypeId::Primitive(Primitive::Float),
+        Expression::Bool(_, _) => TypeId::Primitive(Primitive::Bool),
+        Expression::String(_, _) => TypeId::Primitive(Primitive::String),
+        Expression::Bytes(_, _) => TypeId::Primitive(Primitive::Bytes),
+        Expression::Identifier(name, _) => {
+            resolved.get(name).cloned().unwrap_or(TypeId::Unknown)
+        }
+        Expression::Call { callee, .. } => {
+            if let Expression::Identifier(name, _) = callee.as_ref() {
+                if let Some(TypeId::Func(_, ret)) = resolved.get(name) {
+                    return *ret.clone();
+                }
+            }
+            TypeId::Unknown
+        }
+        Expression::Binary { op, left, right, .. } => {
+            let lt = infer_expr_type(left, resolved);
+            let rt = infer_expr_type(right, resolved);
+            match op {
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                | BinaryOp::Div | BinaryOp::Mod => {
+                    if lt == TypeId::Primitive(Primitive::Int)
+                        && rt == TypeId::Primitive(Primitive::Int)
+                    {
+                        TypeId::Primitive(Primitive::Int)
+                    } else if lt.is_numeric() && rt.is_numeric() {
+                        TypeId::Primitive(Primitive::Float)
+                    } else {
+                        TypeId::Unknown
+                    }
+                }
+                BinaryOp::Equals | BinaryOp::NotEquals | BinaryOp::Less
+                | BinaryOp::LessEq | BinaryOp::Greater | BinaryOp::GreaterEq
+                | BinaryOp::And | BinaryOp::Or => TypeId::Primitive(Primitive::Bool),
+                _ => TypeId::Unknown,
+            }
+        }
+        Expression::Unary { op, expr: inner, .. } => match op {
+            UnaryOp::Neg => infer_expr_type(inner, resolved),
+            UnaryOp::Not => TypeId::Primitive(Primitive::Bool),
+            _ => TypeId::Unknown,
+        },
+        Expression::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = infer_expr_type(then_branch, resolved);
+            let e = infer_expr_type(else_branch, resolved);
+            if t == e { t } else { TypeId::Unknown }
+        }
+        _ => TypeId::Unknown,
+    }
+}
+
+/// Walk an expression tree and collect type profiles for all call sites.
+fn collect_call_profiles_expr(
+    expr: &Expression,
+    resolved: &TypeEnv,
+    profiles: &mut HashMap<String, HashMap<Vec<TypeId>, usize>>,
+) {
+    match expr {
+        Expression::Call {
+            callee, args, ..
+        } => {
+            // Collect profiles for the callee target
+            if let Expression::Identifier(name, _) = callee.as_ref() {
+                let arg_types: Vec<TypeId> =
+                    args.iter().map(|arg| infer_expr_type(arg, resolved)).collect();
+                if arg_types.iter().all(|t| is_specializable_type(t)) && !arg_types.is_empty() {
+                    *profiles
+                        .entry(name.clone())
+                        .or_default()
+                        .entry(arg_types)
+                        .or_default() += 1;
+                }
+            }
+            // Recurse into callee and args
+            collect_call_profiles_expr(callee, resolved, profiles);
+            for arg in args {
+                collect_call_profiles_expr(arg, resolved, profiles);
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_call_profiles_expr(left, resolved, profiles);
+            collect_call_profiles_expr(right, resolved, profiles);
+        }
+        Expression::Unary { expr: inner, .. } => {
+            collect_call_profiles_expr(inner, resolved, profiles);
+        }
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_call_profiles_expr(condition, resolved, profiles);
+            collect_call_profiles_expr(then_branch, resolved, profiles);
+            collect_call_profiles_expr(else_branch, resolved, profiles);
+        }
+        Expression::List(items, _) => {
+            for item in items {
+                collect_call_profiles_expr(item, resolved, profiles);
+            }
+        }
+        Expression::Map(entries, _) => {
+            for (k, v) in entries {
+                collect_call_profiles_expr(k, resolved, profiles);
+                collect_call_profiles_expr(v, resolved, profiles);
+            }
+        }
+        Expression::Index { target, index, .. } => {
+            collect_call_profiles_expr(target, resolved, profiles);
+            collect_call_profiles_expr(index, resolved, profiles);
+        }
+        Expression::Slice {
+            target, start, end, ..
+        } => {
+            collect_call_profiles_expr(target, resolved, profiles);
+            collect_call_profiles_expr(start, resolved, profiles);
+            collect_call_profiles_expr(end, resolved, profiles);
+        }
+        Expression::Member { target, .. } => {
+            collect_call_profiles_expr(target, resolved, profiles);
+        }
+        Expression::Lambda { body, .. } => {
+            collect_call_profiles_block(body, resolved, profiles);
+        }
+        Expression::Match(m) => {
+            collect_call_profiles_expr(&m.value, resolved, profiles);
+            for arm in &m.arms {
+                if let Some(guard) = &arm.guard {
+                    collect_call_profiles_expr(guard, resolved, profiles);
+                }
+                collect_call_profiles_block(&arm.body, resolved, profiles);
+            }
+            if let Some(ref def) = m.default {
+                collect_call_profiles_block(def, resolved, profiles);
+            }
+        }
+        Expression::Pipeline { left, right, .. } => {
+            collect_call_profiles_expr(left, resolved, profiles);
+            collect_call_profiles_expr(right, resolved, profiles);
+        }
+        Expression::ErrorPropagate { expr: inner, .. }
+        | Expression::Throw { value: inner, .. } => {
+            collect_call_profiles_expr(inner, resolved, profiles);
+        }
+        Expression::Unsafe { block, .. } => {
+            collect_call_profiles_block(block, resolved, profiles);
+        }
+        _ => {}
+    }
+}
+
+/// Walk a block and collect call-site type profiles.
+fn collect_call_profiles_block(
+    block: &Block,
+    resolved: &TypeEnv,
+    profiles: &mut HashMap<String, HashMap<Vec<TypeId>, usize>>,
+) {
+    for stmt in &block.statements {
+        collect_call_profiles_stmt(stmt, resolved, profiles);
+    }
+    if let Some(val) = &block.value {
+        collect_call_profiles_expr(val, resolved, profiles);
+    }
+}
+
+/// Walk a statement and collect call-site type profiles.
+fn collect_call_profiles_stmt(
+    stmt: &Statement,
+    resolved: &TypeEnv,
+    profiles: &mut HashMap<String, HashMap<Vec<TypeId>, usize>>,
+) {
+    match stmt {
+        Statement::Binding(b) => {
+            collect_call_profiles_expr(&b.value, resolved, profiles);
+        }
+        Statement::Expression(expr) => {
+            collect_call_profiles_expr(expr, resolved, profiles);
+        }
+        Statement::Return(expr, _) => {
+            collect_call_profiles_expr(expr, resolved, profiles);
+        }
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
+            collect_call_profiles_expr(condition, resolved, profiles);
+            collect_call_profiles_block(body, resolved, profiles);
+            for (cond, blk) in elif_branches {
+                collect_call_profiles_expr(cond, resolved, profiles);
+                collect_call_profiles_block(blk, resolved, profiles);
+            }
+            if let Some(eb) = else_body {
+                collect_call_profiles_block(eb, resolved, profiles);
+            }
+        }
+        Statement::While {
+            condition, body, ..
+        } => {
+            collect_call_profiles_expr(condition, resolved, profiles);
+            collect_call_profiles_block(body, resolved, profiles);
+        }
+        Statement::For {
+            iterable, body, ..
+        } => {
+            collect_call_profiles_expr(iterable, resolved, profiles);
+            collect_call_profiles_block(body, resolved, profiles);
+        }
+        Statement::ForRange {
+            start, end, step, body, ..
+        } => {
+            collect_call_profiles_expr(start, resolved, profiles);
+            collect_call_profiles_expr(end, resolved, profiles);
+            if let Some(s) = step {
+                collect_call_profiles_expr(s, resolved, profiles);
+            }
+            collect_call_profiles_block(body, resolved, profiles);
+        }
+        Statement::ForKV {
+            iterable, body, ..
+        } => {
+            collect_call_profiles_expr(iterable, resolved, profiles);
+            collect_call_profiles_block(body, resolved, profiles);
+        }
+        Statement::FieldAssign { target, value, .. } => {
+            collect_call_profiles_expr(target, resolved, profiles);
+            collect_call_profiles_expr(value, resolved, profiles);
+        }
+        Statement::PatternBinding { value, .. } => {
+            collect_call_profiles_expr(value, resolved, profiles);
+        }
+        _ => {}
+    }
+}
+
+/// Check whether a function body calls itself recursively.
+fn is_recursive_function(body: &Block, name: &str) -> bool {
+    for stmt in &body.statements {
+        if stmt_calls_name(stmt, name) {
+            return true;
+        }
+    }
+    if let Some(val) = &body.value {
+        if expr_calls_name(val, name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_calls_name(stmt: &Statement, name: &str) -> bool {
+    match stmt {
+        Statement::Binding(b) => expr_calls_name(&b.value, name),
+        Statement::Expression(expr) => expr_calls_name(expr, name),
+        Statement::Return(expr, _) => expr_calls_name(expr, name),
+        Statement::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+            ..
+        } => {
+            expr_calls_name(condition, name)
+                || block_calls_name(body, name)
+                || elif_branches
+                    .iter()
+                    .any(|(c, b)| expr_calls_name(c, name) || block_calls_name(b, name))
+                || else_body.as_ref().map_or(false, |b| block_calls_name(b, name))
+        }
+        Statement::While {
+            condition, body, ..
+        } => expr_calls_name(condition, name) || block_calls_name(body, name),
+        Statement::For {
+            iterable, body, ..
+        } => expr_calls_name(iterable, name) || block_calls_name(body, name),
+        Statement::ForRange {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            expr_calls_name(start, name)
+                || expr_calls_name(end, name)
+                || step.as_ref().map_or(false, |s| expr_calls_name(s, name))
+                || block_calls_name(body, name)
+        }
+        Statement::ForKV {
+            iterable, body, ..
+        } => expr_calls_name(iterable, name) || block_calls_name(body, name),
+        Statement::FieldAssign { target, value, .. } => {
+            expr_calls_name(target, name) || expr_calls_name(value, name)
+        }
+        Statement::PatternBinding { value, .. } => expr_calls_name(value, name),
+        _ => false,
+    }
+}
+
+fn block_calls_name(block: &Block, name: &str) -> bool {
+    for stmt in &block.statements {
+        if stmt_calls_name(stmt, name) {
+            return true;
+        }
+    }
+    block.value.as_ref().map_or(false, |v| expr_calls_name(v, name))
+}
+
+fn expr_calls_name(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::Call { callee, args, .. } => {
+            if let Expression::Identifier(ref id, _) = **callee {
+                if id == name {
+                    return true;
+                }
+            }
+            expr_calls_name(callee, name) || args.iter().any(|a| expr_calls_name(a, name))
+        }
+        Expression::Binary { left, right, .. } => {
+            expr_calls_name(left, name) || expr_calls_name(right, name)
+        }
+        Expression::Unary { expr: inner, .. } => expr_calls_name(inner, name),
+        Expression::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_calls_name(condition, name)
+                || expr_calls_name(then_branch, name)
+                || expr_calls_name(else_branch, name)
+        }
+        Expression::Lambda { body, .. } => block_calls_name(body, name),
+        Expression::Member { target, .. } => expr_calls_name(target, name),
+        Expression::Index { target, index, .. } => {
+            expr_calls_name(target, name) || expr_calls_name(index, name)
+        }
+        Expression::Slice {
+            target, start, end, ..
+        } => {
+            expr_calls_name(target, name)
+                || expr_calls_name(start, name)
+                || expr_calls_name(end, name)
+        }
+        Expression::List(items, _) => items.iter().any(|i| expr_calls_name(i, name)),
+        Expression::Map(entries, _) => entries
+            .iter()
+            .any(|(k, v)| expr_calls_name(k, name) || expr_calls_name(v, name)),
+        Expression::Pipeline { left, right, .. } => {
+            expr_calls_name(left, name) || expr_calls_name(right, name)
+        }
+        Expression::Match(m) => {
+            expr_calls_name(&m.value, name)
+                || m.arms.iter().any(|arm| {
+                    arm.guard.as_ref().map_or(false, |g| expr_calls_name(g, name))
+                        || block_calls_name(&arm.body, name)
+                })
+                || m.default.as_ref().map_or(false, |d| block_calls_name(d, name))
+        }
+        Expression::ErrorPropagate { expr: inner, .. }
+        | Expression::Throw { value: inner, .. } => expr_calls_name(inner, name),
+        Expression::Unsafe { block, .. } => block_calls_name(block, name),
+        _ => false,
+    }
+}
+
+/// Collect monomorphization info: identify functions with consistent call-site type profiles.
+fn collect_monomorph_info(
+    functions: &[Function],
+    globals: &[Binding],
+    resolved: &TypeEnv,
+) -> MonomorphInfo {
+    let mut profiles: HashMap<String, HashMap<Vec<TypeId>, usize>> = HashMap::new();
+
+    // Walk all expressions across functions and globals
+    for func in functions {
+        collect_call_profiles_block(&func.body, resolved, &mut profiles);
+    }
+    for global in globals {
+        collect_call_profiles_expr(&global.value, resolved, &mut profiles);
+    }
+
+    // Determine which functions are recursive
+    let mut recursive: HashSet<String> = HashSet::new();
+    for func in functions {
+        if is_recursive_function(&func.body, &func.name) {
+            recursive.insert(func.name.clone());
+        }
+    }
+
+    // Set of user-defined function names
+    let fn_names: HashSet<String> = functions.iter().map(|f| f.name.clone()).collect();
+
+    // Filter candidates: user-defined, non-recursive, ≤4 distinct profiles
+    let candidates = profiles
+        .into_iter()
+        .filter(|(name, sigs)| {
+            sigs.len() <= 4 && !recursive.contains(name) && fn_names.contains(name)
+        })
+        .map(|(name, sigs)| {
+            let return_type = resolved
+                .get(&name)
+                .and_then(|ty| {
+                    if let TypeId::Func(_, ret) = ty {
+                        Some(*ret.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(TypeId::Unknown);
+            let variants = sigs
+                .into_iter()
+                .map(|(types, count)| MonomorphVariant {
+                    param_types: types,
+                    return_type: return_type.clone(),
+                    call_count: count,
+                })
+                .collect();
+            (name, variants)
+        })
+        .collect();
+
+    MonomorphInfo { candidates }
 }

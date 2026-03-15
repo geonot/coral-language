@@ -11,7 +11,7 @@ use crate::ast::{
     Parameter, Statement, TypeAnnotation, UnaryOp,
 };
 use crate::diagnostics::Diagnostic;
-use crate::semantic::SemanticModel;
+use crate::semantic::{EscapeInfo, MonomorphInfo, MonomorphVariant, SemanticModel};
 use crate::span::{LineIndex, Span};
 use crate::types::{AllocationStrategy, Primitive, TypeId};
 use inkwell::InlineAsmDialect;
@@ -34,6 +34,19 @@ use inkwell::values::{
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::{HashMap, HashSet};
 
+/// Tracks the native representation of an unboxed variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnboxedKind {
+    /// Native i64 integer — no NaN-boxing
+    NativeInt,
+    /// Native f64 (stored as raw f64 bits in alloca double) — no NaN-boxing tags
+    NativeFloat,
+    /// Native i1 boolean
+    NativeBool,
+    /// Standard NaN-boxed i64 (default)
+    Boxed,
+}
+
 pub struct CodeGenerator<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -45,6 +58,8 @@ pub struct CodeGenerator<'ctx> {
     runtime: RuntimeBindings<'ctx>,
     functions: HashMap<String, FunctionValue<'ctx>>,
     string_pool: HashMap<String, GlobalValue<'ctx>>,
+    /// Cache of NaN-boxed string literal values (global i64 variables computed once at init)
+    string_nb_cache: HashMap<String, GlobalValue<'ctx>>,
     bytes_pool: HashMap<Vec<u8>, GlobalValue<'ctx>>,
     global_variables: HashMap<String, GlobalValue<'ctx>>,
     globals_initialized_flag: Option<GlobalValue<'ctx>>,
@@ -64,17 +79,51 @@ pub struct CodeGenerator<'ctx> {
 
     store_field_names: HashSet<String>,
 
+    /// Maps (store_name, field_name) -> field_index for indexed struct access
+    store_field_indices: HashMap<(String, String), usize>,
+    /// Maps store_name -> field_count for struct allocation
+    store_field_counts: HashMap<String, usize>,
+
     persistent_stores: HashSet<String>,
 
     has_persistent_stores: bool,
+
+    uses_actors: bool,
+
+    /// When compiling a store method, the name of the current store
+    current_store_name: Option<String>,
+
+    /// Name of the current function being compiled (for resolved_locals lookups)
+    current_fn_name: Option<String>,
 
     debug_ctx: Option<DebugContext<'ctx>>,
 
     resolved_types: HashMap<String, TypeId>,
 
+    /// Per-function resolved types: (fn_name, var_name) → TypeId
+    resolved_locals: HashMap<(String, String), TypeId>,
+
+    /// Per-function resolved param types: (fn_name, param_index) → TypeId
+    resolved_params: HashMap<(String, usize), TypeId>,
+
+    /// Resolved return types: fn_name → TypeId
+    resolved_returns: HashMap<String, TypeId>,
+
     fn_param_defaults: HashMap<String, Vec<Parameter>>,
 
     module_exports: HashMap<String, Vec<String>>,
+
+    /// Escape analysis info from semantic pass
+    escape_info: EscapeInfo,
+
+    /// Monomorphization candidates from semantic pass
+    monomorph_info: MonomorphInfo,
+
+    /// Maps (fn_name, var_name) → element TypeId for homogeneous-type lists
+    typed_lists: HashMap<(String, String), TypeId>,
+
+    /// Maps (fn_name, param_types) → specialized LLVM function
+    specialized_functions: HashMap<(String, Vec<TypeId>), FunctionValue<'ctx>>,
 }
 
 struct DebugContext<'ctx> {
@@ -120,6 +169,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             runtime,
             functions: HashMap::new(),
             string_pool: HashMap::new(),
+            string_nb_cache: HashMap::new(),
             bytes_pool: HashMap::new(),
             global_variables: HashMap::new(),
             globals_initialized_flag: None,
@@ -133,12 +183,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             enum_constructors: HashMap::new(),
             store_constructors: HashSet::new(),
             store_field_names: HashSet::new(),
+            store_field_indices: HashMap::new(),
+            store_field_counts: HashMap::new(),
             persistent_stores: HashSet::new(),
             has_persistent_stores: false,
+            uses_actors: false,
+            current_store_name: None,
+            current_fn_name: None,
             debug_ctx: None,
             resolved_types: HashMap::new(),
+            resolved_locals: HashMap::new(),
+            resolved_params: HashMap::new(),
+            resolved_returns: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             module_exports: HashMap::new(),
+            escape_info: EscapeInfo::default(),
+            monomorph_info: MonomorphInfo::default(),
+            typed_lists: HashMap::new(),
+            specialized_functions: HashMap::new(),
         }
     }
 
@@ -200,14 +262,25 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub fn compile(mut self, model: &SemanticModel) -> Result<Module<'ctx>, Diagnostic> {
+        let triple = inkwell::targets::TargetMachine::get_default_triple();
+        self.module.set_triple(&triple);
+
         self.apply_runtime_attributes();
         self.allocation_hints = model.allocation.symbols.clone();
+        self.uses_actors = !model.actor_handler_names.is_empty();
 
         self.module_exports = model.module_exports.clone();
 
         for (name, ty) in model.types.iter_all() {
             self.resolved_types.insert(name, ty);
         }
+
+        self.resolved_locals = model.resolved_locals.clone();
+        self.resolved_params = model.resolved_params.clone();
+        self.resolved_returns = model.resolved_returns.clone();
+        self.escape_info = model.escape_info.clone();
+        self.monomorph_info = model.monomorph_info.clone();
+        self.typed_lists = model.typed_lists.clone();
 
         let reachable = Self::compute_reachable_functions(model);
 
@@ -261,12 +334,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         for store in &model.stores {
-            for field in &store.fields {
+            for (idx, field) in store.fields.iter().enumerate() {
                 self.store_field_names.insert(field.name.clone());
                 if field.is_reference {
                     self.reference_fields
                         .insert((store.name.clone(), field.name.clone()));
                 }
+                if !store.is_persistent {
+                    self.store_field_indices
+                        .insert((store.name.clone(), field.name.clone()), idx + 1);
+                }
+            }
+            if !store.is_persistent {
+                self.store_field_counts
+                    .insert(store.name.clone(), store.fields.len() + 1);
             }
 
             let constructor_name = format!("make_{}", store.name);
@@ -368,7 +449,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if method.kind == FunctionKind::Method {
                         let mangled = format!("{}_{}", store.name, method.name);
                         if let Some(llvm_fn) = self.functions.get(&mangled) {
+                            self.current_store_name = Some(store.name.clone());
                             self.build_store_method_body(method, *llvm_fn)?;
+                            self.current_store_name = None;
                         }
                     }
                 }
@@ -393,6 +476,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_store_constructor(store)?;
             }
         }
+
+        // ── Monomorphization: declare and build specialized function clones ──
+        self.declare_specialized_functions(model)?;
+        self.build_specialized_function_bodies(model)?;
 
         let main_fn =
             self.module
@@ -466,6 +553,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         if let Some(dbg) = &self.debug_ctx {
             dbg.builder.finalize();
+        }
+
+        // Dead code elimination: mark monomorphized originals as private so
+        // LLVM's GlobalDCE pass removes them when they have no remaining uses.
+        for fn_name in self.monomorph_info.candidates.keys() {
+            if let Some(&llvm_fn) = self.functions.get(fn_name) {
+                llvm_fn.set_linkage(inkwell::module::Linkage::Private);
+            }
         }
 
         Ok(self.module)
@@ -787,7 +882,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let noalias = self.context.create_enum_attribute(noalias_id, 0);
         let param_count = llvm_fn.count_params();
         for i in 0..param_count {
-            if llvm_fn.get_nth_param(i).map_or(false, |p| p.is_pointer_value()) {
+            if llvm_fn
+                .get_nth_param(i)
+                .map_or(false, |p| p.is_pointer_value())
+            {
                 llvm_fn.add_attribute(AttributeLoc::Param(i), noalias);
             }
         }
@@ -829,9 +927,37 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.runtime.map_set,
             self.runtime.map_length,
             self.runtime.map_keys,
+            self.runtime.list_get_fast,
+            self.runtime.list_get_nb,
+            self.runtime.list_get_raw_f64,
+            self.runtime.list_get_sublist_ptr,
+            self.runtime.list_items_raw,
+            self.runtime.list_set_fast,
+            self.runtime.list_len,
+            self.runtime.string_len,
         ];
         for f in &nounwind_fns {
             f.add_attribute(AttributeLoc::Function, nounwind);
+        }
+
+        // Mark read-only functions with memory(read) attribute (no side effects)
+        // This allows LLVM LICM to hoist them out of loops when arguments are invariant
+        // Encoding: memory attr uses 2 bits per location
+        // (ArgMem=loc0, InaccessibleMem=loc1, Other=loc2, ErrnoMem=loc3)
+        // Ref=1 at all locations = 1 | (1<<2) | (1<<4) | (1<<6) = 85
+        let memory_read_id = Attribute::get_named_enum_kind_id("memory");
+        if memory_read_id > 0 {
+            let memory_read = self.context.create_enum_attribute(memory_read_id, 85);
+            let readonly_fns = [
+                self.runtime.list_get_raw_f64,
+                self.runtime.list_get_sublist_ptr,
+                self.runtime.list_get_nb,
+                self.runtime.list_len,
+                self.runtime.string_len,
+            ];
+            for f in &readonly_fns {
+                f.add_attribute(AttributeLoc::Function, memory_read);
+            }
         }
 
         let noalias_id = Attribute::get_named_enum_kind_id("noalias");
@@ -1308,6 +1434,313 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    // ── Monomorphization ─────────────────────────────────────────────────────
+
+    /// Generate the mangled name for a specialized function variant.
+    fn mangle_specialized_name(fn_name: &str, param_types: &[TypeId]) -> String {
+        let suffix: Vec<&str> = param_types
+            .iter()
+            .map(|t| match t {
+                TypeId::Primitive(Primitive::Int) => "Int",
+                TypeId::Primitive(Primitive::Float) => "Float",
+                TypeId::Primitive(Primitive::Bool) => "Bool",
+                _ => "Box",
+            })
+            .collect();
+        format!("{}_{}", fn_name, suffix.join("_"))
+    }
+
+    /// Declare LLVM functions for all monomorphization candidates with native-typed params.
+    fn declare_specialized_functions(
+        &mut self,
+        model: &SemanticModel,
+    ) -> Result<(), Diagnostic> {
+        let candidates: Vec<(String, Vec<MonomorphVariant>)> = self
+            .monomorph_info
+            .candidates
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (fn_name, variants) in &candidates {
+            // Skip if the function doesn't exist in the model
+            let function = match model.functions.iter().find(|f| &f.name == fn_name) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            for variant in variants {
+                // Skip variants where arg count doesn't match function params
+                if variant.param_types.len() != function.params.len() {
+                    continue;
+                }
+                let mangled = Self::mangle_specialized_name(fn_name, &variant.param_types);
+
+                // Build native param types
+                let param_types: Vec<BasicMetadataTypeEnum> = variant
+                    .param_types
+                    .iter()
+                    .map(|t| match t {
+                        TypeId::Primitive(Primitive::Int) => self.usize_type.into(),
+                        TypeId::Primitive(Primitive::Float) => self.f64_type.into(),
+                        TypeId::Primitive(Primitive::Bool) => self.bool_type.into(),
+                        _ => self.runtime.value_i64_type.into(),
+                    })
+                    .collect();
+
+                // Return type
+                let fn_type = match &variant.return_type {
+                    TypeId::Primitive(Primitive::Int) => {
+                        self.usize_type.fn_type(&param_types, false)
+                    }
+                    TypeId::Primitive(Primitive::Float) => {
+                        self.f64_type.fn_type(&param_types, false)
+                    }
+                    TypeId::Primitive(Primitive::Bool) => {
+                        self.bool_type.fn_type(&param_types, false)
+                    }
+                    _ => self.runtime.value_i64_type.fn_type(&param_types, false),
+                };
+
+                let llvm_fn = self.module.add_function(&mangled, fn_type, None);
+
+                // Mark for inlining since these are specialized hot paths
+                let kind_id = Attribute::get_named_enum_kind_id("inlinehint");
+                let attr = self.context.create_enum_attribute(kind_id, 0);
+                llvm_fn.add_attribute(AttributeLoc::Function, attr);
+
+                self.specialized_functions.insert(
+                    (fn_name.clone(), variant.param_types.clone()),
+                    llvm_fn,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Build function bodies for all specialized monomorphization variants.
+    fn build_specialized_function_bodies(
+        &mut self,
+        model: &SemanticModel,
+    ) -> Result<(), Diagnostic> {
+        let candidates: Vec<(String, Vec<MonomorphVariant>)> = self
+            .monomorph_info
+            .candidates
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (fn_name, variants) in &candidates {
+            let function = match model.functions.iter().find(|f| &f.name == fn_name) {
+                Some(f) => f.clone(),
+                None => continue,
+            };
+
+            for variant in variants {
+                // Skip variants where arg count doesn't match function params
+                if variant.param_types.len() != function.params.len() {
+                    continue;
+                }
+                let key = (fn_name.clone(), variant.param_types.clone());
+                if let Some(&llvm_fn) = self.specialized_functions.get(&key) {
+                    self.build_specialized_function_body(&function, llvm_fn, variant)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the body of a specialized (monomorphized) function variant.
+    /// Parameters arrive as native types (i64 for Int, double for Float) — no unboxing needed.
+    /// The body is emitted through the standard path; native arithmetic kicks in since params
+    /// are marked as NativeInt/NativeFloat. The return value is converted to native type.
+    fn build_specialized_function_body(
+        &mut self,
+        function: &Function,
+        llvm_fn: FunctionValue<'ctx>,
+        variant: &MonomorphVariant,
+    ) -> Result<(), Diagnostic> {
+        let entry = self.context.append_basic_block(llvm_fn, "entry");
+        self.builder.position_at_end(entry);
+        self.ensure_globals_initialized();
+
+        let mut non_escaping = HashSet::new();
+        for key in self.escape_info.non_escaping.iter() {
+            if key.0 == function.name {
+                non_escaping.insert(key.1.clone());
+            }
+        }
+
+        let mut ctx = FunctionContext {
+            variables: HashMap::new(),
+            variable_allocas: HashMap::new(),
+            function: llvm_fn,
+            loop_stack: Vec::new(),
+            di_scope: None,
+            fn_name: function.name.clone(),
+            in_tail_position: false,
+            cse_cache: HashMap::new(),
+            lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: non_escaping,
+            specialized_return_type: Some(variant.return_type.clone()),
+        };
+        self.current_fn_name = Some(function.name.clone());
+
+        // Store params directly as native — NO unboxing needed
+        for (i, param_ast) in function.params.iter().enumerate() {
+            let param = llvm_fn.get_nth_param(i as u32).unwrap();
+            match &variant.param_types[i] {
+                TypeId::Primitive(Primitive::Int) => {
+                    let native_int = param.into_int_value();
+                    self.store_variable_native_int(&mut ctx, &param_ast.name, native_int);
+                }
+                TypeId::Primitive(Primitive::Float) => {
+                    let native_float = param.into_float_value();
+                    self.store_variable_native_float(&mut ctx, &param_ast.name, native_float);
+                }
+                _ => {
+                    let value_nb = param.into_int_value();
+                    self.store_variable(&mut ctx, &param_ast.name, value_nb);
+                }
+            }
+        }
+
+        ctx.in_tail_position = true;
+        let block_value = self.emit_block(&mut ctx, &function.body)?;
+        ctx.in_tail_position = false;
+
+        // Convert the NaN-boxed return value to the specialized return type
+        match &variant.return_type {
+            TypeId::Primitive(Primitive::Int) => {
+                let native_result = self.unbox_to_native_int(block_value);
+                self.builder.build_return(Some(&native_result)).unwrap();
+            }
+            TypeId::Primitive(Primitive::Float) => {
+                let native_result = self.value_to_number_fast(block_value);
+                self.builder.build_return(Some(&native_result)).unwrap();
+            }
+            _ => {
+                self.builder.build_return(Some(&block_value)).unwrap();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Determine the static type of a call argument for monomorphization dispatch.
+    fn infer_call_arg_type(&self, ctx: &FunctionContext<'ctx>, expr: &Expression) -> TypeId {
+        match expr {
+            Expression::Integer(_, _) => TypeId::Primitive(Primitive::Int),
+            Expression::Float(_, _) => TypeId::Primitive(Primitive::Float),
+            Expression::Bool(_, _) => TypeId::Primitive(Primitive::Bool),
+            Expression::Identifier(name, _) => {
+                if self.var_is_native_int(ctx, name) {
+                    return TypeId::Primitive(Primitive::Int);
+                }
+                if self.var_is_native_float(ctx, name) {
+                    return TypeId::Primitive(Primitive::Float);
+                }
+                // Check resolved types
+                if let Some(ty) = self.resolved_locals.get(&(ctx.fn_name.clone(), name.clone())) {
+                    return ty.clone();
+                }
+                if let Some(ty) = self.resolved_types.get(name.as_str()) {
+                    return ty.clone();
+                }
+                TypeId::Unknown
+            }
+            Expression::Call { callee, .. } => {
+                if let Expression::Identifier(name, _) = callee.as_ref() {
+                    if let Some(ty) = self.resolved_returns.get(name.as_str()) {
+                        return ty.clone();
+                    }
+                }
+                TypeId::Unknown
+            }
+            Expression::Binary {
+                op, left, right, ..
+            } => {
+                if matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                ) {
+                    if self.expr_is_int(ctx, left) && self.expr_is_int(ctx, right) {
+                        return TypeId::Primitive(Primitive::Int);
+                    }
+                }
+                TypeId::Unknown
+            }
+            Expression::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+                ..
+            } => {
+                if self.expr_is_int(ctx, inner) {
+                    TypeId::Primitive(Primitive::Int)
+                } else {
+                    TypeId::Unknown
+                }
+            }
+            _ => TypeId::Unknown,
+        }
+    }
+
+    /// Emit a call to a specialized (monomorphized) function variant.
+    /// Arguments are emitted as native types, and the native return is converted to NaN-boxed.
+    fn emit_specialized_call(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        spec_fn: FunctionValue<'ctx>,
+        variant: &MonomorphVariant,
+        args: &[Expression],
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        let mut arg_values: Vec<BasicMetadataValueEnum> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let saved_tail = ctx.in_tail_position;
+            ctx.in_tail_position = false;
+            match &variant.param_types[i] {
+                TypeId::Primitive(Primitive::Int) => {
+                    let val = self.emit_expression_as_native_int(ctx, arg)?;
+                    arg_values.push(val.into());
+                }
+                TypeId::Primitive(Primitive::Float) => {
+                    let boxed = self.emit_expression(ctx, arg)?;
+                    let native = self.value_to_number_fast(boxed);
+                    arg_values.push(native.into());
+                }
+                _ => {
+                    let val = self.emit_expression(ctx, arg)?;
+                    arg_values.push(val.into());
+                }
+            }
+            ctx.in_tail_position = saved_tail;
+        }
+
+        let call = self
+            .builder
+            .build_call(spec_fn, &arg_values, "mono_call")
+            .unwrap();
+
+        let result = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| Diagnostic::new("specialized call produced no value", Span::new(0, 0)))?;
+
+        // Convert native return to NaN-boxed i64
+        match &variant.return_type {
+            TypeId::Primitive(Primitive::Int) => Ok(self.box_native_int(result.into_int_value())),
+            TypeId::Primitive(Primitive::Float) => {
+                Ok(self.wrap_number_unchecked(result.into_float_value()))
+            }
+            _ => Ok(result.into_int_value()),
+        }
+    }
+
     fn build_function_body(
         &mut self,
         function: &Function,
@@ -1316,8 +1749,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if function.name != "main" {
             let stmt_count =
                 function.body.statements.len() + if function.body.value.is_some() { 1 } else { 0 };
-            if stmt_count <= 5 && !Self::body_calls_self(&function.body, &function.name) {
+            if stmt_count <= 8 && !Self::body_calls_self(&function.body, &function.name) {
                 let kind_id = Attribute::get_named_enum_kind_id("alwaysinline");
+                let attr = self.context.create_enum_attribute(kind_id, 0);
+                llvm_fn.add_attribute(AttributeLoc::Function, attr);
+            } else if stmt_count <= 20 && !Self::body_calls_self(&function.body, &function.name) {
+                let kind_id = Attribute::get_named_enum_kind_id("inlinehint");
                 let attr = self.context.create_enum_attribute(kind_id, 0);
                 llvm_fn.add_attribute(AttributeLoc::Function, attr);
             }
@@ -1350,6 +1787,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let entry = self.context.append_basic_block(llvm_fn, "entry");
         self.builder.position_at_end(entry);
         self.ensure_globals_initialized();
+        let mut non_escaping = HashSet::new();
+        for key in self.escape_info.non_escaping.iter() {
+            if key.0 == function.name {
+                non_escaping.insert(key.1.clone());
+            }
+        }
+
         let mut ctx = FunctionContext {
             variables: HashMap::new(),
             variable_allocas: HashMap::new(),
@@ -1360,10 +1804,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: non_escaping,
+            specialized_return_type: None,
         };
+        self.current_fn_name = Some(function.name.clone());
 
-        for (param, param_ast) in llvm_fn.get_param_iter().zip(function.params.iter()) {
+        for (i, (param, param_ast)) in llvm_fn.get_param_iter().zip(function.params.iter()).enumerate() {
             let value_nb = param.into_int_value();
+            // Check if this parameter has a known specialized type
+            if let Some(ty) = self.resolved_params.get(&(function.name.clone(), i)) {
+                match ty {
+                    TypeId::Primitive(Primitive::Int) => {
+                        let native_int = self.unbox_to_native_int(value_nb);
+                        self.store_variable_native_int(&mut ctx, &param_ast.name, native_int);
+                        continue;
+                    }
+                    TypeId::Primitive(Primitive::Float) => {
+                        let native_float = self.value_to_number_fast(value_nb);
+                        self.store_variable_native_float(&mut ctx, &param_ast.name, native_float);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             self.store_variable(&mut ctx, &param_ast.name, value_nb);
         }
 
@@ -1393,7 +1857,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: HashSet::new(),
+            specialized_return_type: None,
         };
+        self.current_fn_name = Some(function.name.clone());
 
         let state_val = llvm_fn.get_nth_param(0).unwrap().into_int_value();
         self.store_variable(&mut ctx, "self", state_val);
@@ -1418,6 +1886,43 @@ impl<'ctx> CodeGenerator<'ctx> {
         for stmt in &block.statements {
             match stmt {
                 Statement::Binding(binding) => {
+                    // Check if this binding should use native (unboxed) representation
+                    // BEFORE calling emit_expression, to avoid box/unbox round-trips
+                    let fn_name = ctx.fn_name.clone();
+                    let var_name = binding.name.clone();
+                    let mut handled_native = false;
+                    if let Some(ty) = self.resolved_locals.get(&(fn_name, var_name.clone())) {
+                        match ty {
+                            TypeId::Primitive(Primitive::Int) => {
+                                if self.expr_is_int(ctx, &binding.value) {
+                                    // Fast path: evaluate directly as native i64
+                                    let native = self.emit_expression_as_native_int(ctx, &binding.value)?;
+                                    self.store_variable_native_int(ctx, &binding.name, native);
+                                } else {
+                                    // Slow path: evaluate as boxed, then unbox
+                                    let value = self.emit_expression(ctx, &binding.value)?;
+                                    let native = self.unbox_to_native_int(value);
+                                    self.store_variable_native_int(ctx, &binding.name, native);
+                                }
+                                let var_key = format!("v:{}", binding.name);
+                                ctx.cse_cache.retain(|k, _| !k.contains(&var_key));
+                                handled_native = true;
+                            }
+                            TypeId::Primitive(Primitive::Float) => {
+                                let value = self.emit_expression(ctx, &binding.value)?;
+                                let native = self.value_to_number_fast(value);
+                                self.store_variable_native_float(ctx, &binding.name, native);
+                                let var_key = format!("v:{}", binding.name);
+                                ctx.cse_cache.retain(|k, _| !k.contains(&var_key));
+                                handled_native = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if handled_native {
+                        continue;
+                    }
+
                     let hint_byte = self
                         .allocation_hints
                         .get(&binding.name)
@@ -1432,6 +1937,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                         _ => self.emit_expression(ctx, &binding.value)?,
                     };
+
                     self.store_variable(ctx, &binding.name, value);
 
                     let var_key = format!("v:{}", binding.name);
@@ -1449,6 +1955,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         let result_ptr = self.nb_to_ptr(value);
                         self.builder.build_store(out_ptr, result_ptr).unwrap();
                         self.builder.build_return(None).unwrap();
+                    } else if let Some(ref ret_ty) = ctx.specialized_return_type {
+                        match ret_ty {
+                            TypeId::Primitive(Primitive::Int) => {
+                                let native = self.unbox_to_native_int(value);
+                                self.builder.build_return(Some(&native)).unwrap();
+                            }
+                            TypeId::Primitive(Primitive::Float) => {
+                                let native = self.value_to_number_fast(value);
+                                self.builder.build_return(Some(&native)).unwrap();
+                            }
+                            _ => {
+                                self.builder.build_return(Some(&value)).unwrap();
+                            }
+                        }
                     } else {
                         self.builder.build_return(Some(&value)).unwrap();
                     }
@@ -1463,13 +1983,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     let function = ctx.function;
-                    let cond_is_bool = self.expr_is_bool(condition);
-                    let cond_value = self.emit_expression(ctx, condition)?;
-                    let cond_bool = if cond_is_bool {
-                        self.value_to_bool_fast(cond_value)
-                    } else {
-                        self.value_to_bool(cond_value)
-                    };
+                    let cond_bool =
+                        if let Some(i1_val) = self.try_emit_condition_i1(ctx, condition)? {
+                            i1_val
+                        } else {
+                            let cond_is_bool = self.expr_is_bool(condition);
+                            let cond_value = self.emit_expression(ctx, condition)?;
+                            if cond_is_bool {
+                                self.value_to_bool_fast(cond_value)
+                            } else {
+                                self.value_to_bool(cond_value)
+                            }
+                        };
 
                     let then_bb = self.context.append_basic_block(function, "if_then");
                     let merge_bb = self.context.append_basic_block(function, "if_merge");
@@ -1601,22 +2126,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .unwrap();
 
                     self.builder.position_at_end(loop_header);
-                    let while_cond_is_bool = self.expr_is_bool(condition);
-                    let cond_value = self.emit_expression(ctx, condition)?;
-                    let cond_bool = if while_cond_is_bool {
-                        self.value_to_bool_fast(cond_value)
-                    } else {
-                        self.value_to_bool(cond_value)
-                    };
+                    let cond_bool =
+                        if let Some(i1_val) = self.try_emit_condition_i1(ctx, condition)? {
+                            i1_val
+                        } else {
+                            let while_cond_is_bool = self.expr_is_bool(condition);
+                            let cond_value = self.emit_expression(ctx, condition)?;
+                            if while_cond_is_bool {
+                                self.value_to_bool_fast(cond_value)
+                            } else {
+                                self.value_to_bool(cond_value)
+                            }
+                        };
                     self.builder
                         .build_conditional_branch(cond_bool, loop_body, loop_exit)
                         .unwrap();
 
                     self.builder.position_at_end(loop_body);
 
-                    self.builder
-                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
-                        .unwrap();
+                    if self.uses_actors {
+                        self.builder
+                            .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                            .unwrap();
+                    }
                     ctx.cse_cache.clear();
                     ctx.loop_stack.push((loop_header, loop_exit));
                     self.emit_block(ctx, body)?;
@@ -1644,79 +2176,175 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let function = ctx.function;
                     let iter_value = self.emit_expression(ctx, iterable)?;
 
-                    let iter_ptr = self.nb_to_ptr(iter_value);
-                    let iter = self.call_runtime_ptr(
-                        self.runtime.value_iter,
-                        &[iter_ptr.into()],
-                        "for_iter",
-                    );
+                    // Determine if iterable is a known list at compile time
+                    let known_list = self.expr_is_known_list(ctx, iterable);
 
-                    let loop_header = self.context.append_basic_block(function, "for_cond");
-                    let loop_body = self.context.append_basic_block(function, "for_body");
-                    let loop_exit = self.context.append_basic_block(function, "for_exit");
+                    if known_list {
+                        // ── Fast path: direct counted loop over list items ──
+                        let list_ptr = self.nb_extract_heap_ptr(iter_value);
 
-                    self.builder
-                        .build_unconditional_branch(loop_header)
-                        .unwrap();
+                        // Get length as usize
+                        let len = self
+                            .builder
+                            .build_call(
+                                self.runtime.list_len,
+                                &[list_ptr.into()],
+                                "for_list_len",
+                            )
+                            .unwrap()
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap()
+                            .into_int_value();
 
-                    self.builder.position_at_end(loop_header);
-                    let elem_ptr = self.call_runtime_ptr(
-                        self.runtime.value_iter_next,
-                        &[iter.into()],
-                        "for_next",
-                    );
+                        let zero = self.usize_type.const_int(0, false);
+                        let one = self.usize_type.const_int(1, false);
 
-                    let tag_ptr = self
-                        .builder
-                        .build_pointer_cast(
-                            elem_ptr,
-                            self.i8_type.ptr_type(AddressSpace::default()),
-                            "tag_ptr",
-                        )
-                        .unwrap();
-                    let tag_val = self
-                        .builder
-                        .build_load(self.i8_type, tag_ptr, "tag_val")
-                        .unwrap()
-                        .into_int_value();
-                    let unit_tag = self.i8_type.const_int(7, false);
-                    let is_done = self
-                        .builder
-                        .build_int_compare(IntPredicate::EQ, tag_val, unit_tag, "for_done")
-                        .unwrap();
-                    self.builder
-                        .build_conditional_branch(is_done, loop_exit, loop_body)
-                        .unwrap();
+                        // Allocate counter
+                        let counter = self.builder.build_alloca(self.usize_type, "for_idx").unwrap();
+                        self.builder.build_store(counter, zero).unwrap();
 
-                    self.builder.position_at_end(loop_body);
+                        let loop_header = self.context.append_basic_block(function, "for_list_cond");
+                        let loop_body = self.context.append_basic_block(function, "for_list_body");
+                        let loop_exit = self.context.append_basic_block(function, "for_list_exit");
 
-                    self.builder
-                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
-                        .unwrap();
-                    ctx.cse_cache.clear();
-                    let elem_nb = self.ptr_to_nb(elem_ptr);
-                    self.store_variable(ctx, variable, elem_nb);
-                    ctx.loop_stack.push((loop_header, loop_exit));
-                    self.emit_block(ctx, body)?;
-                    ctx.loop_stack.pop();
-                    if self
-                        .builder
-                        .get_insert_block()
-                        .unwrap()
-                        .get_terminator()
-                        .is_none()
-                    {
-                        self.builder
-                            .build_unconditional_branch(loop_header)
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+                        // Loop header: check i < len
+                        self.builder.position_at_end(loop_header);
+                        let idx = self
+                            .builder
+                            .build_load(self.usize_type, counter, "for_i")
+                            .unwrap()
+                            .into_int_value();
+                        let cmp = self
+                            .builder
+                            .build_int_compare(IntPredicate::ULT, idx, len, "for_list_done")
                             .unwrap();
-                    }
+                        self.builder
+                            .build_conditional_branch(cmp, loop_body, loop_exit)
+                            .unwrap();
 
-                    self.builder.position_at_end(loop_exit);
-                    self.call_runtime_void(
-                        self.runtime.value_release,
-                        &[iter.into()],
-                        "release_iter",
-                    );
+                        // Loop body: get element, run body, increment counter
+                        self.builder.position_at_end(loop_body);
+
+                        if self.uses_actors {
+                            self.builder
+                                .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                                .unwrap();
+                        }
+                        ctx.cse_cache.clear();
+
+                        let elem_nb = self.call_nb(
+                            self.runtime.list_get_nb,
+                            &[list_ptr.into(), idx.into()],
+                            "for_list_elem",
+                        );
+                        self.store_variable(ctx, variable, elem_nb);
+
+                        ctx.loop_stack.push((loop_header, loop_exit));
+                        self.emit_block(ctx, body)?;
+                        ctx.loop_stack.pop();
+
+                        // Increment counter and branch back
+                        if self
+                            .builder
+                            .get_insert_block()
+                            .unwrap()
+                            .get_terminator()
+                            .is_none()
+                        {
+                            let next_idx = self
+                                .builder
+                                .build_int_add(
+                                    self.builder
+                                        .build_load(self.usize_type, counter, "for_i_cur")
+                                        .unwrap()
+                                        .into_int_value(),
+                                    one,
+                                    "for_i_next",
+                                )
+                                .unwrap();
+                            self.builder.build_store(counter, next_idx).unwrap();
+                            self.builder.build_unconditional_branch(loop_header).unwrap();
+                        }
+
+                        self.builder.position_at_end(loop_exit);
+                        // nb_extract_heap_ptr does not retain, so no release needed
+                    } else {
+                        // ── Fallback: runtime iterator-based loop (original path) ──
+                        let iter_ptr = self.nb_to_ptr(iter_value);
+                        let iter = self.call_runtime_ptr(
+                            self.runtime.value_iter,
+                            &[iter_ptr.into()],
+                            "for_iter",
+                        );
+
+                        let loop_header = self.context.append_basic_block(function, "for_cond");
+                        let loop_body = self.context.append_basic_block(function, "for_body");
+                        let loop_exit = self.context.append_basic_block(function, "for_exit");
+
+                        self.builder.build_unconditional_branch(loop_header).unwrap();
+
+                        self.builder.position_at_end(loop_header);
+                        let elem_ptr = self.call_runtime_ptr(
+                            self.runtime.value_iter_next,
+                            &[iter.into()],
+                            "for_next",
+                        );
+                        let tag_ptr = self
+                            .builder
+                            .build_pointer_cast(
+                                elem_ptr,
+                                self.i8_type.ptr_type(AddressSpace::default()),
+                                "tag_ptr",
+                            )
+                            .unwrap();
+                        let tag_val = self
+                            .builder
+                            .build_load(self.i8_type, tag_ptr, "tag_val")
+                            .unwrap()
+                            .into_int_value();
+                        let unit_tag = self.i8_type.const_int(7, false);
+                        let is_done = self
+                            .builder
+                            .build_int_compare(IntPredicate::EQ, tag_val, unit_tag, "for_done")
+                            .unwrap();
+                        self.builder
+                            .build_conditional_branch(is_done, loop_exit, loop_body)
+                            .unwrap();
+
+                        self.builder.position_at_end(loop_body);
+                        if self.uses_actors {
+                            self.builder
+                                .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                                .unwrap();
+                        }
+                        ctx.cse_cache.clear();
+                        let elem_nb = self.ptr_to_nb(elem_ptr);
+                        self.store_variable(ctx, variable, elem_nb);
+
+                        ctx.loop_stack.push((loop_header, loop_exit));
+                        self.emit_block(ctx, body)?;
+                        ctx.loop_stack.pop();
+
+                        if self
+                            .builder
+                            .get_insert_block()
+                            .unwrap()
+                            .get_terminator()
+                            .is_none()
+                        {
+                            self.builder.build_unconditional_branch(loop_header).unwrap();
+                        }
+
+                        self.builder.position_at_end(loop_exit);
+                        self.call_runtime_void(
+                            self.runtime.value_release,
+                            &[iter.into()],
+                            "release_iter",
+                        );
+                    }
                 }
                 Statement::ForKV {
                     key_var,
@@ -1776,13 +2404,15 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                     self.builder.position_at_end(loop_body);
 
-                    self.builder
-                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
-                        .unwrap();
+                    if self.uses_actors {
+                        self.builder
+                            .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                            .unwrap();
+                    }
                     ctx.cse_cache.clear();
                     let pair_nb = self.ptr_to_nb(elem_ptr);
-                    let index_zero = self.wrap_number(self.f64_type.const_float(0.0));
-                    let index_one = self.wrap_number(self.f64_type.const_float(1.0));
+                    let index_zero = self.wrap_number_unchecked(self.f64_type.const_float(0.0));
+                    let index_one = self.wrap_number_unchecked(self.f64_type.const_float(1.0));
                     let key_nb = self.call_bridged(
                         self.runtime.list_get,
                         &[pair_nb, index_zero],
@@ -1826,86 +2456,215 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     let function = ctx.function;
-                    let start_val = self.emit_expression(ctx, start)?;
-                    let end_val = self.emit_expression(ctx, end)?;
-                    let step_f64 = if let Some(step_expr) = step {
-                        let step_nb = self.emit_expression(ctx, step_expr)?;
-                        self.value_to_number(step_nb)
-                    } else {
-                        self.f64_type.const_float(1.0)
-                    };
+                    let start_is_int = self.expr_is_int(ctx, start);
+                    let end_is_int = self.expr_is_int(ctx, end);
+                    let step_is_int = step
+                        .as_ref()
+                        .map(|s| self.expr_is_int(ctx, s))
+                        .unwrap_or(true);
+                    let use_native_int = start_is_int && end_is_int && step_is_int;
+                    let start_is_num = use_native_int || self.expr_is_numeric(start);
+                    let end_is_num = use_native_int || self.expr_is_numeric(end);
+                    let fast_path = start_is_num && end_is_num;
 
-                    let start_f64 = self.value_to_number(start_val);
-                    let end_f64 = self.value_to_number(end_val);
+                    if use_native_int {
+                        // === Native i64 loop path ===
+                        let start_i64 = self.emit_expression_as_native_int(ctx, start)?;
+                        let end_i64 = self.emit_expression_as_native_int(ctx, end)?;
+                        let step_i64 = if let Some(step_expr) = step {
+                            self.emit_expression_as_native_int(ctx, step_expr)?
+                        } else {
+                            self.runtime.value_i64_type.const_int(1, false)
+                        };
 
-                    let counter_alloca = self
-                        .builder
-                        .build_alloca(self.f64_type, "for_range_counter")
-                        .unwrap();
-                    self.builder.build_store(counter_alloca, start_f64).unwrap();
-
-                    let loop_header = self.context.append_basic_block(function, "for_range_cond");
-                    let loop_body = self.context.append_basic_block(function, "for_range_body");
-                    let loop_exit = self.context.append_basic_block(function, "for_range_exit");
-
-                    self.builder
-                        .build_unconditional_branch(loop_header)
-                        .unwrap();
-
-                    self.builder.position_at_end(loop_header);
-                    let current = self
-                        .builder
-                        .build_load(self.f64_type, counter_alloca, "cur")
-                        .unwrap()
-                        .into_float_value();
-                    let is_done = self
-                        .builder
-                        .build_float_compare(
-                            inkwell::FloatPredicate::OGE,
-                            current,
-                            end_f64,
-                            "for_range_done",
-                        )
-                        .unwrap();
-                    self.builder
-                        .build_conditional_branch(is_done, loop_exit, loop_body)
-                        .unwrap();
-
-                    self.builder.position_at_end(loop_body);
-
-                    self.builder
-                        .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
-                        .unwrap();
-                    ctx.cse_cache.clear();
-                    let counter_nb = self.wrap_number(current);
-                    self.store_variable(ctx, variable, counter_nb);
-                    ctx.loop_stack.push((loop_header, loop_exit));
-                    self.emit_block(ctx, body)?;
-                    ctx.loop_stack.pop();
-
-                    if self
-                        .builder
-                        .get_insert_block()
-                        .unwrap()
-                        .get_terminator()
-                        .is_none()
-                    {
-                        let updated_current = self
+                        let counter_alloca = self
                             .builder
-                            .build_load(self.f64_type, counter_alloca, "cur_upd")
-                            .unwrap()
-                            .into_float_value();
-                        let next = self
-                            .builder
-                            .build_float_add(updated_current, step_f64, "next_counter")
+                            .build_alloca(self.runtime.value_i64_type, "for_irange_counter")
                             .unwrap();
-                        self.builder.build_store(counter_alloca, next).unwrap();
+                        self.builder
+                            .build_store(counter_alloca, start_i64)
+                            .unwrap();
+
+                        let loop_header =
+                            self.context.append_basic_block(function, "for_irange_cond");
+                        let loop_body =
+                            self.context.append_basic_block(function, "for_irange_body");
+                        let loop_exit =
+                            self.context.append_basic_block(function, "for_irange_exit");
+
                         self.builder
                             .build_unconditional_branch(loop_header)
                             .unwrap();
-                    }
 
-                    self.builder.position_at_end(loop_exit);
+                        self.builder.position_at_end(loop_header);
+                        let current = self
+                            .builder
+                            .build_load(
+                                self.runtime.value_i64_type,
+                                counter_alloca,
+                                "icur",
+                            )
+                            .unwrap()
+                            .into_int_value();
+                        let is_done = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::SGE,
+                                current,
+                                end_i64,
+                                "for_irange_done",
+                            )
+                            .unwrap();
+                        self.builder
+                            .build_conditional_branch(is_done, loop_exit, loop_body)
+                            .unwrap();
+
+                        self.builder.position_at_end(loop_body);
+
+                        if self.uses_actors {
+                            self.builder
+                                .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                                .unwrap();
+                        }
+                        ctx.cse_cache.clear();
+
+                        // Store loop variable as native int
+                        self.store_variable_native_int(ctx, variable, current);
+                        ctx.loop_stack.push((loop_header, loop_exit));
+                        self.emit_block(ctx, body)?;
+                        ctx.loop_stack.pop();
+
+                        if self
+                            .builder
+                            .get_insert_block()
+                            .unwrap()
+                            .get_terminator()
+                            .is_none()
+                        {
+                            let updated_current = self
+                                .builder
+                                .build_load(
+                                    self.runtime.value_i64_type,
+                                    counter_alloca,
+                                    "icur_upd",
+                                )
+                                .unwrap()
+                                .into_int_value();
+                            let next = self
+                                .builder
+                                .build_int_add(updated_current, step_i64, "inext_counter")
+                                .unwrap();
+                            self.builder.build_store(counter_alloca, next).unwrap();
+                            self.builder
+                                .build_unconditional_branch(loop_header)
+                                .unwrap();
+                        }
+
+                        self.builder.position_at_end(loop_exit);
+                    } else {
+                        // === Original f64 loop path ===
+                        let start_val = self.emit_expression(ctx, start)?;
+                        let end_val = self.emit_expression(ctx, end)?;
+                        let step_f64 = if let Some(step_expr) = step {
+                            let step_nb = self.emit_expression(ctx, step_expr)?;
+                            if self.expr_is_numeric(step_expr) {
+                                self.value_to_number_fast(step_nb)
+                            } else {
+                                self.value_to_number(step_nb)
+                            }
+                        } else {
+                            self.f64_type.const_float(1.0)
+                        };
+
+                        let start_f64 = if fast_path {
+                            self.value_to_number_fast(start_val)
+                        } else {
+                            self.value_to_number(start_val)
+                        };
+                        let end_f64 = if fast_path {
+                            self.value_to_number_fast(end_val)
+                        } else {
+                            self.value_to_number(end_val)
+                        };
+
+                        let counter_alloca = self
+                            .builder
+                            .build_alloca(self.f64_type, "for_range_counter")
+                            .unwrap();
+                        self.builder.build_store(counter_alloca, start_f64).unwrap();
+
+                        let loop_header =
+                            self.context.append_basic_block(function, "for_range_cond");
+                        let loop_body =
+                            self.context.append_basic_block(function, "for_range_body");
+                        let loop_exit =
+                            self.context.append_basic_block(function, "for_range_exit");
+
+                        self.builder
+                            .build_unconditional_branch(loop_header)
+                            .unwrap();
+
+                        self.builder.position_at_end(loop_header);
+                        let current = self
+                            .builder
+                            .build_load(self.f64_type, counter_alloca, "cur")
+                            .unwrap()
+                            .into_float_value();
+                        let is_done = self
+                            .builder
+                            .build_float_compare(
+                                inkwell::FloatPredicate::OGE,
+                                current,
+                                end_f64,
+                                "for_range_done",
+                            )
+                            .unwrap();
+                        self.builder
+                            .build_conditional_branch(is_done, loop_exit, loop_body)
+                            .unwrap();
+
+                        self.builder.position_at_end(loop_body);
+
+                        if self.uses_actors {
+                            self.builder
+                                .build_call(self.runtime.actor_yield_check, &[], "yield_chk")
+                                .unwrap();
+                        }
+                        ctx.cse_cache.clear();
+                        let counter_nb = self.wrap_number_unchecked(current);
+                        self.store_variable(ctx, variable, counter_nb);
+                        ctx.loop_stack.push((loop_header, loop_exit));
+                        self.emit_block(ctx, body)?;
+                        ctx.loop_stack.pop();
+
+                        if self
+                            .builder
+                            .get_insert_block()
+                            .unwrap()
+                            .get_terminator()
+                            .is_none()
+                        {
+                            let updated_current = self
+                                .builder
+                                .build_load(self.f64_type, counter_alloca, "cur_upd")
+                                .unwrap()
+                                .into_float_value();
+                            let next = self
+                                .builder
+                                .build_float_add(
+                                    updated_current,
+                                    step_f64,
+                                    "next_counter",
+                                )
+                                .unwrap();
+                            self.builder.build_store(counter_alloca, next).unwrap();
+                            self.builder
+                                .build_unconditional_branch(loop_header)
+                                .unwrap();
+                        }
+
+                        self.builder.position_at_end(loop_exit);
+                    }
                 }
                 Statement::FieldAssign {
                     target,
@@ -1914,44 +2673,71 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ..
                 } => {
                     let target_value = self.emit_expression(ctx, &target)?;
-                    let key_value = self.emit_string_literal(&field);
                     let new_value = self.emit_expression(ctx, &value)?;
 
-                    let target_ptr = self.nb_to_ptr(target_value);
-                    let key_ptr = self.nb_to_ptr(key_value);
-                    let new_ptr = self.nb_to_ptr(new_value);
-
+                    let mut used_struct_set = false;
                     if let Expression::Identifier(name, _) = &target {
-                        if name == "self" {
-                            let is_ref = self
-                                .reference_fields
-                                .iter()
-                                .any(|(_, f)| f == field.as_str());
-                            if is_ref {
-                                let old_value = self.call_runtime_ptr(
-                                    self.runtime.map_get,
-                                    &[target_ptr.into(), key_ptr.into()],
-                                    "old_field_value",
-                                );
-                                self.call_runtime_void(
-                                    self.runtime.value_release,
-                                    &[old_value.into()],
-                                    "release_old",
-                                );
-                                self.call_runtime_void(
-                                    self.runtime.value_retain,
-                                    &[new_ptr.into()],
-                                    "retain_new",
-                                );
+                        let store_name_opt = if name == "self" {
+                            self.current_store_name.clone()
+                        } else if let Some(crate::types::core::TypeId::Store(sn)) =
+                            self.resolved_types.get(name.as_str())
+                        {
+                            Some(sn.clone())
+                        } else if let Some(crate::types::core::TypeId::Store(sn)) =
+                            self.resolved_locals.get(&(ctx.fn_name.clone(), name.clone()))
+                        {
+                            Some(sn.clone())
+                        } else {
+                            self.current_store_name.clone()
+                        };
+                        if let Some(store_name) = store_name_opt {
+                            if let Some(&idx) =
+                                self.store_field_indices.get(&(store_name, field.clone()))
+                            {
+                                self.inline_struct_set_nb(target_value, idx as u64, new_value);
+                                used_struct_set = true;
                             }
                         }
                     }
 
-                    self.call_runtime_ptr(
-                        self.runtime.map_set,
-                        &[target_ptr.into(), key_ptr.into(), new_ptr.into()],
-                        "map_set_field",
-                    );
+                    if !used_struct_set {
+                        let key_value = self.emit_string_literal(&field);
+                        let target_ptr = self.nb_to_ptr(target_value);
+                        let key_ptr = self.nb_to_ptr(key_value);
+                        let new_ptr = self.nb_to_ptr(new_value);
+
+                        if let Expression::Identifier(name, _) = &target {
+                            if name == "self" {
+                                let is_ref = self
+                                    .reference_fields
+                                    .iter()
+                                    .any(|(_, f)| f == field.as_str());
+                                if is_ref {
+                                    let old_value = self.call_runtime_ptr(
+                                        self.runtime.map_get,
+                                        &[target_ptr.into(), key_ptr.into()],
+                                        "old_field_value",
+                                    );
+                                    self.call_runtime_void(
+                                        self.runtime.value_release,
+                                        &[old_value.into()],
+                                        "release_old",
+                                    );
+                                    self.call_runtime_void(
+                                        self.runtime.value_retain,
+                                        &[new_ptr.into()],
+                                        "retain_new",
+                                    );
+                                }
+                            }
+                        }
+
+                        self.call_runtime_ptr(
+                            self.runtime.map_set,
+                            &[target_ptr.into(), key_ptr.into(), new_ptr.into()],
+                            "map_set_field",
+                        );
+                    }
 
                     if let Expression::Identifier(name, _) = &target {
                         let var_key = format!("v:{}", name);
@@ -1991,7 +2777,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(expr) = &block.value {
             self.emit_expression(ctx, expr.as_ref())
         } else {
-            Ok(self.wrap_number(self.f64_type.const_float(0.0)))
+            // 0.0 as f64 bits = 0 as i64, which is the NaN-boxed representation of 0.0
+            Ok(self.runtime.value_i64_type.const_zero())
         }
     }
 
@@ -2106,12 +2893,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         match expr {
             Expression::Integer(value, _) => {
-                // For integer literals, compute the NaN-boxed bits at compile time
                 let f = *value as f64;
                 let bits = f.to_bits();
-                // Check if this value would be a quiet NaN (extremely rare for integers)
                 Ok(if (bits & 0xFFF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
-                    self.runtime.value_i64_type.const_int(0x7FFB_8000_0000_0000, false)
+                    self.runtime
+                        .value_i64_type
+                        .const_int(0x7FFB_8000_0000_0000, false)
                 } else {
                     self.runtime.value_i64_type.const_int(bits, false)
                 })
@@ -2119,7 +2906,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expression::Float(value, _) => {
                 let bits = value.to_bits();
                 Ok(if (bits & 0xFFF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
-                    self.runtime.value_i64_type.const_int(0x7FFB_8000_0000_0000, false)
+                    self.runtime
+                        .value_i64_type
+                        .const_int(0x7FFB_8000_0000_0000, false)
                 } else {
                     self.runtime.value_i64_type.const_int(bits, false)
                 })
@@ -2152,7 +2941,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let saved_tail = ctx.in_tail_position;
                     ctx.in_tail_position = false;
 
-                    let both_numeric = self.expr_is_numeric(left) && self.expr_is_numeric(right);
+                    let both_int = self.expr_is_int(ctx, left) && self.expr_is_int(ctx, right);
+                    let both_numeric = both_int || (self.expr_is_numeric(left) && self.expr_is_numeric(right));
+
+                    if both_int && matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Equals | BinaryOp::NotEquals | BinaryOp::Less | BinaryOp::LessEq | BinaryOp::Greater | BinaryOp::GreaterEq) {
+                        let lhs = self.emit_expression_as_native_int(ctx, left)?;
+                        let rhs = self.emit_expression_as_native_int(ctx, right)?;
+                        ctx.in_tail_position = saved_tail;
+                        return self.emit_native_int_binary(*op, lhs, rhs);
+                    }
+
                     let lhs = self.emit_expression(ctx, left)?;
                     let rhs = self.emit_expression(ctx, right)?;
                     ctx.in_tail_position = saved_tail;
@@ -2170,7 +2968,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         if self.expr_is_numeric(expr) {
                             let as_number = self.value_to_number_fast(value);
                             let neg = self.builder.build_float_neg(as_number, "neg_fast").unwrap();
-                            Ok(self.wrap_number_fast(neg))
+                            Ok(self.wrap_number_unchecked(neg))
                         } else {
                             let as_number = self.value_to_number(value);
                             let neg = self.builder.build_float_neg(as_number, "neg").unwrap();
@@ -2224,7 +3022,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } = callee.as_ref()
                 {
                     let result = self.emit_member_call(ctx, target, property, args, *span);
-                    // Member calls (e.g. .push, .set) may mutate state
                     ctx.cse_cache.clear();
                     return result;
                 }
@@ -2260,6 +3057,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                             return self.wrap_extern_return(ret_val, *ret_ty, expr.span());
                         } else {
                             return Ok(self.wrap_unit());
+                        }
+                    }
+
+                    // ── Monomorphization: try specialized variant first ──
+                    if self.monomorph_info.candidates.contains_key(name.as_str()) {
+                        let arg_types: Vec<TypeId> = args
+                            .iter()
+                            .map(|arg| self.infer_call_arg_type(ctx, arg))
+                            .collect();
+                        let key = (name.to_string(), arg_types.clone());
+                        if let Some(&spec_fn) = self.specialized_functions.get(&key) {
+                            if let Some(variants) = self.monomorph_info.candidates.get(name.as_str())
+                            {
+                                if let Some(variant) =
+                                    variants.iter().find(|v| v.param_types == arg_types)
+                                {
+                                    let variant = variant.clone();
+                                    return self
+                                        .emit_specialized_call(ctx, spec_fn, &variant, args);
+                                }
+                            }
                         }
                     }
 
@@ -3098,32 +3916,181 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(self.call_map_with_hint(args, hint))
     }
 
+    /// Check if an expression is known to produce a List value at compile time.
+    /// Handles identifiers with known List types and chained .get() on lists of lists.
+    fn expr_is_known_list(&self, ctx: &FunctionContext<'ctx>, expr: &Expression) -> bool {
+        match expr {
+            Expression::Identifier(name, _) => {
+                // Direct variable with known list type
+                let key = (ctx.fn_name.clone(), name.clone());
+                self.resolved_locals
+                    .get(&key)
+                    .map_or(false, |ty| matches!(ty, TypeId::List(_)))
+                    || self.typed_lists.contains_key(&key)
+                    || self.resolved_types
+                        .get(name.as_str())
+                        .map_or(false, |ty| matches!(ty, TypeId::List(_)))
+            }
+            // Chained .get() on a known list — result is a list if element type is List
+            Expression::Call {
+                callee, args, ..
+            } if args.len() == 1 => {
+                if let Expression::Member { target, property, .. } = callee.as_ref() {
+                    if property == "get" {
+                        // Check if target is a known list whose elements are also lists
+                        if let Expression::Identifier(name, _) = target.as_ref() {
+                            let key = (ctx.fn_name.clone(), name.clone());
+                            if let Some(TypeId::List(elem)) = self.resolved_locals.get(&key) {
+                                return matches!(elem.as_ref(), TypeId::List(_));
+                            }
+                            if let Some(TypeId::List(elem)) = self.resolved_types.get(name.as_str()) {
+                                return matches!(elem.as_ref(), TypeId::List(_));
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            Expression::List(_, _) => true,
+            _ => false,
+        }
+    }
+
+    /// Detect a chained .get().get() pattern where the inner .get() returns a sublist.
+    /// Returns Some((inner_target, inner_args)) if the target is a .get() call on a
+    /// known list-of-lists, meaning the intermediate result is a sublist pointer.
+    fn detect_chained_list_get<'a>(
+        &self,
+        ctx: &FunctionContext<'ctx>,
+        target: &'a Expression,
+    ) -> Option<(&'a Expression, &'a [Expression])> {
+        // target must be Call { callee: Member { target: inner, property: "get" }, args }
+        if let Expression::Call { callee, args, .. } = target {
+            if args.len() == 1 {
+                if let Expression::Member { target: inner, property, .. } = callee.as_ref() {
+                    if property == "get" && self.expr_is_known_list(ctx, inner) {
+                        // Check if the known list's element type is also a List
+                        if let Expression::Identifier(name, _) = inner.as_ref() {
+                            let key = (ctx.fn_name.clone(), name.clone());
+                            if let Some(TypeId::List(elem)) = self.resolved_locals.get(&key) {
+                                if matches!(elem.as_ref(), TypeId::List(_)) {
+                                    return Some((inner, args.as_slice()));
+                                }
+                            }
+                            if let Some(TypeId::List(elem)) = self.resolved_types.get(name.as_str()) {
+                                if matches!(elem.as_ref(), TypeId::List(_)) {
+                                    return Some((inner, args.as_slice()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn expr_is_numeric(&self, expr: &Expression) -> bool {
         match expr {
             Expression::Float(_, _) | Expression::Integer(_, _) => true,
             Expression::Identifier(name, _) => {
-                matches!(
+                if matches!(
                     self.resolved_types.get(name.as_str()),
                     Some(TypeId::Primitive(Primitive::Float))
                         | Some(TypeId::Primitive(Primitive::Int))
-                )
+                ) {
+                    return true;
+                }
+                // Check resolved_locals for local variables in the current function
+                if let Some(ref fn_name) = self.current_fn_name {
+                    if matches!(
+                        self.resolved_locals.get(&(fn_name.clone(), name.clone())),
+                        Some(TypeId::Primitive(Primitive::Float))
+                            | Some(TypeId::Primitive(Primitive::Int))
+                    ) {
+                        return true;
+                    }
+                }
+                false
             }
             Expression::Unary {
-                op: UnaryOp::Neg, ..
-            } => true,
+                op: UnaryOp::Neg,
+                expr: inner,
+                ..
+            } => self.expr_is_numeric(inner),
             Expression::Binary {
                 op, left, right, ..
             } => {
-                // Arithmetic results are numeric if both operands are numeric
-                matches!(
-                    op,
-                    BinaryOp::Add
-                        | BinaryOp::Sub
-                        | BinaryOp::Mul
-                        | BinaryOp::Div
-                        | BinaryOp::Mod
-                ) && self.expr_is_numeric(left)
-                    && self.expr_is_numeric(right)
+                // Sub/Mul/Div/Mod always produce numbers via inline float arithmetic
+                // Add is numeric only when both operands are known numeric (since Add also handles string concat)
+                matches!(op, BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod)
+                    || (matches!(op, BinaryOp::Add)
+                        && self.expr_is_numeric(left)
+                        && self.expr_is_numeric(right))
+            }
+            Expression::Ternary {
+                then_branch,
+                else_branch,
+                ..
+            } => self.expr_is_numeric(then_branch) && self.expr_is_numeric(else_branch),
+            // Member access on a known store where the field has a numeric default
+            Expression::Member {
+                target, property, ..
+            } => {
+                if let Expression::Identifier(name, _) = target.as_ref() {
+                    // Check if a store field from current store context
+                    let store_name_opt = self
+                        .resolved_types
+                        .get(name.as_str())
+                        .and_then(|ty| {
+                            if let TypeId::Store(s) = ty { Some(s.clone()) } else { None }
+                        })
+                        .or_else(|| {
+                            if name == "self" { self.current_store_name.clone() } else { None }
+                        })
+                        .or_else(|| self.current_store_name.clone());
+                    if let Some(ref store_name) = store_name_opt {
+                        self.store_field_indices
+                            .contains_key(&(store_name.clone(), property.clone()))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Expression::Call { callee, .. } => {
+                if let Expression::Identifier(name, _) = callee.as_ref() {
+                    matches!(
+                        name.as_str(),
+                        "abs"
+                            | "floor"
+                            | "ceil"
+                            | "round"
+                            | "sqrt"
+                            | "sin"
+                            | "cos"
+                            | "tan"
+                            | "asin"
+                            | "acos"
+                            | "atan"
+                            | "atan2"
+                            | "exp"
+                            | "ln"
+                            | "log2"
+                            | "log10"
+                            | "pow"
+                            | "min"
+                            | "max"
+                            | "length"
+                            | "size"
+                            | "to_number"
+                            | "time_now"
+                            | "random"
+                    )
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -3138,7 +4105,119 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Some(TypeId::Primitive(Primitive::Bool))
                 )
             }
+            Expression::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::Equals
+                    | BinaryOp::NotEquals
+                    | BinaryOp::Greater
+                    | BinaryOp::GreaterEq
+                    | BinaryOp::Less
+                    | BinaryOp::LessEq
+                    | BinaryOp::And
+                    | BinaryOp::Or
+            ),
+            Expression::Unary {
+                op: UnaryOp::Not, ..
+            } => true,
             _ => false,
+        }
+    }
+
+    /// Try to emit a condition expression directly as an i1 boolean,
+    /// avoiding box-then-unbox round-trip for comparison operators in loops.
+    /// Returns None if the expression can't be directly evaluated to i1.
+    fn try_emit_condition_i1(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        expr: &Expression,
+    ) -> Result<Option<IntValue<'ctx>>, Diagnostic> {
+        match expr {
+            // Native integer comparison path
+            Expression::Binary {
+                op, left, right, ..
+            } if matches!(
+                op,
+                BinaryOp::Less
+                    | BinaryOp::LessEq
+                    | BinaryOp::Greater
+                    | BinaryOp::GreaterEq
+                    | BinaryOp::Equals
+                    | BinaryOp::NotEquals
+            ) && self.expr_is_int(ctx, left)
+                && self.expr_is_int(ctx, right) =>
+            {
+                let saved_tail = ctx.in_tail_position;
+                ctx.in_tail_position = false;
+                let lhs = self.emit_expression_as_native_int(ctx, left)?;
+                let rhs = self.emit_expression_as_native_int(ctx, right)?;
+                ctx.in_tail_position = saved_tail;
+                let pred = match op {
+                    BinaryOp::Less => IntPredicate::SLT,
+                    BinaryOp::LessEq => IntPredicate::SLE,
+                    BinaryOp::Greater => IntPredicate::SGT,
+                    BinaryOp::GreaterEq => IntPredicate::SGE,
+                    BinaryOp::Equals => IntPredicate::EQ,
+                    BinaryOp::NotEquals => IntPredicate::NE,
+                    _ => unreachable!(),
+                };
+                let cmp = self
+                    .builder
+                    .build_int_compare(pred, lhs, rhs, "icmp_i1")
+                    .unwrap();
+                Ok(Some(cmp))
+            }
+            // Numeric (float) comparison path
+            Expression::Binary {
+                op, left, right, ..
+            } if matches!(
+                op,
+                BinaryOp::Less
+                    | BinaryOp::LessEq
+                    | BinaryOp::Greater
+                    | BinaryOp::GreaterEq
+                    | BinaryOp::Equals
+                    | BinaryOp::NotEquals
+            ) && self.expr_is_numeric(left)
+                && self.expr_is_numeric(right) =>
+            {
+                let saved_tail = ctx.in_tail_position;
+                ctx.in_tail_position = false;
+                let lhs = self.emit_expression(ctx, left)?;
+                let rhs = self.emit_expression(ctx, right)?;
+                ctx.in_tail_position = saved_tail;
+                let lhs_num = self.value_to_number_fast(lhs);
+                let rhs_num = self.value_to_number_fast(rhs);
+                let pred = match op {
+                    BinaryOp::Less => FloatPredicate::OLT,
+                    BinaryOp::LessEq => FloatPredicate::OLE,
+                    BinaryOp::Greater => FloatPredicate::OGT,
+                    BinaryOp::GreaterEq => FloatPredicate::OGE,
+                    BinaryOp::Equals => FloatPredicate::OEQ,
+                    BinaryOp::NotEquals => FloatPredicate::ONE,
+                    _ => unreachable!(),
+                };
+                let cmp = self
+                    .builder
+                    .build_float_compare(pred, lhs_num, rhs_num, "cmp_i1")
+                    .unwrap();
+                Ok(Some(cmp))
+            }
+            Expression::Bool(val, _) => {
+                let i1_val = self.context.bool_type().const_int(*val as u64, false);
+                Ok(Some(i1_val))
+            }
+            Expression::Unary {
+                op: UnaryOp::Not,
+                expr: inner,
+                ..
+            } => {
+                if let Some(inner_i1) = self.try_emit_condition_i1(ctx, inner)? {
+                    Ok(Some(self.builder.build_not(inner_i1, "not_i1").unwrap()))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
         }
     }
 
@@ -3151,54 +4230,71 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<IntValue<'ctx>, Diagnostic> {
         use BinaryOp::*;
 
-        // Fast path: when both operands are known numeric, use inline bitcasts
-        // instead of runtime function calls for unboxing/boxing
         if both_numeric {
             let lhs_num = self.value_to_number_fast(lhs);
             let rhs_num = self.value_to_number_fast(rhs);
             return Ok(match op {
-                Add => self.wrap_number_fast(
-                    self.builder.build_float_add(lhs_num, rhs_num, "add_fast").unwrap(),
+                Add => self.wrap_number_unchecked(
+                    self.builder
+                        .build_float_add(lhs_num, rhs_num, "add_fast")
+                        .unwrap(),
                 ),
-                Sub => self.wrap_number_fast(
-                    self.builder.build_float_sub(lhs_num, rhs_num, "sub_fast").unwrap(),
+                Sub => self.wrap_number_unchecked(
+                    self.builder
+                        .build_float_sub(lhs_num, rhs_num, "sub_fast")
+                        .unwrap(),
                 ),
-                Mul => self.wrap_number_fast(
-                    self.builder.build_float_mul(lhs_num, rhs_num, "mul_fast").unwrap(),
+                Mul => self.wrap_number_unchecked(
+                    self.builder
+                        .build_float_mul(lhs_num, rhs_num, "mul_fast")
+                        .unwrap(),
                 ),
                 Div => self.wrap_number_fast(
-                    self.builder.build_float_div(lhs_num, rhs_num, "div_fast").unwrap(),
+                    self.builder
+                        .build_float_div(lhs_num, rhs_num, "div_fast")
+                        .unwrap(),
                 ),
                 Mod => self.wrap_number_fast(
-                    self.builder.build_float_rem(lhs_num, rhs_num, "rem_fast").unwrap(),
+                    self.builder
+                        .build_float_rem(lhs_num, rhs_num, "rem_fast")
+                        .unwrap(),
                 ),
                 Equals => self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::OEQ, lhs_num, rhs_num, "eq_fast").unwrap(),
+                    self.builder
+                        .build_float_compare(FloatPredicate::OEQ, lhs_num, rhs_num, "eq_fast")
+                        .unwrap(),
                 ),
                 NotEquals => self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::ONE, lhs_num, rhs_num, "ne_fast").unwrap(),
+                    self.builder
+                        .build_float_compare(FloatPredicate::ONE, lhs_num, rhs_num, "ne_fast")
+                        .unwrap(),
                 ),
                 Greater => self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::OGT, lhs_num, rhs_num, "gt_fast").unwrap(),
+                    self.builder
+                        .build_float_compare(FloatPredicate::OGT, lhs_num, rhs_num, "gt_fast")
+                        .unwrap(),
                 ),
                 GreaterEq => self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::OGE, lhs_num, rhs_num, "ge_fast").unwrap(),
+                    self.builder
+                        .build_float_compare(FloatPredicate::OGE, lhs_num, rhs_num, "ge_fast")
+                        .unwrap(),
                 ),
                 Less => self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::OLT, lhs_num, rhs_num, "lt_fast").unwrap(),
+                    self.builder
+                        .build_float_compare(FloatPredicate::OLT, lhs_num, rhs_num, "lt_fast")
+                        .unwrap(),
                 ),
                 LessEq => self.wrap_bool(
-                    self.builder.build_float_compare(FloatPredicate::OLE, lhs_num, rhs_num, "le_fast").unwrap(),
+                    self.builder
+                        .build_float_compare(FloatPredicate::OLE, lhs_num, rhs_num, "le_fast")
+                        .unwrap(),
                 ),
-                // Bitwise and logical ops don't benefit from numeric fast-path
                 _ => {
-                    // Fall through to general path below
                     return self.emit_numeric_binary_general(op, lhs, rhs);
                 }
             });
         }
 
-        // General path for non-numeric or mixed types
         if matches!(op, Add) {
             return Ok(self.call_nb(self.runtime.nb_add, &[lhs.into(), rhs.into()], "nb_add"));
         }
@@ -3247,26 +4343,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "shift_right",
             ));
         }
-        let lhs_num = self.value_to_number(lhs);
-        let rhs_num = self.value_to_number(rhs);
+        let lhs_num = self.value_to_number_fast(lhs);
+        let rhs_num = self.value_to_number_fast(rhs);
         Ok(match op {
             Add | Equals | NotEquals => unreachable!(),
-            Sub => self.wrap_number(
+            Sub => self.wrap_number_unchecked(
                 self.builder
                     .build_float_sub(lhs_num, rhs_num, "sub")
                     .unwrap(),
             ),
-            Mul => self.wrap_number(
+            Mul => self.wrap_number_unchecked(
                 self.builder
                     .build_float_mul(lhs_num, rhs_num, "mul")
                     .unwrap(),
             ),
-            Div => self.wrap_number(
+            Div => self.wrap_number_fast(
                 self.builder
                     .build_float_div(lhs_num, rhs_num, "div")
                     .unwrap(),
             ),
-            Mod => self.wrap_number(
+            Mod => self.wrap_number_fast(
                 self.builder
                     .build_float_rem(lhs_num, rhs_num, "rem")
                     .unwrap(),
@@ -3294,6 +4390,135 @@ impl<'ctx> CodeGenerator<'ctx> {
             ),
             And | Or => unreachable!(),
         })
+    }
+
+    /// Emit a binary operation on two native i64 integers, returning a NaN-boxed result.
+    fn emit_native_int_binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        use BinaryOp::*;
+        Ok(match op {
+            Add => {
+                let result = self.builder.build_int_add(lhs, rhs, "iadd").unwrap();
+                self.box_native_int(result)
+            }
+            Sub => {
+                let result = self.builder.build_int_sub(lhs, rhs, "isub").unwrap();
+                self.box_native_int(result)
+            }
+            Mul => {
+                let result = self.builder.build_int_mul(lhs, rhs, "imul").unwrap();
+                self.box_native_int(result)
+            }
+            Div => {
+                let result = self
+                    .builder
+                    .build_int_signed_div(lhs, rhs, "idiv")
+                    .unwrap();
+                self.box_native_int(result)
+            }
+            Mod => {
+                let result = self
+                    .builder
+                    .build_int_signed_rem(lhs, rhs, "imod")
+                    .unwrap();
+                self.box_native_int(result)
+            }
+            Equals => self.wrap_bool(
+                self.builder
+                    .build_int_compare(IntPredicate::EQ, lhs, rhs, "ieq")
+                    .unwrap(),
+            ),
+            NotEquals => self.wrap_bool(
+                self.builder
+                    .build_int_compare(IntPredicate::NE, lhs, rhs, "ine")
+                    .unwrap(),
+            ),
+            Less => self.wrap_bool(
+                self.builder
+                    .build_int_compare(IntPredicate::SLT, lhs, rhs, "ilt")
+                    .unwrap(),
+            ),
+            LessEq => self.wrap_bool(
+                self.builder
+                    .build_int_compare(IntPredicate::SLE, lhs, rhs, "ile")
+                    .unwrap(),
+            ),
+            Greater => self.wrap_bool(
+                self.builder
+                    .build_int_compare(IntPredicate::SGT, lhs, rhs, "igt")
+                    .unwrap(),
+            ),
+            GreaterEq => self.wrap_bool(
+                self.builder
+                    .build_int_compare(IntPredicate::SGE, lhs, rhs, "ige")
+                    .unwrap(),
+            ),
+            _ => {
+                // Fall back to boxed path for unsupported ops
+                let lhs_boxed = self.box_native_int(lhs);
+                let rhs_boxed = self.box_native_int(rhs);
+                return self.emit_numeric_binary(op, lhs_boxed, rhs_boxed, true);
+            }
+        })
+    }
+
+    /// Emit an expression and return the result as a native i64 integer.
+    /// Only valid when expr_is_int() returns true for this expression.
+    fn emit_expression_as_native_int(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        expr: &Expression,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        match expr {
+            Expression::Integer(val, _) => {
+                Ok(self.runtime.value_i64_type.const_int(*val as u64, true))
+            }
+            Expression::Identifier(name, _) => {
+                if let Some(native) = self.load_variable_as_native_int(ctx, name) {
+                    Ok(native)
+                } else {
+                    // Variable is boxed; unbox it
+                    let boxed = self.load_variable(ctx, name)?;
+                    Ok(self.unbox_to_native_int(boxed))
+                }
+            }
+            Expression::Binary {
+                op, left, right, ..
+            } if matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+            ) && self.expr_is_int(ctx, left)
+                && self.expr_is_int(ctx, right) =>
+            {
+                let lhs = self.emit_expression_as_native_int(ctx, left)?;
+                let rhs = self.emit_expression_as_native_int(ctx, right)?;
+                Ok(match op {
+                    BinaryOp::Add => self.builder.build_int_add(lhs, rhs, "iadd").unwrap(),
+                    BinaryOp::Sub => self.builder.build_int_sub(lhs, rhs, "isub").unwrap(),
+                    BinaryOp::Mul => self.builder.build_int_mul(lhs, rhs, "imul").unwrap(),
+                    BinaryOp::Div => self.builder.build_int_signed_div(lhs, rhs, "idiv").unwrap(),
+                    BinaryOp::Mod => self.builder.build_int_signed_rem(lhs, rhs, "imod").unwrap(),
+                    _ => unreachable!(),
+                })
+            }
+            Expression::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+                ..
+            } if self.expr_is_int(ctx, inner) => {
+                let val = self.emit_expression_as_native_int(ctx, inner)?;
+                Ok(self.builder.build_int_neg(val, "ineg").unwrap())
+            }
+            _ => {
+                // Fallback: emit as boxed, then unbox
+                let boxed = self.emit_expression(ctx, expr)?;
+                Ok(self.unbox_to_native_int(boxed))
+            }
+        }
     }
 
     fn emit_logical_binary(
@@ -3430,6 +4655,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         ctx: &FunctionContext<'ctx>,
         name: &str,
     ) -> Result<IntValue<'ctx>, Diagnostic> {
+        // Handle unboxed variables: load native value and box it
+        match ctx.unboxed_vars.get(name) {
+            Some(UnboxedKind::NativeInt) => {
+                if let Some(alloca) = ctx.variable_allocas.get(name) {
+                    let native_val = self
+                        .builder
+                        .build_load(
+                            self.runtime.value_i64_type,
+                            *alloca,
+                            &format!("load_int_{name}"),
+                        )
+                        .unwrap()
+                        .into_int_value();
+                    return Ok(self.box_native_int(native_val));
+                }
+            }
+            Some(UnboxedKind::NativeFloat) => {
+                if let Some(alloca) = ctx.variable_allocas.get(name) {
+                    let native_val = self
+                        .builder
+                        .build_load(self.f64_type, *alloca, &format!("load_float_{name}"))
+                        .unwrap()
+                        .into_float_value();
+                    return Ok(self.wrap_number_unchecked(native_val));
+                }
+            }
+            _ => {}
+        }
+
         if let Some(alloca) = ctx.variable_allocas.get(name) {
             let loaded = self
                 .builder
@@ -3503,6 +4757,233 @@ impl<'ctx> CodeGenerator<'ctx> {
         ctx.variable_allocas.insert(name.to_string(), alloca);
     }
 
+    /// Store a native i64 integer (not NaN-boxed) into a variable.
+    fn store_variable_native_int(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        name: &str,
+        value: IntValue<'ctx>,
+    ) {
+        if let Some(alloca) = ctx.variable_allocas.get(name) {
+            self.builder.build_store(*alloca, value).unwrap();
+            return;
+        }
+
+        let entry_bb = ctx.function.get_first_basic_block().unwrap();
+        let current_bb = self.builder.get_insert_block().unwrap();
+
+        if let Some(first_instr) = entry_bb.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        let alloca = self
+            .builder
+            .build_alloca(self.runtime.value_i64_type, &format!("{name}_int_slot"))
+            .unwrap();
+
+        self.builder.position_at_end(current_bb);
+        self.builder.build_store(alloca, value).unwrap();
+        ctx.variable_allocas.insert(name.to_string(), alloca);
+        ctx.unboxed_vars
+            .insert(name.to_string(), UnboxedKind::NativeInt);
+    }
+
+    /// Store a native f64 float (not NaN-boxed) into a variable.
+    fn store_variable_native_float(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        name: &str,
+        value: FloatValue<'ctx>,
+    ) {
+        if let Some(alloca) = ctx.variable_allocas.get(name) {
+            self.builder.build_store(*alloca, value).unwrap();
+            return;
+        }
+
+        let entry_bb = ctx.function.get_first_basic_block().unwrap();
+        let current_bb = self.builder.get_insert_block().unwrap();
+
+        if let Some(first_instr) = entry_bb.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+        let alloca = self
+            .builder
+            .build_alloca(self.f64_type, &format!("{name}_float_slot"))
+            .unwrap();
+
+        self.builder.position_at_end(current_bb);
+        self.builder.build_store(alloca, value).unwrap();
+        ctx.variable_allocas.insert(name.to_string(), alloca);
+        ctx.unboxed_vars
+            .insert(name.to_string(), UnboxedKind::NativeFloat);
+    }
+
+    /// Load a variable, returning a NaN-boxed value. Handles unboxed vars by boxing them.
+    fn load_variable_boxed(
+        &mut self,
+        ctx: &FunctionContext<'ctx>,
+        name: &str,
+    ) -> Result<IntValue<'ctx>, Diagnostic> {
+        match ctx.unboxed_vars.get(name) {
+            Some(UnboxedKind::NativeInt) => {
+                if let Some(alloca) = ctx.variable_allocas.get(name) {
+                    let native_val = self
+                        .builder
+                        .build_load(
+                            self.runtime.value_i64_type,
+                            *alloca,
+                            &format!("load_int_{name}"),
+                        )
+                        .unwrap()
+                        .into_int_value();
+                    Ok(self.box_native_int(native_val))
+                } else {
+                    self.load_variable(ctx, name)
+                }
+            }
+            Some(UnboxedKind::NativeFloat) => {
+                if let Some(alloca) = ctx.variable_allocas.get(name) {
+                    let native_val = self
+                        .builder
+                        .build_load(self.f64_type, *alloca, &format!("load_float_{name}"))
+                        .unwrap()
+                        .into_float_value();
+                    Ok(self.wrap_number_unchecked(native_val))
+                } else {
+                    self.load_variable(ctx, name)
+                }
+            }
+            _ => self.load_variable(ctx, name),
+        }
+    }
+
+    /// Load a native i64 value from an unboxed int variable, or unbox from NaN-boxed.
+    fn load_variable_as_native_int(
+        &mut self,
+        ctx: &FunctionContext<'ctx>,
+        name: &str,
+    ) -> Option<IntValue<'ctx>> {
+        match ctx.unboxed_vars.get(name) {
+            Some(UnboxedKind::NativeInt) => {
+                if let Some(alloca) = ctx.variable_allocas.get(name) {
+                    Some(
+                        self.builder
+                            .build_load(
+                                self.runtime.value_i64_type,
+                                *alloca,
+                                &format!("load_int_{name}"),
+                            )
+                            .unwrap()
+                            .into_int_value(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Load a native f64 value from an unboxed float variable, or return None.
+    fn load_variable_as_native_float(
+        &mut self,
+        ctx: &FunctionContext<'ctx>,
+        name: &str,
+    ) -> Option<FloatValue<'ctx>> {
+        match ctx.unboxed_vars.get(name) {
+            Some(UnboxedKind::NativeFloat) => {
+                if let Some(alloca) = ctx.variable_allocas.get(name) {
+                    Some(
+                        self.builder
+                            .build_load(self.f64_type, *alloca, &format!("load_float_{name}"))
+                            .unwrap()
+                            .into_float_value(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert a NaN-boxed integer value to native i64 (extract from f64 representation).
+    fn unbox_to_native_int(&mut self, value: IntValue<'ctx>) -> IntValue<'ctx> {
+        // NaN-boxed numbers store the value as f64 bits in i64.
+        // To get native int: bitcast i64 → f64, then fptosi f64 → i64
+        let f64_val = self
+            .builder
+            .build_bitcast(value, self.f64_type, "unbox_f64")
+            .unwrap()
+            .into_float_value();
+        self.builder
+            .build_float_to_signed_int(f64_val, self.runtime.value_i64_type, "unbox_int")
+            .unwrap()
+    }
+
+    /// Convert a native i64 integer to NaN-boxed representation.
+    fn box_native_int(&mut self, value: IntValue<'ctx>) -> IntValue<'ctx> {
+        // Convert native i64 → f64 → NaN-box bits
+        let f64_val = self
+            .builder
+            .build_signed_int_to_float(value, self.f64_type, "box_f64")
+            .unwrap();
+        self.wrap_number_unchecked(f64_val)
+    }
+
+    /// Check if a variable is an unboxed native int in the current function context.
+    fn var_is_native_int(&self, ctx: &FunctionContext<'ctx>, name: &str) -> bool {
+        ctx.unboxed_vars.get(name) == Some(&UnboxedKind::NativeInt)
+    }
+
+    /// Check if a variable is an unboxed native float in the current function context.
+    fn var_is_native_float(&self, ctx: &FunctionContext<'ctx>, name: &str) -> bool {
+        ctx.unboxed_vars.get(name) == Some(&UnboxedKind::NativeFloat)
+    }
+
+    /// Check if an expression is known to be statically typed as Int (for native i64 paths).
+    fn expr_is_int(&self, ctx: &FunctionContext<'ctx>, expr: &Expression) -> bool {
+        match expr {
+            Expression::Integer(_, _) => true,
+            Expression::Identifier(name, _) => self.var_is_native_int(ctx, name),
+            Expression::Binary {
+                op, left, right, ..
+            } => {
+                matches!(
+                    op,
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+                ) && self.expr_is_int(ctx, left)
+                    && self.expr_is_int(ctx, right)
+            }
+            Expression::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+                ..
+            } => self.expr_is_int(ctx, inner),
+            Expression::Call { callee, .. } => {
+                if let Expression::Identifier(name, _) = callee.as_ref() {
+                    self.resolved_returns.get(name.as_str())
+                        == Some(&TypeId::Primitive(Primitive::Int))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is known to be statically typed as Float (for native f64 paths).
+    fn expr_is_float(&self, ctx: &FunctionContext<'ctx>, expr: &Expression) -> bool {
+        match expr {
+            Expression::Float(_, _) => true,
+            Expression::Identifier(name, _) => self.var_is_native_float(ctx, name),
+            _ => false,
+        }
+    }
+
     fn wrap_number(&mut self, value: FloatValue<'ctx>) -> IntValue<'ctx> {
         self.call_nb(self.runtime.nb_make_number, &[value.into()], "nb_num")
     }
@@ -3515,18 +4996,38 @@ impl<'ctx> CodeGenerator<'ctx> {
             .build_bitcast(value, self.runtime.value_i64_type, "nb_bits")
             .unwrap()
             .into_int_value();
-        // Check if result is a quiet NaN (which would collide with tagged values)
-        let qnan_mask = self.runtime.value_i64_type.const_int(0xFFF8_0000_0000_0000, false);
-        let qnan_prefix = self.runtime.value_i64_type.const_int(0x7FF8_0000_0000_0000, false);
-        let masked = self.builder.build_and(bits, qnan_mask, "nan_check").unwrap();
+        let qnan_mask = self
+            .runtime
+            .value_i64_type
+            .const_int(0xFFF8_0000_0000_0000, false);
+        let qnan_prefix = self
+            .runtime
+            .value_i64_type
+            .const_int(0x7FF8_0000_0000_0000, false);
+        let masked = self
+            .builder
+            .build_and(bits, qnan_mask, "nan_check")
+            .unwrap();
         let is_nan = self
             .builder
             .build_int_compare(inkwell::IntPredicate::EQ, masked, qnan_prefix, "is_nan")
             .unwrap();
-        // Canonical NaN: QNAN_PREFIX | (TAG_CANONICAL_NAN << 48) = 0x7FFB_8000_0000_0000
-        let canonical_nan = self.runtime.value_i64_type.const_int(0x7FFB_8000_0000_0000, false);
+        let canonical_nan = self
+            .runtime
+            .value_i64_type
+            .const_int(0x7FFB_8000_0000_0000, false);
         self.builder
             .build_select(is_nan, canonical_nan, bits, "nb_num_fast")
+            .unwrap()
+            .into_int_value()
+    }
+
+    /// Inline NaN-boxing without NaN canonicalization.
+    /// Use ONLY when the result is guaranteed non-NaN (e.g., integer add/sub/mul,
+    /// or operations on finite inputs that cannot produce NaN).
+    fn wrap_number_unchecked(&mut self, value: FloatValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_bitcast(value, self.runtime.value_i64_type, "nb_bits_uc")
             .unwrap()
             .into_int_value()
     }
@@ -3541,11 +5042,22 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn wrap_bool(&mut self, value: IntValue<'ctx>) -> IntValue<'ctx> {
-        let bool_byte = self
+        let false_bits = self
+            .runtime
+            .value_i64_type
+            .const_int(0x7FF9_0000_0000_0000, false);
+        let true_bits = self
+            .runtime
+            .value_i64_type
+            .const_int(0x7FF9_0000_0000_0001, false);
+        let val_i1 = self
             .builder
-            .build_int_z_extend(value, self.i8_type, "bool_byte")
+            .build_int_truncate(value, self.context.bool_type(), "bool_trunc")
             .unwrap();
-        self.call_nb(self.runtime.nb_make_bool, &[bool_byte.into()], "nb_bool")
+        self.builder
+            .build_select(val_i1, true_bits, false_bits, "nb_bool_fast")
+            .unwrap()
+            .into_int_value()
     }
 
     fn emit_bytes_literal(&mut self, literal: &[u8]) -> IntValue<'ctx> {
@@ -3610,6 +5122,51 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn emit_string_literal(&mut self, literal: &str) -> IntValue<'ctx> {
+        // Get or create a global i64 cache for this string literal's NaN-boxed value.
+        // String NaN-boxed values always have QNAN bits set (never 0), so 0 = uninitialized.
+        let cache_global = if let Some(gv) = self.string_nb_cache.get(literal) {
+            *gv
+        } else {
+            let name = format!("nb_str_cache_{}", self.string_nb_cache.len());
+            let gv = self
+                .module
+                .add_global(self.runtime.value_i64_type, None, &name);
+            gv.set_initializer(&self.runtime.value_i64_type.const_zero());
+            self.string_nb_cache.insert(literal.to_string(), gv);
+            gv
+        };
+
+        let cached = self
+            .builder
+            .build_load(
+                self.runtime.value_i64_type,
+                cache_global.as_pointer_value(),
+                "cached_str",
+            )
+            .unwrap()
+            .into_int_value();
+
+        let is_init = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                cached,
+                self.runtime.value_i64_type.const_zero(),
+                "str_cached",
+            )
+            .unwrap();
+
+        let current_bb = self.builder.get_insert_block().unwrap();
+        let func = current_bb.get_parent().unwrap();
+        let init_bb = self.context.append_basic_block(func, "str_init");
+        let use_bb = self.context.append_basic_block(func, "str_use");
+
+        self.builder
+            .build_conditional_branch(is_init, use_bb, init_bb)
+            .unwrap();
+
+        // Init block: create the string and cache the NaN-boxed value
+        self.builder.position_at_end(init_bb);
         let global = self.get_or_create_string_constant(literal);
         let i8_ptr_type = self.i8_type.ptr_type(AddressSpace::default());
         let cast_ptr = self
@@ -3618,7 +5175,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             .unwrap();
         let len_value = self.usize_type.const_int(literal.len() as u64, false);
         let args = &[cast_ptr.into(), len_value.into()];
-        self.call_nb(self.runtime.nb_make_string, args, "nb_str")
+        let new_str = self.call_nb(self.runtime.nb_make_string, args, "nb_str");
+        self.builder
+            .build_store(cache_global.as_pointer_value(), new_str)
+            .unwrap();
+        self.builder
+            .build_unconditional_branch(use_bb)
+            .unwrap();
+
+        // Use block: phi selects cached or newly created
+        self.builder.position_at_end(use_bb);
+        let phi = self
+            .builder
+            .build_phi(self.runtime.value_i64_type, "str_val")
+            .unwrap();
+        phi.add_incoming(&[(&cached, current_bb), (&new_str, init_bb)]);
+        phi.as_basic_value().into_int_value()
     }
 
     fn call_nb(
@@ -3650,6 +5222,196 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn ptr_to_nb(&mut self, ptr: PointerValue<'ctx>) -> IntValue<'ctx> {
         self.call_nb(self.runtime.nb_from_handle, &[ptr.into()], "ptr_to_nb")
+    }
+
+    /// Inline check: is this NaN-boxed value a heap pointer?
+    /// Returns an i1 boolean.  Pure bit-ops, zero allocations.
+    fn nb_is_heap_ptr(&mut self, value: IntValue<'ctx>) -> IntValue<'ctx> {
+        let i64_ty = self.runtime.value_i64_type;
+        let qnan_mask = i64_ty.const_int(0xFFF8_0000_0000_0000, false);
+        let qnan_prefix = i64_ty.const_int(0x7FF8_0000_0000_0000, false);
+        let tag_mask = i64_ty.const_int(0x0007_0000_0000_0000, false);
+        let zero = i64_ty.const_int(0, false);
+
+        // (value & QNAN_MASK) == QNAN_PREFIX
+        let masked = self.builder.build_and(value, qnan_mask, "hp_qnan").unwrap();
+        let is_tagged = self.builder.build_int_compare(
+            IntPredicate::EQ, masked, qnan_prefix, "hp_is_tagged",
+        ).unwrap();
+
+        // (value & TAG_MASK) == 0  (TAG_HEAP = 0)
+        let tag_bits = self.builder.build_and(value, tag_mask, "hp_tag").unwrap();
+        let is_heap_tag = self.builder.build_int_compare(
+            IntPredicate::EQ, tag_bits, zero, "hp_is_heap_tag",
+        ).unwrap();
+
+        // value != QNAN_PREFIX  (bare prefix is not a valid heap ptr)
+        let not_bare = self.builder.build_int_compare(
+            IntPredicate::NE, value, qnan_prefix, "hp_not_bare",
+        ).unwrap();
+
+        let c1 = self.builder.build_and(is_tagged, is_heap_tag, "hp_c1").unwrap();
+        self.builder.build_and(c1, not_bare, "is_heap_ptr").unwrap()
+    }
+
+    /// Extract the raw pointer from a NaN-boxed heap value (no allocation).
+    /// Caller must ensure the value IS a heap pointer (use nb_is_heap_ptr first).
+    fn nb_extract_heap_ptr(&mut self, value: IntValue<'ctx>) -> PointerValue<'ctx> {
+        let payload_mask = self.runtime.value_i64_type.const_int(0x0000_FFFF_FFFF_FFFF, false);
+        let addr = self.builder.build_and(value, payload_mask, "heap_addr").unwrap();
+        self.builder
+            .build_int_to_ptr(addr, self.i8_type.ptr_type(AddressSpace::default()), "heap_ptr")
+            .unwrap()
+    }
+
+    /// Inline list element access: given a Value* (list), load the items data pointer.
+    /// Layout: Value.payload.ptr (offset 16) → ListObject → items.ptr (offset 8)
+    fn inline_list_items_ptr(&mut self, list_ptr: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let ptr_type = self.i8_type.ptr_type(AddressSpace::default());
+        // Load payload.ptr at offset 16 from Value → ListObject*
+        let payload_ptr_addr = unsafe {
+            self.builder.build_gep(self.i8_type, list_ptr,
+                &[self.usize_type.const_int(16, false)], "payload_ptr_addr").unwrap()
+        };
+        let list_obj = self.builder.build_load(ptr_type, payload_ptr_addr, "list_obj").unwrap().into_pointer_value();
+        // Load items.ptr at offset 8 from ListObject → *mut ValueHandle
+        let items_ptr_addr = unsafe {
+            self.builder.build_gep(self.i8_type, list_obj,
+                &[self.usize_type.const_int(8, false)], "items_ptr_addr").unwrap()
+        };
+        self.builder.build_load(ptr_type, items_ptr_addr, "items_data").unwrap().into_pointer_value()
+    }
+
+    /// Inline list element access: given items data ptr and index, load the element as *mut Value.
+    fn inline_list_get_ptr(&mut self, items_data: PointerValue<'ctx>, index: IntValue<'ctx>) -> PointerValue<'ctx> {
+        let ptr_type = self.i8_type.ptr_type(AddressSpace::default());
+        // items_data[index] — each element is 8 bytes (pointer)
+        let byte_offset = self.builder.build_int_mul(index, self.usize_type.const_int(8, false), "elem_byte_off").unwrap();
+        let elem_addr = unsafe {
+            self.builder.build_gep(self.i8_type, items_data,
+                &[byte_offset], "elem_addr").unwrap()
+        };
+        self.builder.build_load(ptr_type, elem_addr, "elem_ptr").unwrap().into_pointer_value()
+    }
+
+    /// Inline: given a Value* known to contain a number, load payload.number as f64.
+    fn inline_load_number(&mut self, value_ptr: PointerValue<'ctx>) -> FloatValue<'ctx> {
+        // payload.number is at offset 16 from Value*
+        let payload_addr = unsafe {
+            self.builder.build_gep(self.i8_type, value_ptr,
+                &[self.usize_type.const_int(16, false)], "num_payload_addr").unwrap()
+        };
+        self.builder.build_load(self.f64_type, payload_addr, "raw_num").unwrap().into_float_value()
+    }
+
+    /// Inline: given a Value* known to contain a number, store a new f64 to payload.number.
+    /// This overwrites the number in-place without allocating a new Value.
+    fn inline_store_number(&mut self, value_ptr: PointerValue<'ctx>, number: FloatValue<'ctx>) {
+        let payload_addr = unsafe {
+            self.builder.build_gep(self.i8_type, value_ptr,
+                &[self.usize_type.const_int(16, false)], "num_payload_wr_addr").unwrap()
+        };
+        self.builder.build_store(payload_addr, number).unwrap();
+    }
+
+    /// Inline struct field GET: extracts heap ptr, chases through StructObject fields,
+    /// and loads the number directly. Falls back to FFI for non-numeric fields.
+    fn inline_struct_get_nb(
+        &mut self,
+        ctx: &mut FunctionContext<'ctx>,
+        store_nb: IntValue<'ctx>,
+        field_idx: u64,
+    ) -> IntValue<'ctx> {
+        let heap_ptr = self.nb_extract_heap_ptr(store_nb);
+        let fields_data = self.inline_list_items_ptr(heap_ptr);
+        let idx_val = self.usize_type.const_int(field_idx, false);
+        let field_handle = self.inline_list_get_ptr(fields_data, idx_val);
+
+        // Check tag byte — only inline for Number (tag = 0)
+        let tag = self.nb_heap_tag(field_handle);
+        let is_number = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, tag,
+            self.i8_type.const_int(0, false), "is_num_field",
+        ).unwrap();
+
+        let current_fn = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let fast_bb = self.context.append_basic_block(current_fn, "struct_get_fast");
+        let slow_bb = self.context.append_basic_block(current_fn, "struct_get_slow");
+        let merge_bb = self.context.append_basic_block(current_fn, "struct_get_merge");
+
+        self.builder.build_conditional_branch(is_number, fast_bb, slow_bb).unwrap();
+
+        // Fast path: load number directly
+        self.builder.position_at_end(fast_bb);
+        let num = self.inline_load_number(field_handle);
+        let fast_result = self.builder.build_bitcast(num, self.runtime.value_i64_type, "fast_nb").unwrap().into_int_value();
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        // Slow path: FFI call
+        self.builder.position_at_end(slow_bb);
+        let slow_result = self.call_nb(
+            self.runtime.nb_struct_get,
+            &[store_nb.into(), idx_val.into()],
+            "slow_struct_get",
+        );
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        // Merge
+        self.builder.position_at_end(merge_bb);
+        let phi = self.builder.build_phi(self.runtime.value_i64_type, "struct_field_val").unwrap();
+        phi.add_incoming(&[(&fast_result, fast_bb), (&slow_result, slow_bb)]);
+        phi.as_basic_value().into_int_value()
+    }
+
+    /// Inline struct field SET for numeric values: writes f64 directly to the
+    /// existing field Value's payload, avoiding allocation/deallocation.
+    /// Falls back to FFI for non-numeric current field values.
+    fn inline_struct_set_nb(
+        &mut self,
+        store_nb: IntValue<'ctx>,
+        field_idx: u64,
+        value_nb: IntValue<'ctx>,
+    ) {
+        let heap_ptr = self.nb_extract_heap_ptr(store_nb);
+        let fields_data = self.inline_list_items_ptr(heap_ptr);
+        let idx_val = self.usize_type.const_int(field_idx, false);
+        let field_handle = self.inline_list_get_ptr(fields_data, idx_val);
+
+        // Check if the existing field is a Number (tag=0) — safe to overwrite in-place
+        let tag = self.nb_heap_tag(field_handle);
+        let is_number = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, tag,
+            self.i8_type.const_int(0, false), "is_num_field_set",
+        ).unwrap();
+
+        let current_fn = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let fast_bb = self.context.append_basic_block(current_fn, "struct_set_fast");
+        let slow_bb = self.context.append_basic_block(current_fn, "struct_set_slow");
+        let merge_bb = self.context.append_basic_block(current_fn, "struct_set_merge");
+
+        self.builder.build_conditional_branch(is_number, fast_bb, slow_bb).unwrap();
+
+        // Fast path: write number directly to existing Value payload
+        self.builder.position_at_end(fast_bb);
+        let new_f64 = self.builder.build_bitcast(value_nb, self.f64_type, "new_f64").unwrap().into_float_value();
+        self.inline_store_number(field_handle, new_f64);
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        // Slow path: FFI call
+        self.builder.position_at_end(slow_bb);
+        self.builder.build_call(
+            self.runtime.nb_struct_set,
+            &[store_nb.into(), idx_val.into(), value_nb.into()],
+            "slow_struct_set",
+        ).unwrap();
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        self.builder.position_at_end(merge_bb);
+    }
+
+    /// Read the ValueTag byte (offset 0) from a Value struct pointer.
+    fn nb_heap_tag(&mut self, ptr: PointerValue<'ctx>) -> IntValue<'ctx> {
+        self.builder.build_load(self.i8_type, ptr, "vtag").unwrap().into_int_value()
     }
 
     fn call_bridged(
@@ -3731,6 +5493,76 @@ impl<'ctx> CodeGenerator<'ctx> {
             .left()
             .unwrap()
             .into_float_value()
+    }
+
+    /// Emit an LLVM intrinsic call for a unary f64→f64 math function.
+    /// Unboxes the argument, calls the intrinsic, and reboxes the result.
+    /// `can_produce_nan`: whether the operation might produce NaN (e.g., sqrt of negative).
+    fn emit_math_intrinsic_unary(
+        &mut self,
+        arg: IntValue<'ctx>,
+        intrinsic_name: &str,
+        call_name: &str,
+        can_produce_nan: bool,
+    ) -> IntValue<'ctx> {
+        use inkwell::intrinsics::Intrinsic;
+
+        let f64_type: BasicTypeEnum = self.f64_type.into();
+        let intrinsic = Intrinsic::find(intrinsic_name).expect("LLVM intrinsic not found");
+        let decl = intrinsic
+            .get_declaration(&self.module, &[f64_type])
+            .expect("failed to get intrinsic declaration");
+
+        let num = self.value_to_number_fast(arg);
+        let result = self
+            .builder
+            .build_call(decl, &[num.into()], call_name)
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_float_value();
+
+        if can_produce_nan {
+            self.wrap_number_fast(result)
+        } else {
+            self.wrap_number_unchecked(result)
+        }
+    }
+
+    /// Emit an LLVM intrinsic call for a binary (f64, f64)→f64 math function.
+    fn emit_math_intrinsic_binary(
+        &mut self,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+        intrinsic_name: &str,
+        call_name: &str,
+        can_produce_nan: bool,
+    ) -> IntValue<'ctx> {
+        use inkwell::intrinsics::Intrinsic;
+
+        let f64_type: BasicTypeEnum = self.f64_type.into();
+        let intrinsic = Intrinsic::find(intrinsic_name).expect("LLVM intrinsic not found");
+        let decl = intrinsic
+            .get_declaration(&self.module, &[f64_type])
+            .expect("failed to get intrinsic declaration");
+
+        let lhs_num = self.value_to_number_fast(lhs);
+        let rhs_num = self.value_to_number_fast(rhs);
+        let result = self
+            .builder
+            .build_call(decl, &[lhs_num.into(), rhs_num.into()], call_name)
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_float_value();
+
+        if can_produce_nan {
+            self.wrap_number_fast(result)
+        } else {
+            self.wrap_number_unchecked(result)
+        }
     }
 
     fn emit_inline_asm(
@@ -4168,6 +6000,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             in_tail_position: false,
             cse_cache: HashMap::new(),
             lambda_out_param: None,
+            unboxed_vars: HashMap::new(),
+            non_escaping_locals: HashSet::new(),
+            specialized_return_type: None,
         };
 
         for binding in globals {
@@ -4207,4 +6042,14 @@ struct FunctionContext<'ctx> {
     cse_cache: HashMap<String, IntValue<'ctx>>,
 
     lambda_out_param: Option<PointerValue<'ctx>>,
+
+    /// Tracks which local variables are stored in native (unboxed) representation
+    unboxed_vars: HashMap<String, UnboxedKind>,
+
+    /// Tracks non-escaping local variable names (retain/release can be elided)
+    non_escaping_locals: HashSet<String>,
+
+    /// If set, the function is a monomorphized specialized variant.
+    /// Return statements must convert the NaN-boxed value to this native type.
+    specialized_return_type: Option<TypeId>,
 }

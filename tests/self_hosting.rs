@@ -734,33 +734,90 @@ fn sh5_parser_has_new_syntax_constructs() {
     let source = load_source("self_hosted/parser.coral");
 
     // New expression types
-    assert!(source.contains("make_spread_expr"), "Missing spread expression constructor");
-    assert!(source.contains("make_list_comprehension_expr"), "Missing list comprehension constructor");
-    assert!(source.contains("make_map_comprehension_expr"), "Missing map comprehension constructor");
-    assert!(source.contains("make_slice_expr"), "Missing slice expression constructor");
-    assert!(source.contains("make_unsafe_expr"), "Missing unsafe expression constructor");
-    assert!(source.contains("make_inline_asm_expr"), "Missing inline asm expression constructor");
-    assert!(source.contains("make_ptr_load_expr"), "Missing ptr_load expression constructor");
+    assert!(
+        source.contains("make_spread_expr"),
+        "Missing spread expression constructor"
+    );
+    assert!(
+        source.contains("make_list_comprehension_expr"),
+        "Missing list comprehension constructor"
+    );
+    assert!(
+        source.contains("make_map_comprehension_expr"),
+        "Missing map comprehension constructor"
+    );
+    assert!(
+        source.contains("make_slice_expr"),
+        "Missing slice expression constructor"
+    );
+    assert!(
+        source.contains("make_unsafe_expr"),
+        "Missing unsafe expression constructor"
+    );
+    assert!(
+        source.contains("make_inline_asm_expr"),
+        "Missing inline asm expression constructor"
+    );
+    assert!(
+        source.contains("make_ptr_load_expr"),
+        "Missing ptr_load expression constructor"
+    );
 
     // New statement/item types
-    assert!(source.contains("make_pattern_binding_stmt"), "Missing pattern binding constructor");
-    assert!(source.contains("make_field_assign_stmt"), "Missing field assign constructor");
-    assert!(source.contains("make_extension_item"), "Missing extension item constructor");
+    assert!(
+        source.contains("make_pattern_binding_stmt"),
+        "Missing pattern binding constructor"
+    );
+    assert!(
+        source.contains("make_field_assign_stmt"),
+        "Missing field assign constructor"
+    );
+    assert!(
+        source.contains("make_extension_item"),
+        "Missing extension item constructor"
+    );
 
     // New pattern types
-    assert!(source.contains("make_pat_or"), "Missing or-pattern constructor");
-    assert!(source.contains("make_pat_range"), "Missing range pattern constructor");
-    assert!(source.contains("make_pat_rest"), "Missing rest pattern constructor");
+    assert!(
+        source.contains("make_pat_or"),
+        "Missing or-pattern constructor"
+    );
+    assert!(
+        source.contains("make_pat_range"),
+        "Missing range pattern constructor"
+    );
+    assert!(
+        source.contains("make_pat_rest"),
+        "Missing rest pattern constructor"
+    );
 
     // New parsing functions
-    assert!(source.contains("parse_type_params"), "Missing type params parsing");
-    assert!(source.contains("parse_extension_def"), "Missing extension def parsing");
-    assert!(source.contains("parse_unsafe_block"), "Missing unsafe block parsing");
-    assert!(source.contains("parse_inline_asm"), "Missing inline asm parsing");
-    assert!(source.contains("parse_do_end_block"), "Missing do..end block parsing");
+    assert!(
+        source.contains("parse_type_params"),
+        "Missing type params parsing"
+    );
+    assert!(
+        source.contains("parse_extension_def"),
+        "Missing extension def parsing"
+    );
+    assert!(
+        source.contains("parse_unsafe_block"),
+        "Missing unsafe block parsing"
+    );
+    assert!(
+        source.contains("parse_inline_asm"),
+        "Missing inline asm parsing"
+    );
+    assert!(
+        source.contains("parse_do_end_block"),
+        "Missing do..end block parsing"
+    );
 
     // Named args support
-    assert!(source.contains("arg_names"), "Missing named argument support");
+    assert!(
+        source.contains("arg_names"),
+        "Missing named argument support"
+    );
 }
 
 /// Verify new lowering pass handles all new node types
@@ -768,13 +825,34 @@ fn sh5_parser_has_new_syntax_constructs() {
 fn sh5_lower_handles_new_nodes() {
     let source = load_source("self_hosted/lower.coral");
 
-    assert!(source.contains("lower_extension_item"), "Missing extension item lowering");
-    assert!(source.contains("lower_pattern_binding_stmt"), "Missing pattern binding lowering");
-    assert!(source.contains("lower_list_comprehension"), "Missing list comprehension lowering");
-    assert!(source.contains("lower_map_comprehension"), "Missing map comprehension lowering");
-    assert!(source.contains("lower_slice_expr"), "Missing slice expression lowering");
-    assert!(source.contains(r#""spread""#), "Missing spread node handling in lowering");
-    assert!(source.contains("arg_names"), "Missing arg_names preservation in lowering");
+    assert!(
+        source.contains("lower_extension_item"),
+        "Missing extension item lowering"
+    );
+    assert!(
+        source.contains("lower_pattern_binding_stmt"),
+        "Missing pattern binding lowering"
+    );
+    assert!(
+        source.contains("lower_list_comprehension"),
+        "Missing list comprehension lowering"
+    );
+    assert!(
+        source.contains("lower_map_comprehension"),
+        "Missing map comprehension lowering"
+    );
+    assert!(
+        source.contains("lower_slice_expr"),
+        "Missing slice expression lowering"
+    );
+    assert!(
+        source.contains(r#""spread""#),
+        "Missing spread node handling in lowering"
+    );
+    assert!(
+        source.contains("arg_names"),
+        "Missing arg_names preservation in lowering"
+    );
 }
 
 /// Verify semantic analysis handles new expression types
@@ -783,15 +861,42 @@ fn sh5_semantic_handles_new_nodes() {
     let source = load_source("self_hosted/semantic.coral");
 
     // check_expression handlers
-    assert!(source.contains(r#""list_comprehension""#), "Missing list comprehension in check_expression");
-    assert!(source.contains(r#""map_comprehension""#), "Missing map comprehension in check_expression");
-    assert!(source.contains(r#""spread""#), "Missing spread in check_expression");
-    assert!(source.contains(r#""slice""#), "Missing slice in check_expression");
-    assert!(source.contains(r#""unsafe""#), "Missing unsafe in check_expression");
-    assert!(source.contains(r#""inline_asm""#), "Missing inline_asm in check_expression");
-    assert!(source.contains(r#""ptr_load""#), "Missing ptr_load in check_expression");
-    assert!(source.contains(r#""pattern_binding""#), "Missing pattern_binding in check_statement");
-    assert!(source.contains(r#""extension""#), "Missing extension in analyze");
+    assert!(
+        source.contains(r#""list_comprehension""#),
+        "Missing list comprehension in check_expression"
+    );
+    assert!(
+        source.contains(r#""map_comprehension""#),
+        "Missing map comprehension in check_expression"
+    );
+    assert!(
+        source.contains(r#""spread""#),
+        "Missing spread in check_expression"
+    );
+    assert!(
+        source.contains(r#""slice""#),
+        "Missing slice in check_expression"
+    );
+    assert!(
+        source.contains(r#""unsafe""#),
+        "Missing unsafe in check_expression"
+    );
+    assert!(
+        source.contains(r#""inline_asm""#),
+        "Missing inline_asm in check_expression"
+    );
+    assert!(
+        source.contains(r#""ptr_load""#),
+        "Missing ptr_load in check_expression"
+    );
+    assert!(
+        source.contains(r#""pattern_binding""#),
+        "Missing pattern_binding in check_statement"
+    );
+    assert!(
+        source.contains(r#""extension""#),
+        "Missing extension in analyze"
+    );
 }
 
 /// Verify codegen handles new expression types
@@ -799,17 +904,47 @@ fn sh5_semantic_handles_new_nodes() {
 fn sh5_codegen_handles_new_nodes() {
     let source = load_source("self_hosted/codegen.coral");
 
-    assert!(source.contains("emit_list_comprehension"), "Missing list comprehension codegen");
-    assert!(source.contains("emit_map_comprehension"), "Missing map comprehension codegen");
+    assert!(
+        source.contains("emit_list_comprehension"),
+        "Missing list comprehension codegen"
+    );
+    assert!(
+        source.contains("emit_map_comprehension"),
+        "Missing map comprehension codegen"
+    );
     assert!(source.contains("emit_slice"), "Missing slice codegen");
-    assert!(source.contains("emit_pattern_binding_stmt"), "Missing pattern binding codegen");
-    assert!(source.contains(r#""list_comprehension""#), "Missing list_comprehension dispatch in emit_expression");
-    assert!(source.contains(r#""map_comprehension""#), "Missing map_comprehension dispatch in emit_expression");
-    assert!(source.contains(r#""spread""#), "Missing spread dispatch in emit_expression");
-    assert!(source.contains(r#""slice""#), "Missing slice dispatch in emit_expression");
-    assert!(source.contains(r#""unsafe""#), "Missing unsafe dispatch in emit_expression");
-    assert!(source.contains(r#""inline_asm""#), "Missing inline_asm dispatch in emit_expression");
-    assert!(source.contains(r#""ptr_load""#), "Missing ptr_load dispatch in emit_expression");
+    assert!(
+        source.contains("emit_pattern_binding_stmt"),
+        "Missing pattern binding codegen"
+    );
+    assert!(
+        source.contains(r#""list_comprehension""#),
+        "Missing list_comprehension dispatch in emit_expression"
+    );
+    assert!(
+        source.contains(r#""map_comprehension""#),
+        "Missing map_comprehension dispatch in emit_expression"
+    );
+    assert!(
+        source.contains(r#""spread""#),
+        "Missing spread dispatch in emit_expression"
+    );
+    assert!(
+        source.contains(r#""slice""#),
+        "Missing slice dispatch in emit_expression"
+    );
+    assert!(
+        source.contains(r#""unsafe""#),
+        "Missing unsafe dispatch in emit_expression"
+    );
+    assert!(
+        source.contains(r#""inline_asm""#),
+        "Missing inline_asm dispatch in emit_expression"
+    );
+    assert!(
+        source.contains(r#""ptr_load""#),
+        "Missing ptr_load dispatch in emit_expression"
+    );
 }
 
 /// Verify compiler pipeline folds new expression types
@@ -817,13 +952,28 @@ fn sh5_codegen_handles_new_nodes() {
 fn sh5_compiler_folds_new_nodes() {
     let source = load_source("self_hosted/compiler.coral");
 
-    assert!(source.contains(r#""list_comprehension""#), "Missing list comprehension in fold_expr");
-    assert!(source.contains(r#""map_comprehension""#), "Missing map comprehension in fold_expr");
-    assert!(source.contains(r#""spread""#), "Missing spread in fold_expr");
+    assert!(
+        source.contains(r#""list_comprehension""#),
+        "Missing list comprehension in fold_expr"
+    );
+    assert!(
+        source.contains(r#""map_comprehension""#),
+        "Missing map comprehension in fold_expr"
+    );
+    assert!(
+        source.contains(r#""spread""#),
+        "Missing spread in fold_expr"
+    );
     assert!(source.contains(r#""slice""#), "Missing slice in fold_expr");
-    assert!(source.contains(r#""pattern_binding""#), "Missing pattern_binding in fold_statement");
+    assert!(
+        source.contains(r#""pattern_binding""#),
+        "Missing pattern_binding in fold_statement"
+    );
     assert!(source.contains(r#""match""#), "Missing match in fold_expr");
-    assert!(source.contains(r#""pipeline""#), "Missing pipeline in fold_expr");
+    assert!(
+        source.contains(r#""pipeline""#),
+        "Missing pipeline in fold_expr"
+    );
 }
 
 /// Verify all self-hosted files still compile to IR after changes
@@ -839,11 +989,7 @@ fn sh5_all_files_compile_to_ir() {
     ];
     for f in &files {
         let ir = compile_to_ir(f);
-        assert!(
-            ir.contains("define"),
-            "{} did not produce valid LLVM IR",
-            f
-        );
+        assert!(ir.contains("define"), "{} did not produce valid LLVM IR", f);
     }
 }
 

@@ -3,7 +3,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use coralc::Compiler;
-use coralc::ast::{Item, Function};
+use coralc::ast::{Function, Item};
 use coralc::lexer;
 use coralc::module_loader::ModuleLoader;
 use coralc::parser::Parser;
@@ -127,12 +127,12 @@ fn extract_symbols(source: &str) -> Vec<SymbolInfo> {
             Item::Store(s) => {
                 symbols.push(SymbolInfo {
                     name: s.name.clone(),
-                    kind: if s.is_actor { SymbolKind::CLASS } else { SymbolKind::STRUCT },
-                    signature: format!(
-                        "{} {}",
-                        if s.is_actor { "actor" } else { "store" },
-                        s.name
-                    ),
+                    kind: if s.is_actor {
+                        SymbolKind::CLASS
+                    } else {
+                        SymbolKind::STRUCT
+                    },
+                    signature: format!("{} {}", if s.is_actor { "actor" } else { "store" }, s.name),
                     span_start: s.span.start,
                     span_end: s.span.end,
                 });

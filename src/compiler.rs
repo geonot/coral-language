@@ -7,8 +7,8 @@ use crate::module_loader::ModuleSource;
 use crate::parser::Parser;
 use crate::semantic;
 use inkwell::context::Context;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -101,11 +101,13 @@ pub fn optimize_module(ir: &str, opt_level: LtoOptLevel) -> Result<String, Strin
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple)
         .map_err(|e| format!("failed to create target from triple: {}", e))?;
+    let cpu = TargetMachine::get_host_cpu_name();
+    let features = TargetMachine::get_host_cpu_features();
     let machine = target
         .create_target_machine(
             &triple,
-            "generic",
-            "",
+            cpu.to_str().unwrap_or("generic"),
+            features.to_str().unwrap_or(""),
             OptimizationLevel::Aggressive,
             inkwell::targets::RelocMode::Default,
             inkwell::targets::CodeModel::Default,
@@ -117,6 +119,8 @@ pub fn optimize_module(ir: &str, opt_level: LtoOptLevel) -> Result<String, Strin
     pass_options.set_loop_vectorization(true);
     pass_options.set_loop_unrolling(true);
     pass_options.set_merge_functions(true);
+    pass_options.set_loop_interleaving(true);
+    pass_options.set_loop_slp_vectorization(true);
 
     module
         .run_passes(opt_level.pipeline_string(), &machine, pass_options)
@@ -145,11 +149,13 @@ pub fn instrument_for_pgo(ir: &str) -> Result<String, String> {
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple)
         .map_err(|e| format!("failed to create target from triple: {}", e))?;
+    let cpu = TargetMachine::get_host_cpu_name();
+    let features = TargetMachine::get_host_cpu_features();
     let machine = target
         .create_target_machine(
             &triple,
-            "generic",
-            "",
+            cpu.to_str().unwrap_or("generic"),
+            features.to_str().unwrap_or(""),
             OptimizationLevel::Default,
             inkwell::targets::RelocMode::Default,
             inkwell::targets::CodeModel::Default,
@@ -190,11 +196,13 @@ pub fn optimize_with_profile(
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple)
         .map_err(|e| format!("failed to create target from triple: {}", e))?;
+    let cpu = TargetMachine::get_host_cpu_name();
+    let features = TargetMachine::get_host_cpu_features();
     let machine = target
         .create_target_machine(
             &triple,
-            "generic",
-            "",
+            cpu.to_str().unwrap_or("generic"),
+            features.to_str().unwrap_or(""),
             OptimizationLevel::Aggressive,
             inkwell::targets::RelocMode::Default,
             inkwell::targets::CodeModel::Default,
@@ -204,6 +212,7 @@ pub fn optimize_with_profile(
     let pass_options = PassBuilderOptions::create();
     pass_options.set_verify_each(false);
     pass_options.set_loop_vectorization(true);
+    pass_options.set_loop_slp_vectorization(true);
     pass_options.set_loop_unrolling(true);
     pass_options.set_merge_functions(true);
 
@@ -440,7 +449,6 @@ impl Compiler {
         }
         Ok(())
     }
-
 }
 
 #[allow(dead_code)]
@@ -868,12 +876,12 @@ impl<'a> ConstFolder<'a> {
                                 } else {
                                     "static assertion failed".to_string()
                                 };
-                                self.errors.borrow_mut().push(
-                                    crate::diagnostics::Diagnostic::new(
+                                self.errors
+                                    .borrow_mut()
+                                    .push(crate::diagnostics::Diagnostic::new(
                                         format!("assert_static: {}", msg),
                                         span,
-                                    ),
-                                );
+                                    ));
                                 return Expression::Unit;
                             }
                             Expression::Bool(true, _) => {
@@ -892,15 +900,15 @@ impl<'a> ConstFolder<'a> {
                     {
                         if let Expression::String(ref pattern, _) = args[0] {
                             if let Err(e) = validate_regex_syntax(pattern) {
-                                self.errors.borrow_mut().push(
-                                    crate::diagnostics::Diagnostic::new(
+                                self.errors
+                                    .borrow_mut()
+                                    .push(crate::diagnostics::Diagnostic::new(
                                         format!(
                                             "invalid regex pattern \"{}\" in call to {}: {}",
                                             pattern, name, e
                                         ),
                                         span,
-                                    ),
-                                );
+                                    ));
                             }
                         }
                     }
@@ -930,10 +938,7 @@ impl<'a> ConstFolder<'a> {
                             let idx = *idx as usize;
                             if idx < s.len() {
                                 if let Some(ch) = s.chars().nth(idx) {
-                                    return Expression::String(
-                                        ch.to_string(),
-                                        span,
-                                    );
+                                    return Expression::String(ch.to_string(), span);
                                 }
                             }
                         }
@@ -954,7 +959,6 @@ impl<'a> ConstFolder<'a> {
                             }
                         }
                     }
-
                 }
 
                 Expression::Call {
@@ -1340,10 +1344,7 @@ impl<'a> ConstFolder<'a> {
                 }
             }
             Expression::Call {
-                callee,
-                args,
-                span,
-                ..
+                callee, args, span, ..
             } => {
                 if let Expression::Identifier(_name, _) = callee.as_ref() {
                     let eval_args: Vec<_> = args

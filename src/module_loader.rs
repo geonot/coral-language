@@ -148,7 +148,6 @@ impl ModuleLoader {
         for line in source.lines() {
             let trimmed = line.trim();
 
-            // Function declarations: *name(...) or *name[T](...) 
             if trimmed.starts_with('*') {
                 let rest = &trimmed[1..];
                 if let Some(end) = rest.find(|c: char| c == '(' || c == '[') {
@@ -159,7 +158,6 @@ impl ModuleLoader {
                 }
             }
 
-            // Type declarations
             if trimmed.starts_with("type ") {
                 let rest = trimmed[5..].trim();
                 if let Some(end) = rest.find(|c: char| !c.is_alphanumeric() && c != '_') {
@@ -253,7 +251,6 @@ impl ModuleLoader {
     }
 
     pub fn load_modules(&mut self, entry: &Path) -> anyhow::Result<Vec<ModuleSource>> {
-        // Prune cache entries for files that no longer exist on disk (P2-6)
         self.cache.retain(|path, _| path.exists());
         self.module_info.retain(|path, _| path.exists());
 
@@ -649,7 +646,6 @@ impl ModuleLoader {
     }
 
     fn resolve_module(&self, current_file: &Path, module: &str) -> anyhow::Result<PathBuf> {
-        // Reject module names containing path traversal components
         if module.contains("..") || module.starts_with('/') || module.starts_with('\\') {
             bail!(
                 "invalid module name `{}`: module names must not contain path traversal sequences",
@@ -671,7 +667,6 @@ impl ModuleLoader {
             candidates.push(std_path.join(format!("{}.coral", inner)));
         }
 
-        // Build set of allowed root directories for validation
         let allowed_roots: Vec<PathBuf> = {
             let mut roots = self.std_paths.clone();
             if let Some(parent) = current_file.parent() {
@@ -687,7 +682,6 @@ impl ModuleLoader {
 
         for candidate in candidates {
             if candidate.exists() {
-                // Canonicalize and verify the resolved path falls within allowed roots
                 let canonical = fs::canonicalize(&candidate).unwrap_or(candidate);
                 let is_safe = allowed_roots.iter().any(|root| {
                     if let Ok(canonical_root) = fs::canonicalize(root) {
